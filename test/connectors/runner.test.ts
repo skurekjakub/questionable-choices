@@ -250,4 +250,24 @@ describe('ClaudeTmuxRunner.sessionDir', () => {
       join(dataDir, 'sessions', 'qc-DOC-1-implement'),
     );
   });
+
+  it('writes where an injected resolver says, so the store reads the same files', async () => {
+    const runner = new ClaudeTmuxRunner({
+      config: RUNNER_CONFIG,
+      port: 4400,
+      dataDir,
+      home,
+      sessionDir: (sessionId) => join(dataDir, 'elsewhere', sessionId),
+    });
+
+    const dir = await runner.writeSessionFiles({
+      record: makeRecord(),
+      needsBootstrap: false,
+      bootstrap: null,
+      resumeSessionId: null,
+    });
+
+    expect(dir).toBe(join(dataDir, 'elsewhere', 'qc-DOC-1-implement'));
+    expect(await readFile(join(dir, 'run.sh'), 'utf8')).toContain(dir);
+  });
 });

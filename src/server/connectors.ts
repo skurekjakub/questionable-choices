@@ -58,6 +58,8 @@ export function buildWorkspaceRuntime(
  *
  * @param config - Validated configuration.
  * @param home - Owner's home directory; the runner reads their own settings from it.
+ * @param sessionDir - Resolver for a session's generated-file directory, so the
+ *   runner writes where the store reads.
  * @param env - Environment the named credential variables are read from.
  * @returns The runner, the repo connectors and one runtime per workspace.
  * @throws {Error} When a configured connector type has no implementation.
@@ -65,6 +67,7 @@ export function buildWorkspaceRuntime(
 export function buildConnectors(
   config: Config,
   home: string,
+  sessionDir: (sessionId: string) => string,
   env: Record<string, string | undefined> = process.env,
 ): Connectors {
   const repos = new Map<string, Repo>(
@@ -78,6 +81,7 @@ export function buildConnectors(
     port: config.port,
     dataDir: config.dataDir,
     home,
+    sessionDir,
   });
   return { runner, repos, workspaces };
 }

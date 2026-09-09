@@ -76,7 +76,9 @@ async function main(): Promise<void> {
   const store = new Store(config.dataDir);
   await store.load();
 
-  const { runner, repos, workspaces } = buildConnectors(config, home);
+  const { runner, repos, workspaces } = buildConnectors(config, home, (sessionId) =>
+    store.sessionDir(sessionId),
+  );
   const manager = new SessionManager({
     config,
     configPath,

@@ -162,8 +162,8 @@ export interface StatuslineContext {
   /** Port the dashboard listens on. */
   port: number;
   /**
-   * The owner's own status-line command, captured at session start, or null
-   * when they have none and the TUI should show nothing.
+   * The owner's own status-line command, as it was read when the runner was
+   * built, or null when they have none and the TUI should show nothing.
    */
   chainedCommand: string | null;
 }

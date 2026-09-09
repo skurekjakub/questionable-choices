@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Hono } from 'hono';
@@ -47,6 +47,20 @@ async function post(app: Hono, path: string, body?: unknown): Promise<Response> 
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body ?? {}),
   });
+}
+
+/**
+ * Reads one session's current state through the issue drawer.
+ *
+ * @param app - App under test.
+ * @param sessionId - Session to look up.
+ * @returns The state the record is in, or undefined when it is not listed.
+ */
+async function stateOf(app: Hono, sessionId: string): Promise<string | undefined> {
+  const detail = (await (
+    await app.request('/api/workspaces/ws/issues/DOC-1')
+  ).json()) as IssueDetailResponse;
+  return detail.sessions.find((record) => record.id === sessionId)?.state;
 }
 
 describe('HTTP API', () => {
@@ -237,9 +251,13 @@ describe('HTTP API', () => {
 
   it('runs every session action', async () => {
     await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+    await post(app, '/api/hooks/qc-DOC-1-implement/UserPromptSubmit', { prompt: 'go' });
+    expect(await stateOf(app, 'qc-DOC-1-implement')).toBe('working');
 
     const interrupted = await post(app, `/api/sessions/qc-DOC-1-implement/interrupt`);
     expect(interrupted.status).toBe(200);
+    expect(((await interrupted.json()) as SessionRecord).state).toBe('idle');
+    expect(runner.interrupted).toEqual(['qc-DOC-1-implement']);
 
     const marked = (await (
       await post(app, '/api/sessions/qc-DOC-1-implement/mark-done')
@@ -283,5 +301,40 @@ describe('HTTP API', () => {
     const response = await app.request('/api/nothing');
     expect(response.status).toBe(404);
     expect(((await response.json()) as ErrorResponse).error).toContain('/api/nothing');
+  });
+
+  describe('with the built SPA served', () => {
+    let spa: Hono;
+
+    beforeEach(async () => {
+      const webRoot = join(dir, 'web');
+      await mkdir(webRoot, { recursive: true });
+      await writeFile(join(webRoot, 'index.html'), '<!doctype html>shell', 'utf8');
+      await writeFile(join(webRoot, 'app.js'), 'console.log(1);', 'utf8');
+      spa = createApp({ manager, logger: new RecordingLogger(), webRoot });
+    });
+
+    it('still answers a JSON 404 for an unrouted API path', async () => {
+      const response = await spa.request('/api/nothing');
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get('content-type')).toContain('application/json');
+      expect(((await response.json()) as ErrorResponse).error).toContain('/api/nothing');
+    });
+
+    it('still answers a JSON 404 for an unrouted WebSocket path', async () => {
+      const response = await spa.request('/ws/nothing');
+
+      expect(response.status).toBe(404);
+      expect(((await response.json()) as ErrorResponse).error).toContain('/ws/nothing');
+    });
+
+    it('serves a real asset and falls back to the shell on a deep link', async () => {
+      expect(await (await spa.request('/app.js')).text()).toBe('console.log(1);');
+
+      const deep = await spa.request('/session/qc-DOC-1-implement');
+      expect(deep.status).toBe(200);
+      expect(await deep.text()).toContain('shell');
+    });
   });
 });

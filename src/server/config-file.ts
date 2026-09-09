@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { ConfigError, parseConfig, type ParseConfigOptions } from '../core/config.js';
 import type { Config } from '../core/types.js';
+import { messageOf } from './util.js';
 
 /**
  * Reads and validates a configuration file.
@@ -19,7 +20,7 @@ export function loadConfig(path: string, options: ParseConfigOptions = {}): Conf
     text = readFileSync(path, 'utf8');
   } catch (cause) {
     throw new ConfigError(`Cannot read config at ${path}`, [
-      { path: '', message: cause instanceof Error ? cause.message : String(cause) },
+      { path: '', message: messageOf(cause) },
     ]);
   }
 
@@ -28,7 +29,7 @@ export function loadConfig(path: string, options: ParseConfigOptions = {}): Conf
     document = JSON.parse(text) as unknown;
   } catch (cause) {
     throw new ConfigError(`Config at ${path} is not valid JSON`, [
-      { path: '', message: cause instanceof Error ? cause.message : String(cause) },
+      { path: '', message: messageOf(cause) },
     ]);
   }
 

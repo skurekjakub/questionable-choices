@@ -111,6 +111,12 @@ export interface ClaudeTmuxRunnerOptions {
   dataDir: string;
   /** Owner's home directory, read once for their own status-line command. */
   home: string;
+  /**
+   * Resolves the directory one session's generated files live in. Pass the
+   * store's own resolver so both sides read and write the same directory;
+   * defaults to `<dataDir>/sessions/<id>`.
+   */
+  sessionDir?: ((sessionId: string) => string) | undefined;
 }
 
 /**
@@ -163,21 +169,23 @@ export class ClaudeTmuxRunner implements Runner {
 
   private readonly config: RunnerConfig;
   private readonly port: number;
-  private readonly dataDir: string;
+  private readonly resolveSessionDir: (sessionId: string) => string;
   private readonly ownerStatuslineCommand: string | null;
 
   /**
    * Builds a runner for one dashboard instance.
    *
-   * The owner's status-line command is read once here: the generated override
-   * replaces theirs, so the script has to re-invoke whatever it was at start.
+   * The owner's status-line command is read once here and reused by every
+   * generated script, so an edit to their settings needs a restart to apply.
    *
    * @param options - Runner settings, dashboard port, data directory and home.
    */
   constructor(options: ClaudeTmuxRunnerOptions) {
     this.config = options.config;
     this.port = options.port;
-    this.dataDir = options.dataDir;
+    const dataDir = options.dataDir;
+    this.resolveSessionDir =
+      options.sessionDir ?? ((sessionId) => join(dataDir, 'sessions', sessionId));
     this.ownerStatuslineCommand = readOwnerStatuslineCommand(options.home);
   }
 
@@ -185,10 +193,10 @@ export class ClaudeTmuxRunner implements Runner {
    * Directory holding one session's generated files.
    *
    * @param sessionId - Id of the session.
-   * @returns The absolute directory path.
+   * @returns The absolute directory path; it may not exist yet.
    */
   sessionDir(sessionId: string): string {
-    return join(this.dataDir, 'sessions', sessionId);
+    return this.resolveSessionDir(sessionId);
   }
 
   /**
