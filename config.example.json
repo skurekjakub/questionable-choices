@@ -17,7 +17,7 @@
     ],
     "defaultModel": "claude-fable-5-1",
     "defaultEffort": "high",
-    "defaultPermissionMode": "acceptEdits"
+    "defaultPermissionMode": "bypassPermissions"
   },
   "connectors": {
     "kentico-jira": {
@@ -49,7 +49,6 @@
           "description": "QA-verify the issue's branch with the repo's test-issue skill.",
           "isolation": "issue-worktree",
           "primaryFor": ["review"],
-          "defaults": { "permissionMode": "acceptEdits" },
           "promptTemplate": "Use the test-issue skill to verify {{key}} — {{summary}}\n{{url}}\n\nVerify on the current branch {{branch}} in this worktree ({{worktree}}), not on main: the change is not merged yet. Use the \"How to test\" comment on {{key}} as the test plan when one exists, and post the result comment on the issue as the skill prescribes."
         }
       ]

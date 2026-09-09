@@ -317,6 +317,7 @@ export class ClaudeTmuxRunner implements Runner {
 }
 
 export {
+  BYPASS_PERMISSIONS_FLAG,
   HOOK_TIMEOUT_SECONDS,
   NOTIFICATION_MATCHER,
   STATUSLINE_EVENT,

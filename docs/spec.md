@@ -155,7 +155,11 @@ repo path that is not a git checkout.
 Valid `effort`: low, medium, high, xhigh, max. Valid `permissionMode`:
 acceptEdits, auto, bypassPermissions, manual, dontAsk, plan, plus `default`
 meaning "pass no flag". These are the values `claude --help` 2.1.266 lists;
-the picker offers exactly these.
+the picker offers exactly these. `bypassPermissions` is launched as
+`--dangerously-skip-permissions`, not as `--permission-mode
+bypassPermissions`: only the flag skips the prompts an unattended session has
+nobody to answer. It is the shipped default, and the picker can still change
+it per session.
 
 ## 5. Session lifecycle and state machine
 
@@ -317,7 +321,7 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
      open for inspection).
    - POST `claude-start` with `{}` on a fresh start and `{"mode":"resume"}` on
      a resume, so the record's run list says which it was; `exec`-less call of
-     `claude --settings <dir>/settings.json --name <KEY> [--model] [--effort] [--permission-mode] "$(cat prompt.txt)"`
+     `claude --settings <dir>/settings.json --name <KEY> [--model] [--effort] [--permission-mode | --dangerously-skip-permissions] "$(cat prompt.txt)"`
      (or `--resume <id>` instead of the prompt on resume).
    - POST `claude-exit` with the exit code; `exec bash`.
      The record is persisted before tmux is invoked so a crash between the two

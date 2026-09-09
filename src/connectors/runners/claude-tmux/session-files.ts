@@ -221,6 +221,14 @@ export interface RunScriptContext {
 }
 
 /**
+ * Flag that really bypasses every permission prompt.
+ *
+ * `--permission-mode bypassPermissions` is accepted but still stops on the
+ * prompts an unattended session has nobody to answer.
+ */
+export const BYPASS_PERMISSIONS_FLAG = '--dangerously-skip-permissions';
+
+/**
  * Builds the argument list `claude` is launched with, without the prompt.
  *
  * @param context - Everything the launcher knows about the session.
@@ -237,7 +245,9 @@ export function claudeArgv(context: RunScriptContext): string[] {
     '--effort',
     context.effort,
   ];
-  if (context.permissionMode !== 'default') {
+  if (context.permissionMode === 'bypassPermissions') {
+    argv.push(BYPASS_PERMISSIONS_FLAG);
+  } else if (context.permissionMode !== 'default') {
     argv.push('--permission-mode', context.permissionMode);
   }
   if (context.resumeSessionId !== null) {

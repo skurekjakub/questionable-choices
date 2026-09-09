@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BYPASS_PERMISSIONS_FLAG,
   HOOK_TIMEOUT_SECONDS,
   NOTIFICATION_MATCHER,
   buildRunScript,
@@ -156,6 +157,14 @@ describe('claudeArgv', () => {
     expect(claudeArgv({ ...RUN_CONTEXT, permissionMode: 'default' })).not.toContain(
       '--permission-mode',
     );
+  });
+
+  it('bypasses permissions with the flag that really skips the prompts', () => {
+    const argv = claudeArgv({ ...RUN_CONTEXT, permissionMode: 'bypassPermissions' });
+
+    expect(argv).toContain(BYPASS_PERMISSIONS_FLAG);
+    expect(argv).not.toContain('--permission-mode');
+    expect(argv).not.toContain('bypassPermissions');
   });
 
   it('resumes by claude session id', () => {
