@@ -11,7 +11,7 @@ description: >
   `npm run dev` fails or the board is empty, needs to add a Jira connector or a
   repo to the config, or hits errors about node-pty, tmux, curl, JIRA_*
   variables, or a missing config.json — even if they never say "bootstrap".
-argument-hint: "[optional: what is failing]"
+argument-hint: '[optional: what is failing]'
 ---
 
 # Bootstrap the environment
@@ -39,17 +39,17 @@ bash .claude/skills/bootstrap-environment/scripts/preflight.sh
 It prints one row per requirement with `ok` / `missing` / `warn` and the
 reason. Requirements and what to do when one is missing:
 
-| Check | Why the dashboard needs it | Fix |
-|---|---|---|
-| node ≥ 22 | ESM + `node:` built-ins the server uses | nvm / distro package |
-| npm ≥ 10 | `allowScripts` in package.json (npm 12 blocks install scripts by default) | comes with node |
-| tmux ≥ 3.2 | sessions live in tmux; `-e` and `window-size latest` need 3.2+ | `apt install tmux` |
-| claude on PATH | the runner execs it; also needs to be logged in | `npm i -g @anthropic-ai/claude-code`, then `claude` once to log in |
-| git | worktrees | distro package |
-| curl | every hook and the statusline script POST with it | distro package |
-| build tools (python3, make, g++) | node-pty compiles a native module when no prebuild matches | `apt install build-essential python3` |
-| editor launcher | "Open in VS Code" button | see Phase 2 |
-| `~/.claude/settings.json` readable | the runner chains the user's statusline command from it | optional; absent means no chained statusline |
+| Check                              | Why the dashboard needs it                                                | Fix                                                                |
+| ---------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| node ≥ 22                          | ESM + `node:` built-ins the server uses                                   | nvm / distro package                                               |
+| npm ≥ 10                           | `allowScripts` in package.json (npm 12 blocks install scripts by default) | comes with node                                                    |
+| tmux ≥ 3.2                         | sessions live in tmux; `-e` and `window-size latest` need 3.2+            | `apt install tmux`                                                 |
+| claude on PATH                     | the runner execs it; also needs to be logged in                           | `npm i -g @anthropic-ai/claude-code`, then `claude` once to log in |
+| git                                | worktrees                                                                 | distro package                                                     |
+| curl                               | every hook and the statusline script POST with it                         | distro package                                                     |
+| build tools (python3, make, g++)   | node-pty compiles a native module when no prebuild matches                | `apt install build-essential python3`                              |
+| editor launcher                    | "Open in VS Code" button                                                  | see Phase 2                                                        |
+| `~/.claude/settings.json` readable | the runner chains the user's statusline command from it                   | optional; absent means no chained statusline                       |
 
 Do not skip the build-tools row on WSL: node-pty's prebuild sometimes fails
 to load there and falls back to compiling, which is where a missing `g++`
@@ -93,7 +93,7 @@ Never write credentials into it; it names environment variables.
    questions, the defaults, and the per-platform editor commands (WSL uses
    `cmd.exe /c code --remote wsl+<distro>`; native Linux and macOS use
    `code`).
-3. `connectors`: a Jira site and the two env-var *names*. Check the variables
+3. `connectors`: a Jira site and the two env-var _names_. Check the variables
    resolve in the shell that will run the server:
    ```bash
    env | grep -E '^(JIRA|ATLASSIAN)' | sed 's/=.*/=<set>/'
