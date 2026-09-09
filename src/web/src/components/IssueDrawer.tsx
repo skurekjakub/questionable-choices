@@ -6,15 +6,22 @@ import type {
   SessionAction,
 } from '../../../core/api.js';
 import {
-  ApiError,
   errorMessage,
   getIssue,
+  isForceableRemoval,
   openEditor,
   removeWorktree,
   sessionAction,
 } from '../api.js';
-import { timeInState } from '../format.js';
-import { LIVE_STATES, STATE_LABELS, type SessionRecord } from '../model.js';
+import { attachCommand, timeInState, typeGlyph } from '../format.js';
+import { useFocusTrap } from '../hooks/useFocusTrap.js';
+import {
+  LIVE_STATES,
+  STATE_LABELS,
+  type Pending,
+  type SessionCache,
+  type SessionState,
+} from '../model.js';
 import { CacheReadout } from './CacheReadout.js';
 import { LabelChips, StatusChip } from './Chips.js';
 import { CopyButton } from './CopyButton.js';
@@ -22,39 +29,96 @@ import { CloseIcon, EditorIcon, ExternalIcon } from './Icons.js';
 import { Lamp } from './Lamp.js';
 
 /**
- * Builds the shell command that attaches a terminal to a session.
- *
- * @param card - Card the session belongs to, which may already carry the command.
- * @param sessionId - Id of the session to attach to.
- * @returns The command as the server reported it, or the tmux default.
+ * One session as the drawer renders it: the board's live view of it, over the
+ * fields only the loaded detail carries.
  */
-function attachCommand(card: Card, sessionId: string): string {
-  const known = card.sessions.find((session) => session.id === sessionId);
-  return known?.attachCommand ?? `tmux attach -t ${sessionId}`;
+interface DrawerSession {
+  /** Id of the session. */
+  id: string;
+  /** Playbook that produced its prompt. */
+  playbookId: string;
+  /** Lifecycle state, from the board when the board still lists it. */
+  state: SessionState;
+  /** ISO timestamp of the last state change. */
+  stateSince: string;
+  /** What it is waiting for, or null. */
+  pending: Pending | null;
+  /** Prompt-cache state, or null when none was reported. */
+  cache: SessionCache | null;
+  /** Shell command that attaches a terminal to it. */
+  attachCommand: string;
+  /** Whether the owner has marked its work done. */
+  done: boolean;
+  /** Claude session id, or null when it never reported one. */
+  claudeSessionId: string | null;
 }
 
 /**
- * Renders the actions available on one session record.
+ * Merges the board's live sessions over the records the detail load returned,
+ * so the rows keep ticking while the drawer stays open.
+ *
+ * @param card - Card the drawer was opened from, carrying the live sessions.
+ * @param detail - Loaded issue detail, or null before it arrives.
+ * @returns One row per session, newest first.
+ */
+function drawerSessions(card: Card, detail: IssueDetailResponse | null): DrawerSession[] {
+  const live = new Map(card.sessions.map((session) => [session.id, session]));
+  const rows: DrawerSession[] = [];
+  for (const record of detail?.sessions ?? []) {
+    const current = live.get(record.id);
+    live.delete(record.id);
+    rows.push({
+      id: record.id,
+      playbookId: record.playbookId,
+      state: current?.state ?? record.state,
+      stateSince: current?.stateSince ?? record.stateSince,
+      pending: current?.pending ?? record.pending,
+      cache: current?.cache ?? record.cache,
+      attachCommand: attachCommand(record.id, current?.attachCommand),
+      done: current?.done ?? record.done,
+      claudeSessionId: record.claudeSessionId,
+    });
+  }
+  // A session started after the detail loaded is on the board and nowhere else;
+  // it has no Claude session id yet, so resuming it stays disabled.
+  for (const session of live.values()) {
+    rows.unshift({
+      id: session.id,
+      playbookId: session.playbookId,
+      state: session.state,
+      stateSince: session.stateSince,
+      pending: session.pending,
+      cache: session.cache,
+      attachCommand: attachCommand(session.id, session.attachCommand),
+      done: session.done,
+      claudeSessionId: null,
+    });
+  }
+  return rows;
+}
+
+/**
+ * Renders the actions available on one session.
  *
  * @param props - Component props.
- * @param props.record - Session to act on.
+ * @param props.session - Session to act on.
  * @param props.busy - Whether an action is already in flight.
  * @param props.onAction - Called with the action the owner picked.
  * @param props.onOpen - Called when the owner wants the session's terminal.
  * @returns The action row.
  */
 function SessionActions({
-  record,
+  session,
   busy,
   onAction,
   onOpen,
 }: {
-  record: SessionRecord;
+  session: DrawerSession;
   busy: boolean;
   onAction: (action: SessionAction) => void;
   onOpen: () => void;
 }): JSX.Element {
-  const live = LIVE_STATES.includes(record.state);
+  const live = LIVE_STATES.includes(session.state);
   return (
     <div className="session-block-actions">
       <button type="button" className="btn" onClick={onOpen}>
@@ -79,15 +143,23 @@ function SessionActions({
       <button
         type="button"
         className="btn"
-        disabled={busy || live || record.claudeSessionId === null}
+        disabled={busy || live || session.claudeSessionId === null}
         title={
-          record.claudeSessionId === null
+          session.claudeSessionId === null
             ? 'This session never reported a Claude session id'
             : undefined
         }
         onClick={() => onAction('resume')}
       >
         Resume
+      </button>
+      <button
+        type="button"
+        className="btn"
+        disabled={busy}
+        onClick={() => onAction(session.done ? 'unmark-done' : 'mark-done')}
+      >
+        {session.done ? 'Unmark done' : 'Mark done'}
       </button>
       <button
         type="button"
@@ -133,6 +205,7 @@ export function IssueDrawer({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [forceTarget, setForceTarget] = useState<string | null>(null);
+  const drawer = useFocusTrap<HTMLElement>(onClose);
 
   const load = useCallback(() => {
     getIssue(workspaceId, card.issue.key)
@@ -145,16 +218,8 @@ export function IssueDrawer({
 
   useEffect(load, [load]);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
-
   const worktreePath = detail?.worktreePath ?? card.worktreePath;
-  const sessions = detail?.sessions ?? [];
+  const sessions = drawerSessions(card, detail);
   const newest = sessions[0] ?? null;
 
   const runAction = (sessionId: string, action: SessionAction): void => {
@@ -178,9 +243,7 @@ export function IssueDrawer({
       })
       .catch((cause: unknown) => {
         setError(errorMessage(cause));
-        // A 409 is git refusing a dirty tree, which the owner can override; any
-        // other status is a refusal that forcing would not change.
-        setForceTarget(cause instanceof ApiError && cause.status === 409 ? sessionId : null);
+        setForceTarget(isForceableRemoval(cause) ? sessionId : null);
       })
       .finally(() => setBusy(false));
   };
@@ -195,13 +258,17 @@ export function IssueDrawer({
         role="dialog"
         aria-modal="true"
         aria-label={`${card.issue.key} details`}
+        tabIndex={-1}
+        ref={drawer}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="drawer-head">
           <div>
             <div className="card-ident">
               <span className="card-key">{card.issue.key}</span>
-              <span className="type-glyph">{card.issue.type}</span>
+              <span className="type-glyph" title={card.issue.type}>
+                {typeGlyph(card.issue.type)}
+              </span>
             </div>
             <h2>{card.issue.summary}</h2>
           </div>
@@ -212,7 +279,11 @@ export function IssueDrawer({
         </div>
 
         <div className="drawer-body">
-          {error === null ? null : <p className="error-note">{error}</p>}
+          {error === null ? null : (
+            <p className="error-note" role="alert">
+              {error}
+            </p>
+          )}
 
           <div className="chip-row">
             <StatusChip status={card.issue.status} category={card.issue.statusCategory} />
@@ -254,7 +325,7 @@ export function IssueDrawer({
                   </button>
                 </div>
                 {newest === null ? null : (
-                  <div className="session-block-actions" style={{ marginTop: 'var(--sp-2)' }}>
+                  <div className="session-block-actions">
                     <button
                       type="button"
                       className="btn btn-danger"
@@ -285,32 +356,31 @@ export function IssueDrawer({
             {sessions.length === 0 ? (
               <p className="empty">No sessions have run for this issue.</p>
             ) : (
-              sessions.map((record) => (
-                <div className="session-block" key={record.id}>
+              sessions.map((session) => (
+                <div className="session-block" key={session.id}>
                   <div className="session-block-head">
-                    <Lamp state={record.state} />
-                    <span className="session-playbook">{labelFor(record.playbookId)}</span>
-                    <span>{STATE_LABELS[record.state]}</span>
-                    <span className="session-time">{timeInState(record.stateSince, nowMs)}</span>
-                    <CacheReadout cache={record.cache} nowMs={nowMs} />
+                    <Lamp state={session.state} />
+                    <span className="session-playbook">{labelFor(session.playbookId)}</span>
+                    <span>{STATE_LABELS[session.state]}</span>
+                    {session.done ? <span className="session-done">done</span> : null}
+                    <span className="session-time">{timeInState(session.stateSince, nowMs)}</span>
+                    <CacheReadout cache={session.cache} nowMs={nowMs} />
                   </div>
-                  {record.pending === null ? null : (
-                    <p className="description" style={{ fontSize: 'var(--fs-control)' }}>
-                      {record.pending.summary}
-                    </p>
+                  {session.pending === null ? null : (
+                    <p className="description">{session.pending.summary}</p>
                   )}
                   <div className="path-row">
-                    <code className="path">{attachCommand(card, record.id)}</code>
+                    <code className="path">{session.attachCommand}</code>
                     <CopyButton
-                      value={attachCommand(card, record.id)}
-                      label={`Copy the attach command for ${record.id}`}
+                      value={session.attachCommand}
+                      label={`Copy the attach command for ${session.id}`}
                     />
                   </div>
                   <SessionActions
-                    record={record}
+                    session={session}
                     busy={busy}
-                    onAction={(action) => runAction(record.id, action)}
-                    onOpen={() => onOpenSession(record.id)}
+                    onAction={(action) => runAction(session.id, action)}
+                    onOpen={() => onOpenSession(session.id)}
                   />
                 </div>
               ))

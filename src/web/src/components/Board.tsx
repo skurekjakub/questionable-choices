@@ -1,4 +1,4 @@
-import { useState, type JSX } from 'react';
+import { useCallback, useRef, useState, type JSX } from 'react';
 import type { BoardView } from '../../../core/api.js';
 import { deleteWorkspace, errorMessage, openEditor, setFlags } from '../api.js';
 import type { PublicConfigResponse } from '../../../core/api.js';
@@ -66,6 +66,18 @@ export function Board({
   const [actionError, setActionError] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
+  const [visibleColumn, setVisibleColumn] = useState(0);
+  const columns = useRef<HTMLDivElement>(null);
+
+  // Below the breakpoint the lanes are a snapping strip, so which one is on
+  // screen is read back off the scroll offset rather than tracked in state.
+  const onColumnsScroll = useCallback(() => {
+    const strip = columns.current;
+    const lanes = board?.columns.length ?? 0;
+    if (strip === null || lanes === 0) return;
+    const step = strip.scrollWidth / lanes;
+    setVisibleColumn(Math.min(lanes - 1, Math.max(0, Math.round(strip.scrollLeft / step))));
+  }, [board?.columns.length]);
 
   const workspaces = config?.workspaces ?? [];
   const active = workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -130,26 +142,47 @@ export function Board({
         onRefresh={onRefresh}
       />
 
-      {error === null ? null : <p className="banner">{error}</p>}
-      {board?.sourceError == null ? null : (
-        <p className="banner">Showing the last good list. {board.sourceError}</p>
+      {error === null ? null : (
+        <p className="banner" role="alert">
+          {error}
+        </p>
       )}
-      {actionError === null ? null : <p className="banner">{actionError}</p>}
+      {board?.sourceError == null ? null : (
+        <p className="banner" role="alert">
+          Showing the last good list. {board.sourceError}
+        </p>
+      )}
+      {actionError === null ? null : (
+        <p className="banner" role="alert">
+          {actionError}
+        </p>
+      )}
 
       {board === null ? (
         <p className="empty">Loading the board.</p>
       ) : (
-        <div className="columns">
-          {board.columns.map((column) => (
-            <Column
-              key={column.id}
-              column={column}
-              playbooks={board.playbooks}
-              nowMs={nowMs}
-              handlers={handlers}
-            />
-          ))}
-        </div>
+        <>
+          <div className="columns" ref={columns} onScroll={onColumnsScroll}>
+            {board.columns.map((column) => (
+              <Column
+                key={column.id}
+                column={column}
+                playbooks={board.playbooks}
+                nowMs={nowMs}
+                handlers={handlers}
+              />
+            ))}
+          </div>
+          <p className="columns-indicator">
+            <span className="columns-dots" aria-hidden="true">
+              {board.columns.map((column, index) => (
+                <span key={column.id} data-current={index === visibleColumn} />
+              ))}
+            </span>
+            {board.columns[visibleColumn]?.name ?? ''} — {visibleColumn + 1} of{' '}
+            {board.columns.length}
+          </p>
+        </>
       )}
 
       {overlay?.kind === 'drawer' && overlayCard !== null && workspaceId !== null ? (

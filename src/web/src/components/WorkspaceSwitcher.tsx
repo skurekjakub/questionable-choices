@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type JSX } from 'react';
+import { useCallback, useState, type JSX } from 'react';
 import type { WorkspaceSummary } from '../../../core/api.js';
+import { useMenuKeys } from '../hooks/useMenuKeys.js';
 
 /**
  * Lists the epics the board can switch between, and the two actions that
@@ -27,25 +28,9 @@ export function WorkspaceSwitcher({
   onRemove: () => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const anchor = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpen(false), []);
+  const { anchor, panel } = useMenuKeys(open, close);
   const active = workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent): void => {
-      if (anchor.current?.contains(event.target as Node) === true) return;
-      setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false);
-    };
-    document.addEventListener('mousedown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [open]);
 
   return (
     <div className="switcher" ref={anchor}>
@@ -61,13 +46,13 @@ export function WorkspaceSwitcher({
         <span className="epic">{active?.epic ?? ''}</span>
       </button>
       {open ? (
-        <div className="switcher-panel" role="menu">
+        <div className="switcher-panel" role="menu" aria-label="Workspace" ref={panel}>
           {workspaces.map((workspace) => (
             <button
               key={workspace.id}
               type="button"
-              role="menuitem"
-              aria-current={workspace.id === workspaceId}
+              role="menuitemradio"
+              aria-checked={workspace.id === workspaceId}
               onClick={() => {
                 setOpen(false);
                 onSelect(workspace.id);

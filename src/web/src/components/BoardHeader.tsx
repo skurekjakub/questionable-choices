@@ -63,13 +63,17 @@ export function BoardHeader({
       <span className="header-spacer" />
 
       <div className="header-meta">
-        {needsYou > 0 ? (
-          <span className="needs-you-badge">
-            <span className="count">{needsYou}</span> waiting for you
-          </span>
-        ) : null}
+        <span role="status">
+          {needsYou > 0 ? (
+            <span className="needs-you-badge">
+              <span className="count">{needsYou}</span> waiting for you
+            </span>
+          ) : null}
+        </span>
         <span>{board === null ? 'loading' : syncedAgo(board.fetchedAt, nowMs)}</span>
-        {connected ? null : <span title="Reconnecting to the server">stream offline</span>}
+        <span role="status">
+          {connected ? null : <span title="Reconnecting to the server">stream offline</span>}
+        </span>
         <span className="header-rule" />
         <button
           type="button"

@@ -270,18 +270,46 @@ export async function removeWorktree(
 }
 
 /**
- * Reduces an unknown thrown value to a message worth showing the owner.
+ * Whether a refused worktree removal is one that forcing would get past.
+ *
+ * Only git's own refusal of a dirty checkout is forceable, and it is the one
+ * refusal whose detail names the flag. A live session still working in the
+ * checkout, or a path that is the repo's main checkout, are refused with the
+ * same 409 and forcing changes neither.
+ *
+ * @param error - Value caught from {@link removeWorktree}.
+ * @returns True when offering to remove anyway is honest.
+ */
+export function isForceableRemoval(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 409) return false;
+  return error.detail !== null && error.detail.includes('--force');
+}
+
+/**
+ * Reduces an unknown thrown value to the sentence that names the refusal,
+ * leaving out the per-field problems a form places next to its own fields.
  *
  * @param error - Value caught from a failed call.
  * @returns The server's wording plus its detail, or a generic fallback.
  */
-export function errorMessage(error: unknown): string {
+export function errorHeadline(error: unknown): string {
   if (error instanceof ApiError) {
-    const lines = [error.message];
-    if (error.detail !== null) lines.push(error.detail);
-    for (const issue of error.issues) lines.push(`${issue.path}: ${issue.message}`);
-    return lines.join('\n');
+    return error.detail === null ? error.message : `${error.message}\n${error.detail}`;
   }
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/**
+ * Reduces an unknown thrown value to a message worth showing the owner.
+ *
+ * @param error - Value caught from a failed call.
+ * @returns The server's wording, its detail, and every field problem it named.
+ */
+export function errorMessage(error: unknown): string {
+  const lines = [errorHeadline(error)];
+  if (error instanceof ApiError) {
+    for (const issue of error.issues) lines.push(`${issue.path}: ${issue.message}`);
+  }
+  return lines.join('\n');
 }

@@ -39,7 +39,12 @@ function railTone(card: CardModel): LampTone | null {
 }
 
 /**
- * Renders one session row: what it runs, where it is, and its cache clock.
+ * Renders one session row: what it runs, where it is, its cache clock, and —
+ * while it is blocked on the owner — what it is waiting for, so a full
+ * needs-you column can be triaged without opening every card.
+ *
+ * A board frame carries no assistant snippet, so a session waiting without a
+ * pending summary (an idle one, usually) shows no second line.
  *
  * @param props - Component props.
  * @param props.session - Session to render.
@@ -61,12 +66,17 @@ function SessionRow({
 }): JSX.Element {
   return (
     <button type="button" className="session-row card-open" onClick={onOpen}>
-      <Lamp state={session.state} />
-      <span className="session-playbook">{playbookLabel}</span>
-      <span className="session-state">{STATE_LABELS[session.state]}</span>
-      {session.done ? <span className="session-done">done</span> : null}
-      <span className="session-time">{timeInState(session.stateSince, nowMs)}</span>
-      <CacheReadout cache={session.cache} nowMs={nowMs} />
+      <span className="session-line">
+        <Lamp state={session.state} />
+        <span className="session-playbook">{playbookLabel}</span>
+        <span className="session-state">{STATE_LABELS[session.state]}</span>
+        {session.done ? <span className="session-done">done</span> : null}
+        <span className="session-time">{timeInState(session.stateSince, nowMs)}</span>
+        <CacheReadout cache={session.cache} nowMs={nowMs} />
+      </span>
+      {session.needsYou && session.pending !== null ? (
+        <span className="session-pending">{session.pending.summary}</span>
+      ) : null}
     </button>
   );
 }
@@ -96,6 +106,13 @@ export function Card({
   const tone = railTone(card);
   const primary = playbooks.find((playbook) => playbook.id === card.primaryPlaybookId) ?? null;
   const others = playbooks.filter((playbook) => playbook.id !== primary?.id);
+  // Starting a second session for a playbook that already has a live one is a
+  // 409, so the button opens the running session rather than offering a start.
+  const running =
+    primary === null
+      ? null
+      : (card.sessions.find((session) => session.playbookId === primary.id && session.live) ??
+        null);
   const labelFor = (playbookId: string): string =>
     playbooks.find((playbook) => playbook.id === playbookId)?.label ?? playbookId;
 
@@ -139,7 +156,15 @@ export function Card({
       ) : null}
 
       <div className="card-actions">
-        {primary === null ? null : (
+        {primary === null ? null : running !== null ? (
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => handlers.openSession(running.id)}
+          >
+            Open {primary.label} session
+          </button>
+        ) : (
           <button
             type="button"
             className="btn btn-primary"

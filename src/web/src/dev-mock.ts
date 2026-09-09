@@ -2,6 +2,7 @@ import type {
   BoardView,
   Card,
   CardSession,
+  ConfigIssue,
   ConnectorSummary,
   EventFrame,
   IssueDetailResponse,
@@ -630,7 +631,16 @@ function publicConfig(): PublicConfigResponse {
 }
 
 /**
+ * Issue keys the epic field accepts, matching the configuration schema.
+ */
+const EPIC_PATTERN = /^([A-Za-z][A-Za-z0-9]*-\d+|\d+)$/;
+
+/**
  * Adds a workspace, and its connector when the request carries a new one.
+ *
+ * Refusals carry `issues` with the paths the server uses: bare field names for
+ * the request's own checks, and dotted locators into the configuration
+ * document for anything the schema rejects.
  *
  * @param body - Parsed request body.
  * @returns The 201 summary, or the 400 / 409 refusal the server would send.
@@ -641,15 +651,6 @@ function createWorkspace(body: Record<string, unknown>): { status: number; body:
   const repo = typeof body['repo'] === 'string' ? body['repo'] : '';
   const newConnector = body['newConnector'] as Record<string, string> | undefined;
   const connector = typeof body['connector'] === 'string' ? body['connector'] : '';
-  if (name === '' || epic === '' || repo === '') {
-    return {
-      status: 400,
-      body: { error: 'The workspace is incomplete.', detail: 'name, epic and repo are required' },
-    };
-  }
-  if (!repos.some((entry) => entry.id === repo)) {
-    return { status: 400, body: { error: `No repo ${repo} is configured.` } };
-  }
   const id =
     typeof body['id'] === 'string' && body['id'].length > 0
       ? body['id']
@@ -657,27 +658,103 @@ function createWorkspace(body: Record<string, unknown>): { status: number; body:
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, '-')
           .replace(/^-|-$/g, '');
+  const issues: ConfigIssue[] = [];
+  if (name === '')
+    issues.push({ path: `workspaces.${id}.name`, message: 'name must not be empty' });
+  if (!EPIC_PATTERN.test(epic)) {
+    issues.push({
+      path: `workspaces.${id}.epic`,
+      message: 'epic must be an issue key such as DOC-3807, or a numeric issue id',
+    });
+  }
+  if (!repos.some((entry) => entry.id === repo)) {
+    issues.push({ path: `workspaces.${id}.repo`, message: `no repo has id '${repo}'` });
+  }
   if (workspaces.some((entry) => entry.id === id)) {
-    return { status: 409, body: { error: `A workspace with the id ${id} already exists.` } };
+    issues.push({ path: 'id', message: `a workspace with id '${id}' already exists` });
+  }
+  if (newConnector !== undefined && connectors.some((entry) => entry.id === newConnector['id'])) {
+    issues.push({
+      path: 'newConnector.id',
+      message: `a connector with id '${newConnector['id'] ?? ''}' already exists`,
+    });
+  }
+  if (newConnector !== undefined && (newConnector['site'] ?? '') === '') {
+    issues.push({
+      path: `connectors.${newConnector['id'] ?? ''}.site`,
+      message: 'site must not be empty',
+    });
+  }
+  if (issues.length > 0) {
+    return { status: 400, body: { error: 'Invalid workspace request', issues } };
   }
   let connectorId = connector;
   if (newConnector !== undefined) {
     connectorId = newConnector['id'] ?? '';
-    if (connectorId === '' || (newConnector['site'] ?? '') === '') {
-      return { status: 400, body: { error: 'The new issue source needs an id and a site.' } };
-    }
-    if (!connectors.some((entry) => entry.id === connectorId)) {
-      connectors.push({ id: connectorId, site: newConnector['site'] ?? '' });
-    }
+    connectors.push({ id: connectorId, site: newConnector['site'] ?? '' });
   }
   if (!connectors.some((entry) => entry.id === connectorId)) {
-    return { status: 400, body: { error: `No issue source ${connectorId} is configured.` } };
+    return {
+      status: 400,
+      body: {
+        error: 'Invalid workspace request',
+        issues: [{ path: 'connector', message: `no connector has id '${connectorId}'` }],
+      },
+    };
   }
   const entry: WorkspaceSummary = { id, name, epic, repo, connector: connectorId };
   workspaces.push(entry);
   boards.set(id, buildBoard(id, name, [], null));
   broadcast({ type: 'config', config: publicConfig() });
   return { status: 201, body: entry };
+}
+
+/**
+ * Removes the worktree a session ran in, refusing the way the server does.
+ *
+ * The server has three refusals and only one of them is forceable, so the mock
+ * carries all three: a live session in the checkout and a missing worktree are
+ * refused whatever `force` says, and only git's dirty-tree refusal names the
+ * flag that gets past it.
+ *
+ * @param sessionId - Session naming the issue whose checkout should go.
+ * @param force - Whether the owner asked to discard a dirty tree.
+ * @returns The response body and status.
+ */
+function removeWorktree(sessionId: string, force: boolean): { status: number; body: unknown } {
+  for (const board of boards.values()) {
+    for (const card of board.columns.flatMap((column) => column.cards)) {
+      const session = card.sessions.find((candidate) => candidate.id === sessionId);
+      if (session === undefined) continue;
+      if (card.worktreePath === null) {
+        return { status: 409, body: { error: `${card.issue.key} has no worktree.` } };
+      }
+      const blocking = card.sessions.find((other) => other.live);
+      if (blocking !== undefined) {
+        return {
+          status: 409,
+          body: {
+            error: `${blocking.id} is still ${blocking.state} in ${card.worktreePath}`,
+            detail: 'kill the session before removing its worktree',
+          },
+        };
+      }
+      if (!force) {
+        return {
+          status: 409,
+          body: {
+            error: 'cannot remove the worktree.',
+            detail: `fatal: '${card.worktreePath}' contains modified or untracked files, use --force to delete it`,
+          },
+        };
+      }
+      const path = card.worktreePath;
+      card.worktreePath = null;
+      broadcast({ type: 'board', workspaceId: board.workspaceId, view: board });
+      return { status: 200, body: { path, removed: true } };
+    }
+  }
+  return { status: 404, body: { error: `No session ${sessionId}` } };
 }
 
 /**
@@ -799,22 +876,7 @@ function route(
   if (parts[0] === 'api' && parts[1] === 'sessions' && method === 'POST') {
     const sessionId = decodeURIComponent(parts[2] ?? '');
     const action = parts[3] ?? '';
-    if (action === 'remove-worktree') {
-      if (body?.['force'] !== true) {
-        return {
-          status: 409,
-          body: {
-            error: 'git refused to remove the worktree.',
-            detail:
-              "fatal: '/home/jakubs/repositories/worktrees/DOC-3847' contains modified or untracked files, use --force to delete it",
-          },
-        };
-      }
-      return {
-        status: 200,
-        body: { path: '/home/jakubs/repositories/worktrees/DOC-3847', removed: true },
-      };
-    }
+    if (action === 'remove-worktree') return removeWorktree(sessionId, body?.['force'] === true);
     for (const board of boards.values()) {
       for (const entry of board.columns.flatMap((column) => column.cards)) {
         const found = entry.sessions.find((candidate) => candidate.id === sessionId);
@@ -827,6 +889,13 @@ function route(
         if (action === 'unmark-done') record.done = false;
         found.state = record.state;
         found.stateSince = new Date().toISOString();
+        found.done = record.done;
+        // The board's own flags are derived from the state, so an action that
+        // changes the state has to re-derive them or the card contradicts itself.
+        found.live = !['exited', 'failed'].includes(found.state);
+        found.needsYou = ['waiting-permission', 'waiting-question', 'idle'].includes(found.state);
+        if (!found.needsYou) found.pending = null;
+        entry.needsYou = entry.sessions.some((candidate) => candidate.needsYou);
         broadcast({ type: 'session', record });
         broadcast({ type: 'board', workspaceId: board.workspaceId, view: board });
         return { status: 200, body: record };

@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState, type JSX, type ReactNode } from 'react';
+import { useCallback, useState, type JSX, type ReactNode } from 'react';
+import { useMenuKeys } from '../hooks/useMenuKeys.js';
 import { OverflowIcon } from './Icons.js';
 
 /**
- * An overflow menu that closes on outside click, on Escape and on selection.
+ * An overflow menu that closes on outside click, on Escape and on selection,
+ * and whose items are reachable with the arrow keys.
  *
  * @param props - Component props.
  * @param props.label - Accessible name of the trigger button.
@@ -17,24 +19,8 @@ export function Menu({
   children: (close: () => void) => ReactNode;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const anchor = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent): void => {
-      if (anchor.current?.contains(event.target as Node) === true) return;
-      setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false);
-    };
-    document.addEventListener('mousedown', onPointerDown);
-    document.addEventListener('keydown', onKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', onPointerDown);
-      document.removeEventListener('keydown', onKeyDown);
-    };
-  }, [open]);
+  const close = useCallback(() => setOpen(false), []);
+  const { anchor, panel } = useMenuKeys(open, close);
 
   return (
     <div className="menu-anchor" ref={anchor}>
@@ -52,8 +38,8 @@ export function Menu({
         <OverflowIcon />
       </button>
       {open ? (
-        <div className="menu" role="menu">
-          {children(() => setOpen(false))}
+        <div className="menu" role="menu" aria-label={label} ref={panel}>
+          {children(close)}
         </div>
       ) : null}
     </div>

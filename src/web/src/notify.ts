@@ -1,5 +1,5 @@
 import type { BoardView } from '../../core/api.js';
-import { NEEDS_YOU_STATES, STATE_LABELS } from './model.js';
+import { NEEDS_YOU_STATES, STATE_LABELS, type SessionState } from './model.js';
 
 /**
  * Title shown when nothing is waiting for the owner.
@@ -97,7 +97,7 @@ export interface NeedsYouEntry {
   /** Tracker key of the issue it works on. */
   issueKey: string;
   /** State it entered. */
-  state: string;
+  state: SessionState;
   /** Pending summary, or the last assistant snippet, or an empty string. */
   body: string;
 }
@@ -136,8 +136,8 @@ export function needsYouEntries(board: BoardView): Map<string, NeedsYouEntry> {
  */
 export function notifyNeedsYou(entry: NeedsYouEntry, onOpen: (sessionId: string) => void): void {
   if (notificationPermission() !== 'granted') return;
-  const label = STATE_LABELS[entry.state as keyof typeof STATE_LABELS] ?? entry.state;
-  const notification = new Notification(`${entry.issueKey} · ${entry.state}`, {
+  const label = STATE_LABELS[entry.state];
+  const notification = new Notification(`${entry.issueKey} · ${label}`, {
     body: entry.body.length > 0 ? entry.body : label,
     tag: entry.sessionId,
   });

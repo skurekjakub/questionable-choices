@@ -1,6 +1,7 @@
-import { useEffect, useState, type JSX } from 'react';
+import { useCallback, useEffect, useState, type JSX } from 'react';
 import type { Card, PlaybookSummary, PublicRunnerConfig } from '../../../core/api.js';
 import { createSession, errorMessage, getPrefill } from '../api.js';
+import { useFocusTrap } from '../hooks/useFocusTrap.js';
 import type { Effort, PermissionModeSetting } from '../model.js';
 import { CloseIcon } from './Icons.js';
 
@@ -16,6 +17,9 @@ const ISOLATION_NOTE: Readonly<Record<PlaybookSummary['isolation'], string>> = {
 /**
  * Collects everything a start needs: which playbook, what prompt, and which
  * runner settings, prefilled from the server and editable before sending.
+ *
+ * Once the prompt differs from the prefill, dismissing the dialog asks for
+ * confirmation instead of throwing the edit away.
  *
  * @param props - Component props.
  * @param props.card - Card the start was triggered from.
@@ -46,6 +50,8 @@ export function StartDialog({
 }): JSX.Element {
   const [playbookId, setPlaybookId] = useState(initialPlaybookId);
   const [prompt, setPrompt] = useState('');
+  const [prefilled, setPrefilled] = useState('');
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [model, setModel] = useState(runner.defaults.model);
   const [effort, setEffort] = useState<Effort>(runner.defaults.effort);
   const [permissionMode, setPermissionMode] = useState<PermissionModeSetting>(
@@ -63,6 +69,8 @@ export function StartDialog({
       .then((prefill) => {
         if (!live) return;
         setPrompt(prefill.prompt);
+        setPrefilled(prefill.prompt);
+        setConfirmingDiscard(false);
         setModel(prefill.model);
         setEffort(prefill.effort);
         setPermissionMode(prefill.permissionMode);
@@ -80,13 +88,15 @@ export function StartDialog({
     };
   }, [workspaceId, card.issue.key, playbookId]);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+  const edited = prompt !== prefilled;
+  const requestClose = useCallback(() => {
+    if (edited) {
+      setConfirmingDiscard(true);
+      return;
+    }
+    onClose();
+  }, [edited, onClose]);
+  const dialog = useFocusTrap<HTMLDivElement>(requestClose);
 
   const selected = playbooks.find((playbook) => playbook.id === playbookId) ?? null;
 
@@ -105,12 +115,14 @@ export function StartDialog({
   };
 
   return (
-    <div className="scrim dialog-scrim" onMouseDown={onClose}>
+    <div className="scrim dialog-scrim" onMouseDown={requestClose}>
       <div
         className="dialog"
         role="dialog"
         aria-modal="true"
         aria-label={`Start a session on ${card.issue.key}`}
+        tabIndex={-1}
+        ref={dialog}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="dialog-head">
@@ -119,7 +131,12 @@ export function StartDialog({
               Start a session on <span className="mono">{card.issue.key}</span>
             </h2>
             <span className="header-spacer" />
-            <button type="button" className="btn btn-icon" aria-label="Close" onClick={onClose}>
+            <button
+              type="button"
+              className="btn btn-icon"
+              aria-label="Close"
+              onClick={requestClose}
+            >
               <CloseIcon />
             </button>
           </div>
@@ -138,7 +155,7 @@ export function StartDialog({
             </select>
           </label>
           {selected === null ? null : (
-            <p className="empty" style={{ padding: 0 }}>
+            <p className="empty empty-inline">
               {selected.description} {ISOLATION_NOTE[selected.isolation]}
             </p>
           )}
@@ -197,14 +214,38 @@ export function StartDialog({
             </label>
           </div>
 
-          {error === null ? null : <p className="error-note">{error}</p>}
+          {error === null ? null : (
+            <p className="error-note" role="alert">
+              {error}
+            </p>
+          )}
         </div>
 
         <div className="dialog-foot">
+          {confirmingDiscard ? (
+            <p className="discard-note" role="alert">
+              The prompt has been edited. Closing discards it.
+            </p>
+          ) : null}
           <span className="action-spacer" />
-          <button type="button" className="btn btn-quiet" onClick={onClose}>
-            Cancel
-          </button>
+          {confirmingDiscard ? (
+            <>
+              <button
+                type="button"
+                className="btn btn-quiet"
+                onClick={() => setConfirmingDiscard(false)}
+              >
+                Keep editing
+              </button>
+              <button type="button" className="btn btn-danger" onClick={onClose}>
+                Discard the prompt
+              </button>
+            </>
+          ) : (
+            <button type="button" className="btn btn-quiet" onClick={requestClose}>
+              Cancel
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-primary"

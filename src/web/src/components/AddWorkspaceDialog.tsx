@@ -1,11 +1,13 @@
-import { useEffect, useState, type JSX } from 'react';
-import { createWorkspace, errorMessage } from '../api.js';
+import { useId, useState, type JSX } from 'react';
+import { ApiError, createWorkspace, errorHeadline } from '../api.js';
 import type {
+  ConfigIssue,
   ConnectorSummary,
   CreateWorkspaceRequest,
   RepoSummary,
   WorkspaceSummary,
 } from '../../../core/api.js';
+import { useFocusTrap } from '../hooks/useFocusTrap.js';
 import { CloseIcon } from './Icons.js';
 
 /**
@@ -19,8 +21,92 @@ const DEFAULT_REVIEW_STATUSES = 'Ready for review';
 const NEW_CONNECTOR = '__new__';
 
 /**
+ * Request paths this dialog has a field for, in the order they are rendered.
+ */
+const FIELD_PATHS = [
+  'name',
+  'epic',
+  'repo',
+  'connector',
+  'newConnector.id',
+  'newConnector.site',
+  'newConnector.emailEnv',
+  'newConnector.tokenEnv',
+  'reviewStatuses',
+] as const;
+
+/**
+ * One request field a validation issue can be placed against.
+ */
+export type WorkspaceFieldPath = (typeof FIELD_PATHS)[number];
+
+/**
+ * Whether a string is one of the fields this dialog renders.
+ *
+ * @param path - Candidate path.
+ * @returns True when a field carries that path.
+ */
+function isFieldPath(path: string): path is WorkspaceFieldPath {
+  return (FIELD_PATHS as readonly string[]).includes(path);
+}
+
+/**
+ * Decides which field a validation issue belongs next to.
+ *
+ * The server refuses a request either against the request's own fields
+ * (`connector`, `newConnector.id`) or against the configuration the request
+ * would produce, whose paths are dotted locators (`workspaces.docs.epic`,
+ * `connectors.jira.site`). Both are placed here.
+ *
+ * @param path - Path the server sent with the issue.
+ * @returns The field to render it against, or null when it names none.
+ */
+function placeIssue(path: string): WorkspaceFieldPath | null {
+  if (isFieldPath(path)) return path;
+  // The workspace id is derived from the name, so a clash is a name to change.
+  if (path === 'id') return 'name';
+  const last = (path.split('.').pop() ?? '').replace(/\[\d+\]$/, '');
+  if (path.startsWith('connectors.')) {
+    const mapped = `newConnector.${last}`;
+    return isFieldPath(mapped) ? mapped : 'connector';
+  }
+  if (path.startsWith('workspaces.')) return isFieldPath(last) ? last : null;
+  return null;
+}
+
+/**
+ * Attributes a control carries while the server holds it at fault.
+ */
+interface FaultAttributes {
+  /** Marks the control as rejected. */
+  'aria-invalid'?: true;
+  /** Points at the note carrying the server's wording. */
+  'aria-describedby'?: string;
+}
+
+/**
+ * Renders the problem the server placed against one field.
+ *
+ * @param props - Component props.
+ * @param props.id - Id the field's `aria-describedby` points at.
+ * @param props.message - The server's wording, or null when the field is fine.
+ * @returns The note, or null when there is nothing to say.
+ */
+function FieldNote({ id, message }: { id: string; message: string | null }): JSX.Element | null {
+  if (message === null) return null;
+  return (
+    <span className="field-note" id={id} role="alert">
+      {message}
+    </span>
+  );
+}
+
+/**
  * Collects one epic, the repo it is worked in and the connector that reads it,
  * creating the connector inline when the owner has none yet.
+ *
+ * Validation problems are placed against the field their path names; anything
+ * that names no field stays in the dialog's error note.
  *
  * @param props - Component props.
  * @param props.repos - Repos configured in the file, which the UI cannot add to.
@@ -50,15 +136,10 @@ export function AddWorkspaceDialog({
   const [tokenEnv, setTokenEnv] = useState('');
   const [reviewStatuses, setReviewStatuses] = useState(DEFAULT_REVIEW_STATUSES);
   const [error, setError] = useState<string | null>(null);
+  const [issues, setIssues] = useState<ConfigIssue[]>([]);
   const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+  const dialog = useFocusTrap<HTMLDivElement>(onClose);
+  const prefix = useId();
 
   const creatingConnector = connector === NEW_CONNECTOR;
   const complete =
@@ -70,6 +151,17 @@ export function AddWorkspaceDialog({
         site.trim().length > 0 &&
         emailEnv.trim().length > 0 &&
         tokenEnv.trim().length > 0));
+
+  const noteId = (path: WorkspaceFieldPath): string => `${prefix}-${path}`;
+  const messageFor = (path: WorkspaceFieldPath): string | null => {
+    const found = issues
+      .filter((issue) => placeIssue(issue.path) === path)
+      .map((issue) => issue.message);
+    return found.length === 0 ? null : found.join(' ');
+  };
+  const faultProps = (path: WorkspaceFieldPath): FaultAttributes =>
+    messageFor(path) === null ? {} : { 'aria-invalid': true, 'aria-describedby': noteId(path) };
+  const unplaced = issues.filter((issue) => placeIssue(issue.path) === null);
 
   const submit = (): void => {
     const statuses = reviewStatuses
@@ -95,7 +187,10 @@ export function AddWorkspaceDialog({
     setSaving(true);
     createWorkspace(body)
       .then(onAdded)
-      .catch((cause: unknown) => setError(errorMessage(cause)))
+      .catch((cause: unknown) => {
+        setError(errorHeadline(cause));
+        setIssues(cause instanceof ApiError ? cause.issues : []);
+      })
       .finally(() => setSaving(false));
   };
 
@@ -106,6 +201,8 @@ export function AddWorkspaceDialog({
         role="dialog"
         aria-modal="true"
         aria-label="Add a workspace"
+        tabIndex={-1}
+        ref={dialog}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="dialog-head">
@@ -123,7 +220,12 @@ export function AddWorkspaceDialog({
           <div className="dialog-grid">
             <label className="field">
               <span>Name</span>
-              <input value={name} onChange={(event) => setName(event.target.value)} />
+              <input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                {...faultProps('name')}
+              />
+              <FieldNote id={noteId('name')} message={messageFor('name')} />
             </label>
             <label className="field">
               <span>Epic key</span>
@@ -131,11 +233,17 @@ export function AddWorkspaceDialog({
                 value={epic}
                 placeholder="DOC-3807"
                 onChange={(event) => setEpic(event.target.value)}
+                {...faultProps('epic')}
               />
+              <FieldNote id={noteId('epic')} message={messageFor('epic')} />
             </label>
             <label className="field">
               <span>Repo</span>
-              <select value={repo} onChange={(event) => setRepo(event.target.value)}>
+              <select
+                value={repo}
+                onChange={(event) => setRepo(event.target.value)}
+                {...faultProps('repo')}
+              >
                 {repos.length === 0 ? <option value="">No repos configured</option> : null}
                 {repos.map((entry) => (
                   <option key={entry.id} value={entry.id}>
@@ -143,12 +251,17 @@ export function AddWorkspaceDialog({
                   </option>
                 ))}
               </select>
+              <FieldNote id={noteId('repo')} message={messageFor('repo')} />
             </label>
           </div>
 
           <label className="field">
             <span>Issue source</span>
-            <select value={connector} onChange={(event) => setConnector(event.target.value)}>
+            <select
+              value={connector}
+              onChange={(event) => setConnector(event.target.value)}
+              {...faultProps('connector')}
+            >
               {connectors.map((entry) => (
                 <option key={entry.id} value={entry.id}>
                   {entry.id} — {entry.site}
@@ -156,6 +269,7 @@ export function AddWorkspaceDialog({
               ))}
               <option value={NEW_CONNECTOR}>Add a new issue source</option>
             </select>
+            <FieldNote id={noteId('connector')} message={messageFor('connector')} />
           </label>
 
           {creatingConnector ? (
@@ -166,7 +280,9 @@ export function AddWorkspaceDialog({
                   value={connectorId}
                   placeholder="kentico-jira"
                   onChange={(event) => setConnectorId(event.target.value)}
+                  {...faultProps('newConnector.id')}
                 />
+                <FieldNote id={noteId('newConnector.id')} message={messageFor('newConnector.id')} />
               </label>
               <label className="field">
                 <span>Jira site</span>
@@ -174,6 +290,11 @@ export function AddWorkspaceDialog({
                   value={site}
                   placeholder="example.atlassian.net"
                   onChange={(event) => setSite(event.target.value)}
+                  {...faultProps('newConnector.site')}
+                />
+                <FieldNote
+                  id={noteId('newConnector.site')}
+                  message={messageFor('newConnector.site')}
                 />
               </label>
               <label className="field">
@@ -182,6 +303,11 @@ export function AddWorkspaceDialog({
                   value={emailEnv}
                   placeholder="JIRA_EMAIL"
                   onChange={(event) => setEmailEnv(event.target.value)}
+                  {...faultProps('newConnector.emailEnv')}
+                />
+                <FieldNote
+                  id={noteId('newConnector.emailEnv')}
+                  message={messageFor('newConnector.emailEnv')}
                 />
               </label>
               <label className="field">
@@ -190,6 +316,11 @@ export function AddWorkspaceDialog({
                   value={tokenEnv}
                   placeholder="JIRA_PAT"
                   onChange={(event) => setTokenEnv(event.target.value)}
+                  {...faultProps('newConnector.tokenEnv')}
+                />
+                <FieldNote
+                  id={noteId('newConnector.tokenEnv')}
+                  message={messageFor('newConnector.tokenEnv')}
                 />
               </label>
             </div>
@@ -200,10 +331,16 @@ export function AddWorkspaceDialog({
             <input
               value={reviewStatuses}
               onChange={(event) => setReviewStatuses(event.target.value)}
+              {...faultProps('reviewStatuses')}
             />
+            <FieldNote id={noteId('reviewStatuses')} message={messageFor('reviewStatuses')} />
           </label>
 
-          {error === null ? null : <p className="error-note">{error}</p>}
+          {error === null ? null : (
+            <p className="error-note" role="alert">
+              {[error, ...unplaced.map((issue) => `${issue.path}: ${issue.message}`)].join('\n')}
+            </p>
+          )}
         </div>
 
         <div className="dialog-foot">

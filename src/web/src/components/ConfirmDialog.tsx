@@ -1,4 +1,5 @@
-import { useEffect, type JSX } from 'react';
+import type { JSX } from 'react';
+import { useFocusTrap } from '../hooks/useFocusTrap.js';
 
 /**
  * Asks the owner to confirm one action, spelling out what it does and does not
@@ -31,22 +32,17 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }): JSX.Element {
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onCancel();
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onCancel]);
+  const dialog = useFocusTrap<HTMLDivElement>(onCancel);
 
   return (
     <div className="scrim dialog-scrim" onMouseDown={onCancel}>
       <div
-        className="dialog"
+        className="dialog dialog-narrow"
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        style={{ maxWidth: '440px' }}
+        tabIndex={-1}
+        ref={dialog}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="dialog-head">
@@ -55,7 +51,9 @@ export function ConfirmDialog({
         </div>
         {error === null ? null : (
           <div className="dialog-body">
-            <p className="error-note">{error}</p>
+            <p className="error-note" role="alert">
+              {error}
+            </p>
           </div>
         )}
         <div className="dialog-foot">

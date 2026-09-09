@@ -46,6 +46,17 @@ export function typeGlyph(type: string): string {
 }
 
 /**
+ * Picks the shell command that attaches a terminal to a session.
+ *
+ * @param sessionId - Id of the session to attach to.
+ * @param reported - Command the server reported for it, when it named one.
+ * @returns The reported command, or the tmux default the server would build.
+ */
+export function attachCommand(sessionId: string, reported?: string | null): string {
+  return reported ?? `tmux attach -t ${sessionId}`;
+}
+
+/**
  * Copies text to the clipboard, falling back to a hidden textarea where the
  * async clipboard API is unavailable.
  *

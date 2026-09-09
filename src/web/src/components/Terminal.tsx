@@ -4,7 +4,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal as Xterm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalServerFrame } from '../../../core/api.js';
-import { socketUrl } from '../ws.js';
+import { reconnectDelayMs, socketUrl } from '../ws.js';
 
 /**
  * ANSI palette and chrome colours, matching the dashboard's own surfaces.
@@ -34,26 +34,38 @@ const THEME = {
 };
 
 /**
- * Delay before an unattended reconnect attempt.
+ * Unattended reconnect attempts made before the owner has to ask for one.
  */
-const RETRY_MS = 3000;
+const MAX_RETRIES = 6;
 
 /**
  * Attaches a terminal to a session's tmux window over a WebSocket.
  *
+ * The attach URL carries `?cols=` and `?rows=` because the pty is spawned at
+ * that size before the first byte is written; a `resize` frame follows on open
+ * and on every layout change, but it arrives too late to spare the TUI one
+ * redraw at the wrong width. Both are the fitted xterm's own dimensions.
+ *
+ * Reconnects walk the shared backoff and stop once the session is no longer
+ * live, once the server names an error, or after {@link MAX_RETRIES}, so a
+ * killed session does not paint a red line every three seconds forever.
+ *
  * @param props - Component props.
  * @param props.sessionId - Id of the session to attach to.
  * @param props.reconnectSignal - Changing this value forces a fresh attach.
+ * @param props.live - Whether the session is still in a running state.
  * @param props.onAttached - Called with the attachment state on every change.
  * @returns The terminal host element.
  */
 export function SessionTerminal({
   sessionId,
   reconnectSignal,
+  live,
   onAttached,
 }: {
   sessionId: string;
   reconnectSignal: number;
+  live: boolean;
   onAttached: (attached: boolean) => void;
 }): JSX.Element {
   const host = useRef<HTMLDivElement>(null);
@@ -61,7 +73,15 @@ export function SessionTerminal({
   const fit = useRef<FitAddon | null>(null);
   const socket = useRef<WebSocket | null>(null);
   const attachedRef = useRef(onAttached);
-  attachedRef.current = onAttached;
+  const liveRef = useRef(live);
+
+  useEffect(() => {
+    attachedRef.current = onAttached;
+  }, [onAttached]);
+
+  useEffect(() => {
+    liveRef.current = live;
+  }, [live]);
 
   useEffect(() => {
     const element = host.current;
@@ -105,6 +125,8 @@ export function SessionTerminal({
     if (xterm === null) return;
     let closed = false;
     let retry: number | undefined;
+    let attempt = 0;
+    let refused = false;
 
     const open = (): void => {
       if (closed) return;
@@ -117,6 +139,7 @@ export function SessionTerminal({
       socket.current = next;
 
       next.onopen = () => {
+        attempt = 0;
         attachedRef.current(true);
         next.send(JSON.stringify({ type: 'resize', cols: xterm.cols, rows: xterm.rows }));
       };
@@ -128,7 +151,10 @@ export function SessionTerminal({
         if (typeof event.data !== 'string') return;
         try {
           const frame = JSON.parse(event.data) as TerminalServerFrame;
-          if (frame.type === 'error') xterm.writeln(`\r\n\x1b[31m${frame.message}\x1b[0m`);
+          if (frame.type === 'error') {
+            refused = true;
+            xterm.writeln(`\r\n\x1b[31m${frame.message}\x1b[0m`);
+          }
           if (frame.type === 'exit')
             xterm.writeln(`\r\n\x1b[90mpty exited (${frame.exitCode})\x1b[0m`);
         } catch {
@@ -139,7 +165,13 @@ export function SessionTerminal({
         if (socket.current !== next) return;
         socket.current = null;
         attachedRef.current(false);
-        if (!closed) retry = window.setTimeout(open, RETRY_MS);
+        if (closed) return;
+        if (refused || !liveRef.current || attempt >= MAX_RETRIES) {
+          xterm.writeln('\r\n\x1b[90mnot reattaching; use Reconnect to try again\x1b[0m');
+          return;
+        }
+        retry = window.setTimeout(open, reconnectDelayMs(attempt));
+        attempt += 1;
       };
       next.onerror = () => next.close();
     };
