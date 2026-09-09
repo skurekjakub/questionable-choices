@@ -67,14 +67,22 @@
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(280px, 1fr);
+  /* The implicit row would be `auto`, which sizes to the terminal's intrinsic
+     height and overflows the shell; the fit addon then measures the taller
+     pane and adds rows, so the overflow grows on every resize. Focusing the
+     terminal scrolls that overflow and hides the header for good, because the
+     shell clips instead of scrolling back. */
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .terminal-pane {
   position: relative;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--ink-900);
+  overflow: hidden;
 }
 
 .terminal-host {
