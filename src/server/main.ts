@@ -90,6 +90,14 @@ async function main(): Promise<void> {
 
   const shutdown = (): void => {
     manager.stop();
+    // `server.close` waits for every open connection, and an attached browser
+    // holds its event socket — plus one terminal socket per open session view —
+    // for as long as the tab lives, so without this the process never exits.
+    for (const client of websocketServer.clients) client.terminate();
+    websocketServer.close();
+    // Idle keep-alive sockets hold the close open too, and only the HTTP/1
+    // member of the adapter's server union offers a way to drop them.
+    if ('closeAllConnections' in server) server.closeAllConnections();
     server.close(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);
