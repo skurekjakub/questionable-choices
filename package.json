@@ -16,6 +16,7 @@
     "build:web": "vite build --config src/web/vite.config.ts",
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist/server/main.js",
+    "config:check": "tsx src/server/config-check.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p src/web/tsconfig.json --noEmit",
     "test": "vitest run",
     "format": "prettier --write .",
