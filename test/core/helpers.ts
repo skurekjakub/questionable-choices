@@ -1,4 +1,11 @@
-import type { Issue, Playbook, SessionRecord, WorkspaceConfig } from '../../src/core/types.js';
+import type {
+  ConnectorConfig,
+  Issue,
+  Playbook,
+  RepoConfig,
+  SessionRecord,
+  WorkspaceConfig,
+} from '../../src/core/types.js';
 
 /**
  * Builds an issue with sensible defaults for tests.
@@ -30,7 +37,7 @@ export function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecor
     id: 'qc-DOC-1-implement',
     issueKey: 'DOC-1',
     playbookId: 'implement',
-    workspaceId: 'ws',
+    repoId: 'app',
     cwd: '/repos/worktrees/DOC-1',
     branch: 'DOC-1-document-the-thing',
     model: 'claude-fable-5-1',
@@ -79,16 +86,24 @@ export function makePlaybook(overrides: Partial<Playbook> = {}): Playbook {
 export function makeWorkspace(overrides: Partial<WorkspaceConfig> = {}): WorkspaceConfig {
   return {
     name: 'Docs',
-    issues: {
-      type: 'jira',
-      site: 'example.atlassian.net',
-      emailEnv: 'JIRA_EMAIL',
-      tokenEnv: 'JIRA_TOKEN',
-      epic: 'DOC-100',
-      reviewStatuses: ['Ready for review'],
-      pollSeconds: 120,
-    },
-    repo: '/repos/app',
+    epic: 'DOC-100',
+    connector: 'tracker',
+    repo: 'app',
+    reviewStatuses: ['Ready for review'],
+    pollSeconds: 120,
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a repo configuration with sensible defaults for tests.
+ *
+ * @param overrides - Fields to replace on the default repo.
+ * @returns The repo configuration.
+ */
+export function makeRepo(overrides: Partial<RepoConfig> = {}): RepoConfig {
+  return {
+    path: '/repos/app',
     worktreeDir: '/repos/worktrees',
     baseRef: 'origin/main',
     branchPattern: '{{key}}-{{slug}}',
@@ -96,6 +111,22 @@ export function makeWorkspace(overrides: Partial<WorkspaceConfig> = {}): Workspa
       makePlaybook(),
       makePlaybook({ id: 'test', label: 'Test', primaryFor: ['review'] }),
     ],
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a connector configuration with sensible defaults for tests.
+ *
+ * @param overrides - Fields to replace on the default connector.
+ * @returns The connector configuration.
+ */
+export function makeConnector(overrides: Partial<ConnectorConfig> = {}): ConnectorConfig {
+  return {
+    type: 'jira',
+    site: 'example.atlassian.net',
+    emailEnv: 'JIRA_EMAIL',
+    tokenEnv: 'JIRA_TOKEN',
     ...overrides,
   };
 }

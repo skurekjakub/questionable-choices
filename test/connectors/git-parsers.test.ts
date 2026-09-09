@@ -7,8 +7,8 @@ import {
   remoteOf,
   remoteRefPattern,
   stripRemote,
-} from '../../src/connectors/workspaces/git/branches.js';
-import { parseWorktreeList, shortBranch } from '../../src/connectors/workspaces/git/worktrees.js';
+} from '../../src/connectors/repos/git/branches.js';
+import { parseWorktreeList, shortBranch } from '../../src/connectors/repos/git/worktrees.js';
 
 describe('parseWorktreeList', () => {
   it('reads path and branch out of every porcelain block', () => {

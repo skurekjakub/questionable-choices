@@ -2,18 +2,19 @@ import type {
   Config,
   Issue,
   Playbook,
+  PrepareHints,
   PreparedCheckout,
+  Repo,
+  RepoConfig,
   Runner,
   RunnerStartRequest,
   RunnerTerminal,
   SessionRecord,
   IssueSource,
-  Workspace,
-  WorkspaceConfig,
   WorktreeInfo,
 } from '../../src/core/types.js';
-import type { Logger } from '../../src/server/session-manager.js';
-import { makeWorkspace } from '../core/helpers.js';
+import type { Logger, WorkspaceRuntime } from '../../src/server/session-manager.js';
+import { makeConnector, makeRepo, makeWorkspace } from '../core/helpers.js';
 
 /**
  * In-memory issue source whose list, single fetches and failures are set by the
@@ -73,11 +74,11 @@ export class FakeIssueSource implements IssueSource {
 }
 
 /**
- * In-memory workspace that records what it was asked to prepare and remove
- * instead of touching git.
+ * In-memory repo that records what it was asked to prepare and remove instead
+ * of touching git.
  */
-export class FakeWorkspace implements Workspace {
-  /** Id of the workspace. */
+export class FakeRepo implements Repo {
+  /** Id of the repo. */
   readonly id: string;
   /** Checkout `prepare` answers with. */
   result: PreparedCheckout;
@@ -86,16 +87,16 @@ export class FakeWorkspace implements Workspace {
   /** Error `removeWorktree` throws instead of answering, or null. */
   removeError: Error | null = null;
   /** Every `prepare` call, in order. */
-  readonly prepared: Array<{ issue: Issue; playbook: Playbook }> = [];
+  readonly prepared: Array<{ issue: Issue; playbook: Playbook; hints: PrepareHints }> = [];
   /** Every `removeWorktree` call, in order. */
   readonly removed: Array<{ issueKey: string; force: boolean }> = [];
   /** Worktrees `worktreeFor` answers from. */
   readonly worktrees = new Map<string, WorktreeInfo>();
 
   /**
-   * Builds a workspace that always prepares the same checkout.
+   * Builds a repo that always prepares the same checkout.
    *
-   * @param id - Workspace id.
+   * @param id - Repo id.
    * @param result - Checkout `prepare` answers with.
    */
   constructor(id: string, result: PreparedCheckout) {
@@ -108,11 +109,16 @@ export class FakeWorkspace implements Workspace {
    *
    * @param issue - Issue the session is for.
    * @param playbook - Playbook whose isolation would decide the policy.
+   * @param hints - What the caller already knows about the checkout.
    * @returns The configured checkout.
    * @throws {Error} When `prepareError` is set.
    */
-  async prepare(issue: Issue, playbook: Playbook): Promise<PreparedCheckout> {
-    this.prepared.push({ issue, playbook });
+  async prepare(
+    issue: Issue,
+    playbook: Playbook,
+    hints: PrepareHints = {},
+  ): Promise<PreparedCheckout> {
+    this.prepared.push({ issue, playbook, hints });
     if (this.prepareError !== null) throw this.prepareError;
     return this.result;
   }
@@ -365,13 +371,13 @@ export class RecordingLogger implements Logger {
 }
 
 /**
- * Builds a configuration with one workspace, for tests.
+ * Builds a configuration with one connector, one repo and one workspace.
  *
  * @param dataDir - Directory the store writes into.
- * @param workspace - Overrides of the default workspace configuration.
+ * @param repo - Overrides of the default repo configuration.
  * @returns The configuration.
  */
-export function makeConfig(dataDir: string, workspace: Partial<WorkspaceConfig> = {}): Config {
+export function makeConfig(dataDir: string, repo: Partial<RepoConfig> = {}): Config {
   return {
     port: 4400,
     dataDir,
@@ -385,6 +391,32 @@ export function makeConfig(dataDir: string, workspace: Partial<WorkspaceConfig> 
       defaultEffort: 'high',
       defaultPermissionMode: 'acceptEdits',
     },
-    workspaces: { ws: makeWorkspace({ bootstrap: 'npm ci', ...workspace }) },
+    connectors: { tracker: makeConnector() },
+    repos: { app: makeRepo({ bootstrap: 'npm ci', ...repo }) },
+    workspaces: { ws: makeWorkspace() },
   };
+}
+
+/**
+ * Builds the manager options that describe one workspace over fakes.
+ *
+ * @param config - Configuration holding the workspace and its repo.
+ * @param workspaceId - Id of the workspace to build a runtime for.
+ * @param issues - Issue source the board is projected from.
+ * @param repo - Repo connector the checkouts come from.
+ * @returns The runtime.
+ * @throws {Error} When the configuration has no such workspace or repo.
+ */
+export function makeRuntime(
+  config: Config,
+  workspaceId: string,
+  issues: IssueSource,
+  repo: Repo,
+): WorkspaceRuntime {
+  const workspace = config.workspaces[workspaceId];
+  const repoConfig = workspace === undefined ? undefined : config.repos[workspace.repo];
+  if (workspace === undefined || repoConfig === undefined) {
+    throw new Error(`the test config has no workspace '${workspaceId}' with a repo`);
+  }
+  return { id: workspaceId, config: workspace, repoConfig, repo, issues };
 }

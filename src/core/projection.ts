@@ -6,6 +6,7 @@ import {
   type ColumnId,
   type Issue,
   type IssueFlags,
+  type RepoConfig,
   type SessionRecord,
   type WorkspaceConfig,
 } from './types.js';
@@ -40,11 +41,13 @@ export function attachCommand(sessionId: string): string {
 export interface ProjectionInput {
   /** Id of the workspace being projected; also the board id. */
   workspaceId: string;
-  /** The workspace's configuration: its name, playbooks and review statuses. */
+  /** The workspace's configuration: its name, repo and review statuses. */
   workspace: WorkspaceConfig;
+  /** Configuration of the repo the workspace names, supplying the playbooks. */
+  repo: RepoConfig;
   /** Issues from the source, in source order. */
   issues: Issue[];
-  /** Every session record known to the app; foreign boards are ignored. */
+  /** Every session record known to the app; sessions of other repos are ignored. */
   sessions: SessionRecord[];
   /** Owner-set flags, keyed by issue key. */
   flags: Record<string, IssueFlags>;
@@ -61,20 +64,20 @@ export interface ProjectionInput {
  *
  * The board must show these anyway, so the caller fetches them one by one.
  *
- * @param workspaceId - Workspace whose sessions are relevant.
+ * @param repoId - Repo whose sessions are relevant.
  * @param issues - Issues the source returned.
  * @param sessions - Every session record known to the app.
  * @returns The missing keys, in first-seen order and without duplicates.
  */
 export function missingIssueKeys(
-  workspaceId: string,
+  repoId: string,
   issues: Issue[],
   sessions: SessionRecord[],
 ): string[] {
   const known = new Set(issues.map((issue) => issue.key));
   const missing: string[] = [];
   for (const session of sessions) {
-    if (session.workspaceId !== workspaceId || session.archived) continue;
+    if (session.repoId !== repoId || session.archived) continue;
     if (known.has(session.issueKey)) continue;
     known.add(session.issueKey);
     missing.push(session.issueKey);
@@ -190,7 +193,7 @@ function orderCards(columnId: ColumnId, cards: Card[]): Card[] {
  * @returns The board view.
  */
 export function project(input: ProjectionInput): BoardView {
-  const playbooks: PlaybookSummary[] = input.workspace.playbooks.map((playbook) => ({
+  const playbooks: PlaybookSummary[] = input.repo.playbooks.map((playbook) => ({
     id: playbook.id,
     label: playbook.label,
     description: playbook.description,
@@ -198,22 +201,20 @@ export function project(input: ProjectionInput): BoardView {
   }));
   const primaryByColumn = new Map<ColumnId, string | null>();
   for (const columnId of COLUMN_IDS) {
-    const match = input.workspace.playbooks.find((playbook) =>
-      playbook.primaryFor.includes(columnId),
-    );
+    const match = input.repo.playbooks.find((playbook) => playbook.primaryFor.includes(columnId));
     primaryByColumn.set(columnId, match?.id ?? playbooks[0]?.id ?? null);
   }
 
   const byIssue = new Map<string, SessionRecord[]>();
   for (const session of input.sessions) {
-    if (session.workspaceId !== input.workspaceId || session.archived) continue;
+    if (session.repoId !== input.workspace.repo || session.archived) continue;
     const list = byIssue.get(session.issueKey);
     if (list === undefined) byIssue.set(session.issueKey, [session]);
     else list.push(session);
   }
 
   const buckets = new Map<ColumnId, Card[]>(COLUMN_IDS.map((id) => [id, []]));
-  const reviewStatuses = input.workspace.issues.reviewStatuses;
+  const reviewStatuses = input.workspace.reviewStatuses;
 
   for (const issue of input.issues) {
     const sessions = (byIssue.get(issue.key) ?? []).slice().sort((a, b) => {

@@ -7,18 +7,20 @@ import {
   createJiraIssueSource,
 } from '../../src/connectors/issues/jira/index.js';
 import { buildJql, epicChildrenJql } from '../../src/connectors/issues/jira/jql.js';
-import type { JiraIssueSourceConfig } from '../../src/core/types.js';
+import type { JiraConnectorConfig, WorkspaceQuery } from '../../src/core/types.js';
 
 const page = readFileSync(new URL('./fixtures/jira-search-page.json', import.meta.url), 'utf8');
 
-const CONFIG: JiraIssueSourceConfig = {
+const CONNECTOR: JiraConnectorConfig = {
   type: 'jira',
   site: 'example.atlassian.net',
   emailEnv: 'JIRA_EMAIL',
   tokenEnv: 'JIRA_TOKEN',
+};
+
+const QUERY: WorkspaceQuery = {
   epic: 'DOC-3807',
   reviewStatuses: ['Ready for review'],
-  pollSeconds: 120,
 };
 
 const ENV = { JIRA_EMAIL: 'me@example.com', JIRA_TOKEN: 'secret' };
@@ -53,8 +55,8 @@ describe('buildJql', () => {
     );
   });
 
-  it('refuses a configuration that names neither', () => {
-    expect(() => buildJql({ epic: undefined, jql: undefined })).toThrow(/epic.*jql|jql.*epic/);
+  it('refuses a workspace that names neither', () => {
+    expect(() => buildJql({ epic: '', jql: undefined })).toThrow(/epic.*jql|jql.*epic/);
   });
 });
 
@@ -63,7 +65,7 @@ describe('JiraIssueSource.list', () => {
     const { fetch } = constantFetch(
       JSON.stringify({ ...(JSON.parse(page) as object), nextPageToken: undefined, isLast: true }),
     );
-    const source = createJiraIssueSource('docs', CONFIG, ENV, { fetch });
+    const source = createJiraIssueSource('docs', CONNECTOR, QUERY, ENV, { fetch });
 
     const issues = await source.list();
 
@@ -74,7 +76,7 @@ describe('JiraIssueSource.list', () => {
 
   it('refuses to call Jira when the environment named no credentials', async () => {
     const { fetch, urls } = constantFetch('{}');
-    const source = createJiraIssueSource('docs', CONFIG, {}, { fetch });
+    const source = createJiraIssueSource('docs', CONNECTOR, QUERY, {}, { fetch });
 
     await expect(source.list()).rejects.toBeInstanceOf(MissingCredentialsError);
     await expect(source.get('DOC-1')).rejects.toThrow(/JIRA_EMAIL and JIRA_TOKEN/);
@@ -86,7 +88,7 @@ describe('JiraIssueSource.get', () => {
   it('fetches one issue by key', async () => {
     const resource = (JSON.parse(page) as { issues: unknown[] }).issues[1];
     const { fetch, urls } = constantFetch(JSON.stringify(resource));
-    const source = createJiraIssueSource('docs', CONFIG, ENV, { fetch });
+    const source = createJiraIssueSource('docs', CONNECTOR, QUERY, ENV, { fetch });
 
     const issue = await source.get('DOC-3848');
 
@@ -97,7 +99,7 @@ describe('JiraIssueSource.get', () => {
 
   it('answers null when Jira has no such issue', async () => {
     const { fetch } = constantFetch('', 404);
-    const source = createJiraIssueSource('docs', CONFIG, ENV, { fetch });
+    const source = createJiraIssueSource('docs', CONNECTOR, QUERY, ENV, { fetch });
 
     await expect(source.get('DOC-404')).resolves.toBeNull();
   });
@@ -105,12 +107,12 @@ describe('JiraIssueSource.get', () => {
 
 describe('createIssueSource', () => {
   it('builds the jira connector for a jira configuration', () => {
-    const source = createIssueSource('docs', CONFIG, ENV);
+    const source = createIssueSource('docs', CONNECTOR, QUERY, ENV);
     expect(source.id).toBe('docs');
   });
 
-  it('refuses an unknown source type', () => {
-    const unknown = { ...CONFIG, type: 'github' } as unknown as JiraIssueSourceConfig;
-    expect(() => createIssueSource('docs', unknown, ENV)).toThrow(/unknown issue source type/);
+  it('refuses an unknown connector type', () => {
+    const unknown = { ...CONNECTOR, type: 'github' } as unknown as JiraConnectorConfig;
+    expect(() => createIssueSource('docs', unknown, QUERY, ENV)).toThrow(/unknown connector type/);
   });
 });

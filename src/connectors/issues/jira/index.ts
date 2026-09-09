@@ -1,4 +1,9 @@
-import type { Issue, IssueSource, JiraIssueSourceConfig } from '../../../core/types.js';
+import type {
+  Issue,
+  IssueSource,
+  JiraConnectorConfig,
+  WorkspaceQuery,
+} from '../../../core/types.js';
 import { JiraClient, type FetchLike } from './client.js';
 import { buildJql } from './jql.js';
 import { mapIssue } from './map.js';
@@ -26,25 +31,33 @@ export class MissingCredentialsError extends Error {
 }
 
 /**
- * Lists the issues of one board from a Jira Cloud epic.
+ * Lists the issues of one workspace from a Jira Cloud epic.
  */
 export class JiraIssueSource implements IssueSource {
-  /** Id of the board this source belongs to. */
+  /** Id of the workspace this source belongs to. */
   readonly id: string;
 
-  private readonly config: JiraIssueSourceConfig;
+  private readonly connector: JiraConnectorConfig;
+  private readonly query: WorkspaceQuery;
   private readonly client: JiraClient;
 
   /**
    * Builds a source over an already-configured client.
    *
-   * @param id - Id of the board this source belongs to.
-   * @param config - The source's configuration.
-   * @param client - Client for the site the configuration names.
+   * @param id - Id of the workspace this source belongs to.
+   * @param connector - Account the issues are read through.
+   * @param query - The workspace's epic, query override and review statuses.
+   * @param client - Client for the site the connector names.
    */
-  constructor(id: string, config: JiraIssueSourceConfig, client: JiraClient) {
+  constructor(
+    id: string,
+    connector: JiraConnectorConfig,
+    query: WorkspaceQuery,
+    client: JiraClient,
+  ) {
     this.id = id;
-    this.config = config;
+    this.connector = connector;
+    this.query = query;
     this.client = client;
   }
 
@@ -56,11 +69,11 @@ export class JiraIssueSource implements IssueSource {
    */
   private assertCredentials(): void {
     if (this.client.hasCredentials) return;
-    throw new MissingCredentialsError([this.config.emailEnv, this.config.tokenEnv]);
+    throw new MissingCredentialsError([this.connector.emailEnv, this.connector.tokenEnv]);
   }
 
   /**
-   * Lists every issue the board should show.
+   * Lists every issue the workspace should show.
    *
    * @returns The issues in Jira rank order.
    * @throws {MissingCredentialsError} When either credential is missing.
@@ -68,8 +81,8 @@ export class JiraIssueSource implements IssueSource {
    */
   async list(): Promise<Issue[]> {
     this.assertCredentials();
-    const resources = await this.client.searchJql(buildJql(this.config));
-    return resources.map((resource) => mapIssue(resource, this.config.site));
+    const resources = await this.client.searchJql(buildJql(this.query));
+    return resources.map((resource) => mapIssue(resource, this.connector.site));
   }
 
   /**
@@ -83,7 +96,7 @@ export class JiraIssueSource implements IssueSource {
   async get(key: string): Promise<Issue | null> {
     this.assertCredentials();
     const resource = await this.client.getIssue(key);
-    return resource === null ? null : mapIssue(resource, this.config.site);
+    return resource === null ? null : mapIssue(resource, this.connector.site);
   }
 }
 
@@ -98,25 +111,27 @@ export interface CreateJiraIssueSourceOptions {
 /**
  * Builds a Jira issue source, reading its credentials from the environment.
  *
- * @param id - Id of the board this source belongs to.
- * @param config - The source's configuration, naming the credential variables.
+ * @param id - Id of the workspace this source belongs to.
+ * @param connector - Account to read through, naming the credential variables.
+ * @param query - The workspace's epic, query override and review statuses.
  * @param env - Environment the named variables are read from.
  * @param options - Transport overrides.
  * @returns The issue source; missing credentials surface on the first request.
  */
 export function createJiraIssueSource(
   id: string,
-  config: JiraIssueSourceConfig,
+  connector: JiraConnectorConfig,
+  query: WorkspaceQuery,
   env: Record<string, string | undefined>,
   options: CreateJiraIssueSourceOptions = {},
 ): JiraIssueSource {
   const client = new JiraClient({
-    site: config.site,
-    email: env[config.emailEnv] ?? '',
-    token: env[config.tokenEnv] ?? '',
+    site: connector.site,
+    email: env[connector.emailEnv] ?? '',
+    token: env[connector.tokenEnv] ?? '',
     fetch: options.fetch,
   });
-  return new JiraIssueSource(id, config, client);
+  return new JiraIssueSource(id, connector, query, client);
 }
 
 export { JiraClient, JiraHttpError, JIRA_ISSUE_FIELDS, normaliseSite } from './client.js';

@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import type { ConfigIssue, CreateWorkspaceRequest } from './api.js';
+import { slug } from './prompt.js';
 import {
   COLUMN_IDS,
   EFFORTS,
@@ -10,15 +12,17 @@ import {
   type PlaybookDefaults,
 } from './types.js';
 
+export type { ConfigIssue } from './api.js';
+
 /**
- * One reason a configuration was rejected, with the path that caused it.
+ * Status names a workspace lands in the Review column when it names none.
  */
-export interface ConfigIssue {
-  /** Dotted path into the config document, e.g. `boards[0].issues.epic`. */
-  path: string;
-  /** Human-readable explanation. */
-  message: string;
-}
+export const DEFAULT_REVIEW_STATUSES = ['Ready for review'];
+
+/**
+ * Seconds between issue-list polls when a workspace names no interval.
+ */
+export const DEFAULT_POLL_SECONDS = 120;
 
 /**
  * Thrown when a configuration document is unreadable or fails validation.
@@ -133,27 +137,29 @@ const playbookSchema = z.object({
   promptTemplate: nonEmpty('promptTemplate'),
 });
 
-const jiraIssueSourceSchema = z
-  .object({
-    type: z.literal('jira'),
-    site: nonEmpty('site'),
-    emailEnv: nonEmpty('emailEnv'),
-    tokenEnv: nonEmpty('tokenEnv'),
-    epic: nonEmpty('epic').optional(),
-    jql: nonEmpty('jql').optional(),
-    reviewStatuses: z.array(nonEmpty('review status')).default([]),
-    pollSeconds: z.number().int().min(10, 'pollSeconds must be at least 10').default(120),
-  })
-  .check((ctx) => {
-    if (ctx.value.epic === undefined && ctx.value.jql === undefined) {
-      ctx.issues.push({
-        code: 'custom',
-        message: "a jira source needs either 'epic' or 'jql'",
-        path: ['epic'],
-        input: ctx.value,
-      });
-    }
-  });
+const connectorSchema = z.object({
+  type: z.literal('jira'),
+  site: nonEmpty('site'),
+  emailEnv: nonEmpty('emailEnv'),
+  tokenEnv: nonEmpty('tokenEnv'),
+});
+
+const workspaceSchema = z.object({
+  name: nonEmpty('workspace name'),
+  epic: nonEmpty('epic'),
+  jql: nonEmpty('jql').optional(),
+  connector: nonEmpty('connector'),
+  repo: nonEmpty('repo'),
+  reviewStatuses: z.array(nonEmpty('review status')).default(DEFAULT_REVIEW_STATUSES),
+  pollSeconds: z
+    .number()
+    .int()
+    .min(10, 'pollSeconds must be at least 10')
+    .default(DEFAULT_POLL_SECONDS),
+});
+
+const idSchema = (label: string): z.ZodString =>
+  z.string().regex(/^[a-z0-9][a-z0-9-]*$/, `${label} must be lowercase letters, digits and dashes`);
 
 /**
  * Builds a string schema that expands `~` into the given home directory.
@@ -167,22 +173,20 @@ function pathSchema(label: string, home: string): z.ZodType<string, unknown> {
 }
 
 /**
- * Builds the workspace schema for one home directory.
+ * Builds the repo schema for one home directory.
  *
- * @param home - Home directory used to expand `~` in `repo` and `worktreeDir`.
- * @returns A schema producing a validated workspace.
+ * @param home - Home directory used to expand `~` in `path` and `worktreeDir`.
+ * @returns A schema producing a validated repo.
  */
-function buildWorkspaceSchema(home: string) {
+function buildRepoSchema(home: string) {
   return z
     .object({
-      name: nonEmpty('workspace name'),
-      issues: z.discriminatedUnion('type', [jiraIssueSourceSchema]),
-      repo: pathSchema('repo', home),
+      path: pathSchema('path', home),
       worktreeDir: pathSchema('worktreeDir', home),
       baseRef: nonEmpty('baseRef').default('origin/main'),
       branchPattern: nonEmpty('branchPattern').default('{{key}}-{{slug}}'),
       bootstrap: z.string().optional(),
-      playbooks: z.array(playbookSchema).min(1, 'a workspace needs at least one playbook'),
+      playbooks: z.array(playbookSchema).min(1, 'a repo needs at least one playbook'),
     })
     .check((ctx) => {
       const seen = new Set<string>();
@@ -219,15 +223,18 @@ function buildConfigSchema(home: string) {
       dataDir: pathSchema('dataDir', home).prefault('~/.local/share/questionable-choices'),
       editor: editorSchema.prefault({}),
       runner: runnerSchema,
+      connectors: z
+        .record(idSchema('connector id'), connectorSchema)
+        .refine((value) => Object.keys(value).length > 0, 'at least one connector is required'),
+      repos: z
+        .record(idSchema('repo id'), buildRepoSchema(home))
+        .refine((value) => Object.keys(value).length > 0, 'at least one repo is required'),
       workspaces: z
-        .record(
-          z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'workspace id must be lowercase'),
-          buildWorkspaceSchema(home),
-        )
+        .record(idSchema('workspace id'), workspaceSchema)
         .refine((value) => Object.keys(value).length > 0, 'at least one workspace is required'),
     })
     .check((ctx) => {
-      const { runner, workspaces } = ctx.value;
+      const { runner, connectors, repos, workspaces } = ctx.value;
       const modelIds = new Set(runner.models.map((model) => model.id));
       if (!modelIds.has(runner.defaultModel)) {
         ctx.issues.push({
@@ -238,18 +245,37 @@ function buildConfigSchema(home: string) {
         });
       }
 
-      for (const [workspaceId, workspace] of Object.entries(workspaces)) {
-        workspace.playbooks.forEach((playbook, index) => {
+      for (const [repoId, repo] of Object.entries(repos)) {
+        repo.playbooks.forEach((playbook, index) => {
           const model = playbook.defaults?.model;
           if (model !== undefined && !modelIds.has(model)) {
             ctx.issues.push({
               code: 'custom',
               message: `defaults.model '${model}' is not one of runner.models`,
-              path: ['workspaces', workspaceId, 'playbooks', index, 'defaults', 'model'],
+              path: ['repos', repoId, 'playbooks', index, 'defaults', 'model'],
               input: model,
             });
           }
         });
+      }
+
+      for (const [workspaceId, workspace] of Object.entries(workspaces)) {
+        if (connectors[workspace.connector] === undefined) {
+          ctx.issues.push({
+            code: 'custom',
+            message: `connector '${workspace.connector}' is not one of connectors`,
+            path: ['workspaces', workspaceId, 'connector'],
+            input: workspace.connector,
+          });
+        }
+        if (repos[workspace.repo] === undefined) {
+          ctx.issues.push({
+            code: 'custom',
+            message: `repo '${workspace.repo}' is not one of repos`,
+            path: ['workspaces', workspaceId, 'repo'],
+            input: workspace.repo,
+          });
+        }
       }
     });
 }
@@ -338,15 +364,119 @@ export function checkEnvironment(
   env: Record<string, string | undefined>,
 ): string[] {
   const warnings: string[] = [];
-  for (const [workspaceId, workspace] of Object.entries(config.workspaces)) {
-    for (const name of [workspace.issues.emailEnv, workspace.issues.tokenEnv]) {
+  for (const [connectorId, connector] of Object.entries(config.connectors)) {
+    for (const name of [connector.emailEnv, connector.tokenEnv]) {
       const value = env[name];
       if (value === undefined || value === '') {
-        warnings.push(`workspace '${workspaceId}': environment variable ${name} is not set`);
+        warnings.push(`connector '${connectorId}': environment variable ${name} is not set`);
       }
     }
   }
   return warnings;
+}
+
+/**
+ * Renders a validated configuration back into the document the file holds.
+ *
+ * Path fields are written absolute: `~` is expanded while parsing and is not
+ * reversed here, so a rewritten file names the home directory in full.
+ *
+ * @param config - Validated configuration.
+ * @returns A deep copy that `JSON.stringify` turns into the file.
+ */
+export function serializeConfig(config: Config): Config {
+  // The JSON round-trip drops keys whose value is undefined, which is what
+  // keeps unset optional fields such as `bootstrap` out of the written file.
+  return JSON.parse(JSON.stringify(config)) as Config;
+}
+
+/**
+ * Picks the id a workspace-creation request asks for.
+ *
+ * @param request - The request, whose `id` wins when it names one.
+ * @returns The requested id, or one slugged from the name.
+ */
+export function workspaceIdFor(request: CreateWorkspaceRequest): string {
+  const id = request.id?.trim() ?? '';
+  return id === '' ? slug(request.name) : id;
+}
+
+/**
+ * Adds the workspace a request describes, and its inline connector when it
+ * carries one, to a configuration.
+ *
+ * @param config - Configuration to extend; left untouched.
+ * @param request - Workspace to add, naming exactly one of `connector` and `newConnector`.
+ * @returns The configuration with the workspace in it, revalidated.
+ * @throws {ConfigError} When the request is incoherent or the result fails
+ *   validation; a duplicate id is reported at path `id`.
+ */
+export function applyWorkspaceChange(config: Config, request: CreateWorkspaceRequest): Config {
+  const id = workspaceIdFor(request);
+  const issues: ConfigIssue[] = [];
+  if (id === '') {
+    issues.push({ path: 'id', message: 'a workspace needs an id, or a name to derive one from' });
+  } else if (config.workspaces[id] !== undefined) {
+    issues.push({ path: 'id', message: `a workspace with id '${id}' already exists` });
+  }
+  const named = request.connector !== undefined && request.connector !== '';
+  const inline = request.newConnector;
+  if (named === (inline !== undefined)) {
+    issues.push({
+      path: 'connector',
+      message: "name exactly one of 'connector' and 'newConnector'",
+    });
+  }
+  if (inline !== undefined && config.connectors[inline.id] !== undefined) {
+    issues.push({
+      path: 'newConnector.id',
+      message: `a connector with id '${inline.id}' already exists`,
+    });
+  }
+  if (issues.length > 0) throw new ConfigError('Invalid workspace request', issues);
+
+  const document = serializeConfig(config);
+  const connectorId = inline === undefined ? (request.connector ?? '') : inline.id;
+  if (inline !== undefined) {
+    document.connectors[inline.id] = {
+      type: 'jira',
+      site: inline.site,
+      emailEnv: inline.emailEnv,
+      tokenEnv: inline.tokenEnv,
+    };
+  }
+  document.workspaces[id] = {
+    name: request.name,
+    epic: request.epic,
+    ...(request.jql === undefined ? {} : { jql: request.jql }),
+    connector: connectorId,
+    repo: request.repo,
+    reviewStatuses: request.reviewStatuses ?? [...DEFAULT_REVIEW_STATUSES],
+    pollSeconds: DEFAULT_POLL_SECONDS,
+  };
+  // Paths in the document are already absolute, so no home is needed to
+  // re-expand them; passing one would only re-expand a literal '~' twice.
+  return parseConfig(document, { home: '' });
+}
+
+/**
+ * Removes one workspace from a configuration.
+ *
+ * @param config - Configuration to shrink; left untouched.
+ * @param id - Id of the workspace to remove.
+ * @returns The configuration without the workspace, revalidated.
+ * @throws {ConfigError} When no workspace has that id, or when removing it
+ *   would leave the configuration invalid.
+ */
+export function removeWorkspace(config: Config, id: string): Config {
+  if (config.workspaces[id] === undefined) {
+    throw new ConfigError('Invalid workspace request', [
+      { path: 'id', message: `no workspace has id '${id}'` },
+    ]);
+  }
+  const document = serializeConfig(config);
+  delete document.workspaces[id];
+  return parseConfig(document, { home: '' });
 }
 
 /**

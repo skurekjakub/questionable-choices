@@ -3,7 +3,7 @@ import { attachCommand, missingIssueKeys, project } from '../../src/core/project
 import type { ProjectionInput } from '../../src/core/projection.js';
 import type { BoardView, Card } from '../../src/core/api.js';
 import type { ColumnId, SessionRecord, SessionState } from '../../src/core/types.js';
-import { makeIssue, makePlaybook, makeRecord, makeWorkspace } from './helpers.js';
+import { makeIssue, makePlaybook, makeRecord, makeRepo, makeWorkspace } from './helpers.js';
 
 /**
  * Projects a board from partial input, filling in the workspace and clock.
@@ -15,6 +15,7 @@ function projectWith(overrides: Partial<ProjectionInput> = {}): BoardView {
   return project({
     workspaceId: 'ws',
     workspace: makeWorkspace(),
+    repo: makeRepo(),
     issues: [makeIssue()],
     sessions: [],
     flags: {},
@@ -311,8 +312,8 @@ describe('card payload', () => {
   });
 
   it('falls back to the first playbook when no playbook claims the lane', () => {
-    const workspace = makeWorkspace({ playbooks: [makePlaybook({ primaryFor: [] })] });
-    const view = projectWith({ workspace, flags: { 'DOC-1': { done: true } } });
+    const repo = makeRepo({ playbooks: [makePlaybook({ primaryFor: [] })] });
+    const view = projectWith({ repo, flags: { 'DOC-1': { done: true } } });
     const card = view.columns.find((column) => column.id === 'done')?.cards[0] as Card;
     expect(card.primaryPlaybookId).toBe('implement');
   });
@@ -346,7 +347,7 @@ describe('session scoping', () => {
   it('ignores sessions of another workspace and archived ones', () => {
     const view = projectWith({
       sessions: [
-        makeRecord({ id: 'other', workspaceId: 'elsewhere', state: 'working' }),
+        makeRecord({ id: 'other', repoId: 'elsewhere', state: 'working' }),
         makeRecord({ id: 'archived', state: 'working', archived: true }),
       ],
     });
@@ -370,13 +371,13 @@ describe('missingIssueKeys', () => {
       makeRecord({ id: 'b', issueKey: 'DOC-2' }),
       makeRecord({ id: 'c', issueKey: 'DOC-2' }),
       makeRecord({ id: 'd', issueKey: 'DOC-3', archived: true }),
-      makeRecord({ id: 'e', issueKey: 'DOC-4', workspaceId: 'elsewhere' }),
+      makeRecord({ id: 'e', issueKey: 'DOC-4', repoId: 'elsewhere' }),
     ];
-    expect(missingIssueKeys('ws', [makeIssue({ key: 'DOC-1' })], sessions)).toEqual(['DOC-2']);
+    expect(missingIssueKeys('app', [makeIssue({ key: 'DOC-1' })], sessions)).toEqual(['DOC-2']);
   });
 
   it('is empty when the source listed everything', () => {
-    expect(missingIssueKeys('ws', [makeIssue()], [makeRecord()])).toEqual([]);
+    expect(missingIssueKeys('app', [makeIssue()], [makeRecord()])).toEqual([]);
   });
 });
 

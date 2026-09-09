@@ -1,4 +1,4 @@
-import type { JiraIssueSourceConfig } from '../../../core/types.js';
+import type { WorkspaceQuery } from '../../../core/types.js';
 
 /**
  * Ordering clause appended to the default epic query.
@@ -16,19 +16,18 @@ export function epicChildrenJql(epic: string): string {
 }
 
 /**
- * Picks the query a Jira issue source runs.
+ * Picks the query a workspace's Jira source runs.
  *
  * A configured `jql` replaces the whole query; otherwise the epic's
  * unfinished children are listed in rank order.
  *
- * @param config - The source's configuration, supplying `jql` or `epic`.
+ * @param query - The workspace's query, supplying `jql` or `epic`.
  * @returns The JQL query to send.
- * @throws {Error} When the configuration names neither `jql` nor `epic`.
+ * @throws {Error} When the workspace names neither `jql` nor `epic`.
  */
-export function buildJql(config: Pick<JiraIssueSourceConfig, 'epic' | 'jql'>): string {
-  const raw = config.jql;
+export function buildJql(query: Pick<WorkspaceQuery, 'epic' | 'jql'>): string {
+  const raw = query.jql;
   if (raw !== undefined && raw !== '') return raw;
-  const epic = config.epic;
-  if (epic !== undefined && epic !== '') return epicChildrenJql(epic);
-  throw new Error("a jira issue source needs either 'epic' or 'jql'");
+  if (query.epic !== '') return epicChildrenJql(query.epic);
+  throw new Error("a jira workspace needs either 'epic' or 'jql'");
 }

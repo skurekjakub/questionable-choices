@@ -7,15 +7,14 @@ export {
   MissingCredentialsError,
 } from './issues/index.js';
 
-export { createWorkspace } from './workspaces/index.js';
+export { createRepo } from './repos/index.js';
 export {
   DirtyWorktreeError,
   GitError,
-  GitWorkspace,
+  GitRepo,
   NoBranchError,
   WorktreeNotFoundError,
-} from './workspaces/index.js';
-export type { PrepareHints } from './workspaces/index.js';
+} from './repos/index.js';
 
 export { createRunner } from './runners/index.js';
 export type { CreateRunnerOptions } from './runners/index.js';

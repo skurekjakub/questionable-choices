@@ -4,9 +4,10 @@ import { branchName } from '../../../core/prompt.js';
 import type {
   Issue,
   Playbook,
+  PrepareHints,
   PreparedCheckout,
-  Workspace,
-  WorkspaceConfig,
+  Repo,
+  RepoConfig,
   WorktreeInfo,
 } from '../../../core/types.js';
 import {
@@ -90,40 +91,29 @@ export class WorktreeNotFoundError extends Error {
 }
 
 /**
- * What the caller already knows about an issue's checkout.
- */
-export interface PrepareHints {
-  /**
-   * Branch the caller has on record for the issue, typically from its newest
-   * session record. Preferred over scanning the remote.
-   */
-  knownBranch?: string | null | undefined;
-}
-
-/**
  * Provides checkouts for sessions out of one git repository and its worktrees.
  */
-export class GitWorkspace implements Workspace {
-  /** Id of the workspace, matching its key in `Config.workspaces`. */
+export class GitRepo implements Repo {
+  /** Id of the repo, matching its key in `Config.repos`. */
   readonly id: string;
 
-  private readonly config: WorkspaceConfig;
+  private readonly config: RepoConfig;
   private readonly remote: string;
 
   /**
-   * Builds a workspace over one main checkout.
+   * Builds a repo connector over one main checkout.
    *
-   * @param id - Id of the workspace, matching its key in `Config.workspaces`.
-   * @param config - The workspace's configuration.
+   * @param id - Id of the repo, matching its key in `Config.repos`.
+   * @param config - The repo's configuration.
    */
-  constructor(id: string, config: WorkspaceConfig) {
+  constructor(id: string, config: RepoConfig) {
     this.id = id;
     this.config = config;
     this.remote = remoteOf(config.baseRef);
   }
 
   /**
-   * Path the workspace puts an issue's worktree at.
+   * Path the repo puts an issue's worktree at.
    *
    * @param issueKey - Key of the issue.
    * @returns The absolute worktree path, `<worktreeDir>/<KEY>`.
@@ -139,7 +129,7 @@ export class GitWorkspace implements Workspace {
    * @throws {GitError} When git cannot be run.
    */
   async listWorktrees(): Promise<WorktreeInfo[]> {
-    const { stdout } = await git(['worktree', 'list', '--porcelain'], this.config.repo);
+    const { stdout } = await git(['worktree', 'list', '--porcelain'], this.config.path);
     return parseWorktreeList(stdout);
   }
 
@@ -177,7 +167,7 @@ export class GitWorkspace implements Workspace {
     }
     const listed = await gitAttempt(
       ['branch', '-r', '--list', remoteBranchPattern(this.remote, issueKey)],
-      this.config.repo,
+      this.config.path,
     );
     if (!listed.ok) return null;
     const candidates = parseRemoteBranches(listed.stdout, this.remote);
@@ -189,7 +179,7 @@ export class GitWorkspace implements Workspace {
         '--format=%(refname:short)',
         remoteRefPattern(this.remote, issueKey),
       ],
-      this.config.repo,
+      this.config.path,
     );
     const ordered = sorted.ok ? parseRefNames(sorted.stdout, this.remote) : [];
     return newestBranch(candidates, ordered);
@@ -211,7 +201,7 @@ export class GitWorkspace implements Workspace {
     hints: PrepareHints = {},
   ): Promise<PreparedCheckout> {
     if (playbook.isolation === 'shared') {
-      return { cwd: this.config.repo, branch: null, needsBootstrap: false };
+      return { cwd: this.config.path, branch: null, needsBootstrap: false };
     }
 
     const existing = await this.worktreeFor(issue.key);
@@ -233,7 +223,7 @@ export class GitWorkspace implements Workspace {
       return { cwd: path, branch, needsBootstrap: true };
     }
 
-    await git(['fetch', this.remote], this.config.repo);
+    await git(['fetch', this.remote], this.config.path);
     const branch = branchName(this.config.branchPattern, issue);
     await this.addWorktree(path, branch);
     return { cwd: path, branch, needsBootstrap: true };
@@ -257,11 +247,11 @@ export class GitWorkspace implements Workspace {
       if (stdout.trim() !== '') throw new DirtyWorktreeError(worktree.path, stdout);
     }
     const args = ['worktree', 'remove', ...(force ? ['--force'] : []), worktree.path];
-    await git(args, this.config.repo);
+    await git(args, this.config.path);
   }
 
   /**
-   * Reports whether a branch resolves locally or on the workspace's remote.
+   * Reports whether a branch resolves locally or on the repo's remote.
    *
    * @param branch - Short branch name to look for.
    * @returns True when either ref exists.
@@ -279,13 +269,13 @@ export class GitWorkspace implements Workspace {
   private async localBranchExists(branch: string): Promise<boolean> {
     const attempt = await gitAttempt(
       ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`],
-      this.config.repo,
+      this.config.path,
     );
     return attempt.ok;
   }
 
   /**
-   * Reports whether a branch exists on the workspace's remote.
+   * Reports whether a branch exists on the repo's remote.
    *
    * @param branch - Short branch name to look for.
    * @returns True when `refs/remotes/<remote>/<branch>` resolves.
@@ -293,7 +283,7 @@ export class GitWorkspace implements Workspace {
   private async remoteBranchExists(branch: string): Promise<boolean> {
     const attempt = await gitAttempt(
       ['show-ref', '--verify', '--quiet', `refs/remotes/${this.remote}/${branch}`],
-      this.config.repo,
+      this.config.path,
     );
     return attempt.ok;
   }
@@ -309,17 +299,17 @@ export class GitWorkspace implements Workspace {
   private async addWorktree(path: string, branch: string): Promise<void> {
     await mkdir(dirname(path), { recursive: true });
     if (await this.localBranchExists(branch)) {
-      await git(['worktree', 'add', path, branch], this.config.repo);
+      await git(['worktree', 'add', path, branch], this.config.path);
       return;
     }
     if (await this.remoteBranchExists(branch)) {
       await git(
         ['worktree', 'add', '-b', branch, path, `${this.remote}/${branch}`],
-        this.config.repo,
+        this.config.path,
       );
       return;
     }
-    await git(['worktree', 'add', '-b', branch, path, this.config.baseRef], this.config.repo);
+    await git(['worktree', 'add', '-b', branch, path, this.config.baseRef], this.config.path);
   }
 }
 

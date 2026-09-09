@@ -229,4 +229,11 @@ describe('buildRunScript', () => {
   it('keeps the window open after claude exits', () => {
     expect(buildRunScript(RUN_CONTEXT).trimEnd().endsWith('exec bash')).toBe(true);
   });
+
+  it('tells the launcher ingress that a resume launch is a resume', () => {
+    const script = buildRunScript({ ...RUN_CONTEXT, resumeSessionId: 'abc-123' });
+
+    expect(script).toContain('post claude-start \'{"mode":"resume"}\'');
+    expect(script).not.toContain("post claude-start '{}'");
+  });
 });

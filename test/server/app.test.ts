@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Hono } from 'hono';
@@ -11,17 +11,18 @@ import type {
   PublicConfigResponse,
   RemoveWorktreeResponse,
 } from '../../src/core/api.js';
-import type { SessionRecord } from '../../src/core/types.js';
+import type { Config, SessionRecord } from '../../src/core/types.js';
 import { createApp } from '../../src/server/app.js';
 import { SessionManager } from '../../src/server/session-manager.js';
 import { Store } from '../../src/server/store.js';
 import { makeIssue } from '../core/helpers.js';
 import {
   FakeIssueSource,
+  FakeRepo,
   FakeRunner,
-  FakeWorkspace,
   RecordingLogger,
   makeConfig,
+  makeRuntime,
 } from './fakes.js';
 
 const CREATE = {
@@ -50,6 +51,7 @@ async function post(app: Hono, path: string, body?: unknown): Promise<Response> 
 
 describe('HTTP API', () => {
   let dir: string;
+  let configPath: string;
   let app: Hono;
   let runner: FakeRunner;
   let source: FakeIssueSource;
@@ -58,30 +60,25 @@ describe('HTTP API', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'qc-app-'));
+    configPath = join(dir, 'config.json');
     const config = makeConfig(dir);
-    const workspaceConfig = config.workspaces['ws'];
-    if (workspaceConfig === undefined) throw new Error('the test config lost its workspace');
     const store = new Store(dir);
     await store.load();
     runner = new FakeRunner();
     source = new FakeIssueSource('ws', [makeIssue({ description: 'the full description' })]);
+    const repo = new FakeRepo('app', {
+      cwd: '/repos/worktrees/DOC-1',
+      branch: 'DOC-1-document-the-thing',
+      needsBootstrap: false,
+    });
     editorCalls = [];
     manager = new SessionManager({
       config,
+      configPath,
       store,
       runner,
-      workspaces: [
-        {
-          id: 'ws',
-          config: workspaceConfig,
-          issues: source,
-          workspace: new FakeWorkspace('ws', {
-            cwd: '/repos/worktrees/DOC-1',
-            branch: 'DOC-1-document-the-thing',
-            needsBootstrap: false,
-          }),
-        },
-      ],
+      workspaces: [makeRuntime(config, 'ws', source, repo)],
+      createRuntime: (next, workspaceId) => makeRuntime(next, workspaceId, source, repo),
       derivedCacheTtlSeconds: 300,
       spawnEditor: (command, args) => editorCalls.push({ command, args }),
       logger: new RecordingLogger(),
@@ -95,12 +92,94 @@ describe('HTTP API', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('serves the picker options', async () => {
+  it('serves the switcher list, the repos, the connectors and the picker options', async () => {
     const body = (await (await app.request('/api/config/public')).json()) as PublicConfigResponse;
-    expect(body.workspaces).toEqual([{ id: 'ws', name: 'Docs' }]);
+    expect(body.workspaces).toEqual([
+      { id: 'ws', name: 'Docs', epic: 'DOC-100', repo: 'app', connector: 'tracker' },
+    ]);
+    expect(body.repos).toEqual([{ id: 'app', path: '/repos/app' }]);
+    expect(body.connectors).toEqual([{ id: 'tracker', site: 'example.atlassian.net' }]);
     expect(body.runner.efforts).toContain('xhigh');
     expect(body.runner.permissionModes).toContain('default');
     expect(body.runner.defaults.model).toBe('claude-fable-5-1');
+  });
+
+  it('adds a workspace, writes the config file and lists it', async () => {
+    const created = await post(app, '/api/workspaces', {
+      name: 'Second board',
+      epic: 'DOC-900',
+      repo: 'app',
+      connector: 'tracker',
+      reviewStatuses: ['In review'],
+    });
+
+    expect(created.status).toBe(201);
+    expect(await created.json()).toEqual({
+      id: 'second-board',
+      name: 'Second board',
+      epic: 'DOC-900',
+      repo: 'app',
+      connector: 'tracker',
+    });
+    const written = JSON.parse(await readFile(configPath, 'utf8')) as Config;
+    expect(written.workspaces['second-board']?.reviewStatuses).toEqual(['In review']);
+    const listed = (await (await app.request('/api/config/public')).json()) as PublicConfigResponse;
+    expect(listed.workspaces.map((workspace) => workspace.id)).toEqual(['ws', 'second-board']);
+  });
+
+  it('creates the inline connector the dialog asked for', async () => {
+    const created = await post(app, '/api/workspaces', {
+      id: 'ops',
+      name: 'Ops',
+      epic: 'OPS-1',
+      repo: 'app',
+      newConnector: {
+        id: 'ops-jira',
+        site: 'ops.atlassian.net',
+        emailEnv: 'OPS_EMAIL',
+        tokenEnv: 'OPS_TOKEN',
+      },
+    });
+
+    expect(created.status).toBe(201);
+    const body = (await (await app.request('/api/config/public')).json()) as PublicConfigResponse;
+    expect(body.connectors).toContainEqual({ id: 'ops-jira', site: 'ops.atlassian.net' });
+  });
+
+  it('answers 409 for a duplicate id and 400 with issues for a bad request', async () => {
+    const duplicate = await post(app, '/api/workspaces', {
+      id: 'ws',
+      name: 'Again',
+      epic: 'DOC-2',
+      repo: 'app',
+      connector: 'tracker',
+    });
+    expect(duplicate.status).toBe(409);
+
+    const invalid = await post(app, '/api/workspaces', {
+      name: 'Ghost repo',
+      epic: 'DOC-2',
+      repo: 'ghost',
+      connector: 'tracker',
+    });
+    expect(invalid.status).toBe(400);
+    const body = (await invalid.json()) as ErrorResponse;
+    expect(body.issues?.map((issue) => issue.path)).toContain('workspaces.ghost-repo.repo');
+  });
+
+  it('removes a workspace with 204 and 404s an unknown one', async () => {
+    await post(app, '/api/workspaces', {
+      id: 'second',
+      name: 'Second',
+      epic: 'DOC-900',
+      repo: 'app',
+      connector: 'tracker',
+    });
+
+    const removed = await app.request('/api/workspaces/second', { method: 'DELETE' });
+    expect(removed.status).toBe(204);
+    expect((await app.request('/api/workspaces/second/board')).status).toBe(404);
+    expect((await app.request('/api/workspaces/ghost', { method: 'DELETE' })).status).toBe(404);
   });
 
   it('serves and refreshes a board', async () => {

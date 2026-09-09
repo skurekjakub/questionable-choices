@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { createIssueSource, createRunner, createWorkspace } from '../../src/connectors/index.js';
-import { GitWorkspace } from '../../src/connectors/workspaces/git/index.js';
+import { createIssueSource, createRepo, createRunner } from '../../src/connectors/index.js';
+import { GitRepo } from '../../src/connectors/repos/git/index.js';
 import { JiraIssueSource } from '../../src/connectors/issues/jira/index.js';
 import type { RunnerConfig } from '../../src/core/types.js';
-import { makeWorkspace } from '../core/helpers.js';
+import { makeConnector, makeRepo, makeWorkspace } from '../core/helpers.js';
 
 const RUNNER_CONFIG: RunnerConfig = {
   type: 'claude-tmux',
@@ -16,11 +16,9 @@ const RUNNER_CONFIG: RunnerConfig = {
 };
 
 describe('the connector factories', () => {
-  it('build one connector per family, all keyed to the same workspace id', () => {
-    const config = makeWorkspace();
-
-    const issues = createIssueSource('docs', config.issues, {});
-    const workspace = createWorkspace('docs', config);
+  it('key an issue source to its workspace and a repo connector to its repo', () => {
+    const issues = createIssueSource('docs-nextjs', makeConnector(), makeWorkspace(), {});
+    const repo = createRepo('app', makeRepo());
     const runner = createRunner({
       config: RUNNER_CONFIG,
       port: 4400,
@@ -29,9 +27,18 @@ describe('the connector factories', () => {
     });
 
     expect(issues).toBeInstanceOf(JiraIssueSource);
-    expect(workspace).toBeInstanceOf(GitWorkspace);
-    expect(issues.id).toBe('docs');
-    expect(workspace.id).toBe('docs');
+    expect(repo).toBeInstanceOf(GitRepo);
+    expect(issues.id).toBe('docs-nextjs');
+    expect(repo.id).toBe('app');
     expect(runner.type).toBe('claude-tmux');
+  });
+
+  it('refuses a connector type it has no implementation for', () => {
+    const connector = { ...makeConnector(), type: 'github' } as unknown as ReturnType<
+      typeof makeConnector
+    >;
+    expect(() => createIssueSource('docs-nextjs', connector, makeWorkspace(), {})).toThrow(
+      /unknown connector type/,
+    );
   });
 });

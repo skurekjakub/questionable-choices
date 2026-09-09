@@ -1,4 +1,4 @@
-import type { IssueSource, IssueSourceConfig } from '../../core/types.js';
+import type { ConnectorConfig, IssueSource, WorkspaceQuery } from '../../core/types.js';
 import { createJiraIssueSource, type CreateJiraIssueSourceOptions } from './jira/index.js';
 
 /**
@@ -7,24 +7,29 @@ import { createJiraIssueSource, type CreateJiraIssueSourceOptions } from './jira
 export type CreateIssueSourceOptions = CreateJiraIssueSourceOptions;
 
 /**
- * Builds the issue source a board's configuration names.
+ * Builds the issue source one workspace reads through.
  *
- * @param id - Id of the board the source belongs to; becomes `IssueSource.id`.
- * @param config - The board's issue-source configuration.
+ * @param workspaceId - Id of the workspace; becomes `IssueSource.id`.
+ * @param connector - Account the workspace reads through; several workspaces
+ *   may share one.
+ * @param query - The workspace's epic, query override and review statuses.
  * @param env - Environment the named credential variables are read from;
  *   defaults to the current process environment.
  * @param options - Transport overrides passed on to the connector.
  * @returns The issue source.
- * @throws {Error} When the configuration names an unknown source type.
+ * @throws {Error} When the connector names an unknown type.
  */
 export function createIssueSource(
-  id: string,
-  config: IssueSourceConfig,
+  workspaceId: string,
+  connector: ConnectorConfig,
+  query: WorkspaceQuery,
   env: Record<string, string | undefined> = process.env,
   options: CreateIssueSourceOptions = {},
 ): IssueSource {
-  if (config.type === 'jira') return createJiraIssueSource(id, config, env, options);
-  throw new Error(`unknown issue source type '${(config as { type: string }).type}'`);
+  if (connector.type === 'jira') {
+    return createJiraIssueSource(workspaceId, connector, query, env, options);
+  }
+  throw new Error(`unknown connector type '${(connector as { type: string }).type}'`);
 }
 
 export {

@@ -295,9 +295,12 @@ export function buildRunScript(context: RunScriptContext): string {
     );
   }
 
+  // The server counts a run per launch and needs to know whether this one
+  // continues the previous transcript; no hook reports that.
+  const startBody = context.resumeSessionId === null ? '{}' : '{"mode":"resume"}';
   lines.push(
     '',
-    "post claude-start '{}'",
+    `post claude-start '${startBody}'`,
     '',
     claudeCommandLine(context),
     'status=$?',

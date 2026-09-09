@@ -178,8 +178,8 @@ export interface SessionRecord {
   issueKey: string;
   /** Id of the playbook that produced the prompt. */
   playbookId: string;
-  /** Id of the workspace that provided the checkout and the issue. */
-  workspaceId: string;
+  /** Id of the repo the checkout was made in; sessions belong to a repo, not a workspace. */
+  repoId: string;
   /** Absolute working directory of the tmux session. */
   cwd: string;
   /** Branch the session works on; null for isolation `shared`. */
@@ -269,10 +269,10 @@ export interface PlaybookDefaults {
 }
 
 /**
- * A named kickoff recipe on a workspace.
+ * A named kickoff recipe on a repo.
  */
 export interface Playbook {
-  /** Id, unique within its workspace. */
+  /** Id, unique within its repo. */
   id: string;
   /** Label shown on buttons and menus. */
   label: string;
@@ -289,16 +289,12 @@ export interface Playbook {
 }
 
 /**
- * A git repository plus its issue source, worktree policy, bootstrap command
- * and playbooks. One workspace is one board.
+ * A git repository plus its worktree policy, bootstrap command and playbooks.
+ * Several workspaces may name the same repo.
  */
-export interface WorkspaceConfig {
-  /** Name shown in the workspace switcher. */
-  name: string;
-  /** Where the workspace's issues come from; one epic per workspace. */
-  issues: IssueSourceConfig;
+export interface RepoConfig {
   /** Absolute path of the main checkout. */
-  repo: string;
+  path: string;
   /** Absolute directory that holds generated worktrees. */
   worktreeDir: string;
   /** Ref new worktrees branch from, e.g. `origin/main`. */
@@ -307,14 +303,14 @@ export interface WorkspaceConfig {
   branchPattern: string;
   /** Shell command run in the tmux session after a new worktree is created. */
   bootstrap?: string | undefined;
-  /** Playbooks offered on this workspace's cards. */
+  /** Playbooks offered on the cards of every workspace that names this repo. */
   playbooks: Playbook[];
 }
 
 /**
- * Issue-source configuration for a Jira Cloud epic.
+ * An issue-tracker account on a Jira Cloud site.
  */
-export interface JiraIssueSourceConfig {
+export interface JiraConnectorConfig {
   /** Discriminator selecting the Jira connector. */
   type: 'jira';
   /** Jira Cloud site host, e.g. `example.atlassian.net`. */
@@ -323,20 +319,40 @@ export interface JiraIssueSourceConfig {
   emailEnv: string;
   /** Name of the environment variable holding the API token. */
   tokenEnv: string;
-  /** Parent epic key; the default JQL lists its unfinished children. */
-  epic?: string | undefined;
-  /** Raw JQL that replaces the default query entirely. */
-  jql?: string | undefined;
-  /** Status names that land in the Review column. */
-  reviewStatuses: string[];
-  /** Poll interval in seconds. */
-  pollSeconds: number;
 }
 
 /**
- * Configuration of a board's issue source. One variant per connector type.
+ * An issue-tracker account. One variant per connector type.
  */
-export type IssueSourceConfig = JiraIssueSourceConfig;
+export type ConnectorConfig = JiraConnectorConfig;
+
+/**
+ * The part of a workspace that decides which issues its source lists and how
+ * they are bucketed.
+ */
+export interface WorkspaceQuery {
+  /** Parent epic key; the default query lists its unfinished children. */
+  epic: string;
+  /** Raw query that replaces the default one entirely. */
+  jql?: string | undefined;
+  /** Status names that land in the Review column. */
+  reviewStatuses: string[];
+}
+
+/**
+ * One epic, read through one connector and worked in one repo. The header
+ * dropdown switches workspaces; a board is a workspace's view.
+ */
+export interface WorkspaceConfig extends WorkspaceQuery {
+  /** Name shown in the workspace switcher. */
+  name: string;
+  /** Id of the connector the issues are read through. */
+  connector: string;
+  /** Id of the repo the sessions are worked in. */
+  repo: string;
+  /** Poll interval in seconds. */
+  pollSeconds: number;
+}
 
 /**
  * How the dashboard opens a checkout in a desktop editor.
@@ -360,18 +376,22 @@ export interface Config {
   editor: EditorConfig;
   /** Runner settings shared by every board. */
   runner: RunnerConfig;
+  /** Issue-tracker accounts, keyed by connector id. */
+  connectors: Record<string, ConnectorConfig>;
+  /** Git repositories and their playbooks, keyed by repo id. */
+  repos: Record<string, RepoConfig>;
   /** Workspaces, keyed by workspace id; each one is a board. */
   workspaces: Record<string, WorkspaceConfig>;
 }
 
 /**
- * Lists the issues of one board.
+ * Lists the issues of one workspace.
  */
 export interface IssueSource {
-  /** Id of the board this source belongs to. */
+  /** Id of the workspace this source belongs to. */
   readonly id: string;
   /**
-   * Lists every issue the board should show.
+   * Lists every issue the workspace should show.
    *
    * @returns The issues in source order (Jira rank for the Jira connector).
    * @throws {Error} When the tracker is unreachable or rejects the query.
@@ -388,19 +408,19 @@ export interface IssueSource {
 }
 
 /**
- * The checkout a session will run in, resolved by `Workspace.prepare`.
+ * The checkout a session will run in, resolved by `Repo.prepare`.
  */
 export interface PreparedCheckout {
   /** Absolute working directory for the tmux session. */
   cwd: string;
   /** Branch checked out at `cwd`; null for isolation `shared`. */
   branch: string | null;
-  /** Whether the workspace's bootstrap command still has to run in `cwd`. */
+  /** Whether the repo's bootstrap command still has to run in `cwd`. */
   needsBootstrap: boolean;
 }
 
 /**
- * A worktree the workspace knows about.
+ * A worktree the repo knows about.
  */
 export interface WorktreeInfo {
   /** Absolute path of the worktree. */
@@ -410,10 +430,21 @@ export interface WorktreeInfo {
 }
 
 /**
+ * What the caller already knows about an issue's checkout.
+ */
+export interface PrepareHints {
+  /**
+   * Branch the caller has on record for the issue, typically from its newest
+   * session record. Preferred over scanning the remote.
+   */
+  knownBranch?: string | null | undefined;
+}
+
+/**
  * Provides checkouts for sessions: worktree creation, reuse and removal.
  */
-export interface Workspace {
-  /** Id of the workspace, matching its key in `Config.workspaces`. */
+export interface Repo {
+  /** Id of the repo, matching its key in `Config.repos`. */
   readonly id: string;
   /**
    * Resolves the directory and branch a session will run in, creating a
@@ -421,10 +452,11 @@ export interface Workspace {
    *
    * @param issue - Issue the session is for; supplies the key and the slug.
    * @param playbook - Playbook whose `isolation` decides the policy.
+   * @param hints - What the caller already knows about the issue's checkout.
    * @returns The checkout to launch in.
    * @throws {Error} When git refuses, or when `issue-worktree` finds no branch.
    */
-  prepare(issue: Issue, playbook: Playbook): Promise<PreparedCheckout>;
+  prepare(issue: Issue, playbook: Playbook, hints?: PrepareHints): Promise<PreparedCheckout>;
   /**
    * Removes a worktree created for an issue.
    *

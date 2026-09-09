@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -14,10 +14,11 @@ import { Store } from '../../src/server/store.js';
 import { makeIssue } from '../core/helpers.js';
 import {
   FakeIssueSource,
+  FakeRepo,
   FakeRunner,
-  FakeWorkspace,
   RecordingLogger,
   makeConfig,
+  makeRuntime,
 } from './fakes.js';
 
 const START: CreateSessionRequest = {
@@ -44,8 +45,8 @@ interface Harness {
   runner: FakeRunner;
   /** Issue source the board is projected from. */
   source: FakeIssueSource;
-  /** Workspace connector the checkouts come from. */
-  workspace: FakeWorkspace;
+  /** Repo connector the checkouts come from. */
+  repo: FakeRepo;
   /** Diagnostics the manager wrote. */
   logger: RecordingLogger;
   /** Every editor launch the manager asked for. */
@@ -65,7 +66,7 @@ async function harness(): Promise<Harness> {
   const store = new Store(dir);
   await store.load();
   const source = new FakeIssueSource('ws', [makeIssue()]);
-  const workspace = new FakeWorkspace('ws', {
+  const repo = new FakeRepo('app', {
     cwd: '/repos/worktrees/DOC-1',
     branch: 'DOC-1-document-the-thing',
     needsBootstrap: true,
@@ -74,20 +75,20 @@ async function harness(): Promise<Harness> {
   const logger = new RecordingLogger();
   const editorCalls: Array<{ command: string; args: string[] }> = [];
   const clock = { ms: Date.parse('2026-09-09T12:00:00.000Z') };
-  const workspaceConfig = config.workspaces['ws'];
-  if (workspaceConfig === undefined) throw new Error('the test config lost its workspace');
   const manager = new SessionManager({
     config,
+    configPath: join(dir, 'config.json'),
     store,
     runner,
-    workspaces: [{ id: 'ws', config: workspaceConfig, issues: source, workspace }],
+    workspaces: [makeRuntime(config, 'ws', source, repo)],
+    createRuntime: (next, workspaceId) => makeRuntime(next, workspaceId, source, repo),
     derivedCacheTtlSeconds: 300,
     now: () => clock.ms,
     spawnEditor: (command, args) => editorCalls.push({ command, args }),
     logger,
   });
   await manager.refresh('ws');
-  return { dir, config, store, manager, runner, source, workspace, logger, editorCalls, clock };
+  return { dir, config, store, manager, runner, source, repo, logger, editorCalls, clock };
 }
 
 /**
@@ -134,7 +135,7 @@ describe('SessionManager', () => {
       expect(record.runs).toEqual([]);
       expect(record.cwd).toBe('/repos/worktrees/DOC-1');
       expect(h.store.session('qc-DOC-1-implement')).toBeDefined();
-      expect(h.store.worktree('ws', 'DOC-1')).toEqual({
+      expect(h.store.worktree('app', 'DOC-1')).toEqual({
         path: '/repos/worktrees/DOC-1',
         branch: 'DOC-1-document-the-thing',
         bootstrapped: false,
@@ -177,7 +178,7 @@ describe('SessionManager', () => {
     });
 
     it("surfaces git's message when the checkout cannot be prepared", async () => {
-      h.workspace.prepareError = new Error('fatal: branch DOC-1-x is already checked out');
+      h.repo.prepareError = new Error('fatal: branch DOC-1-x is already checked out');
       await expect(h.manager.startSession('ws', 'DOC-1', START)).rejects.toMatchObject({
         status: 409,
         detail: 'fatal: branch DOC-1-x is already checked out',
@@ -197,6 +198,15 @@ describe('SessionManager', () => {
       await expect(h.manager.startSession('ws', 'DOC-404', START)).rejects.toMatchObject({
         status: 404,
       });
+    });
+
+    it('hands the repo the branch of the newest record for the issue', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      expect(h.repo.prepared[0]?.hints).toEqual({ knownBranch: null });
+
+      await h.manager.killSession('qc-DOC-1-implement');
+      await h.manager.startSession('ws', 'DOC-1', { ...START, playbookId: 'test' });
+      expect(h.repo.prepared[1]?.hints).toEqual({ knownBranch: 'DOC-1-document-the-thing' });
     });
   });
 
@@ -276,14 +286,14 @@ describe('SessionManager', () => {
       await h.manager.killSession('qc-DOC-1-implement');
       const result = await h.manager.removeWorktree('qc-DOC-1-implement', true);
       expect(result).toEqual({ path: '/repos/worktrees/DOC-1', removed: true });
-      expect(h.workspace.removed).toEqual([{ issueKey: 'DOC-1', force: true }]);
-      expect(h.store.worktree('ws', 'DOC-1')).toBeUndefined();
+      expect(h.repo.removed).toEqual([{ issueKey: 'DOC-1', force: true }]);
+      expect(h.store.worktree('app', 'DOC-1')).toBeUndefined();
     });
 
     it("surfaces git's message when the tree is dirty", async () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       await h.manager.killSession('qc-DOC-1-implement');
-      h.workspace.removeError = new Error('fatal: contains modified or untracked files');
+      h.repo.removeError = new Error('fatal: contains modified or untracked files');
       await expect(h.manager.removeWorktree('qc-DOC-1-implement', false)).rejects.toMatchObject({
         detail: 'fatal: contains modified or untracked files',
       });
@@ -363,6 +373,78 @@ describe('SessionManager', () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       await h.manager.reconcile();
       expect(h.store.session('qc-DOC-1-implement')?.state).toBe('starting');
+    });
+  });
+
+  describe('workspaces', () => {
+    const ADD = {
+      id: 'second',
+      name: 'Second',
+      epic: 'DOC-900',
+      repo: 'app',
+      connector: 'tracker',
+    };
+
+    it('adds a workspace, writes the file and serves its board', async () => {
+      const summary = await h.manager.addWorkspace(ADD);
+
+      expect(summary).toEqual({
+        id: 'second',
+        name: 'Second',
+        epic: 'DOC-900',
+        repo: 'app',
+        connector: 'tracker',
+      });
+      expect(h.manager.workspaceIds()).toEqual(['ws', 'second']);
+      expect(h.manager.board('second').workspaceId).toBe('second');
+      const written = JSON.parse(await readFile(join(h.dir, 'config.json'), 'utf8')) as Config;
+      expect(Object.keys(written.workspaces)).toEqual(['ws', 'second']);
+    });
+
+    it('shows the same sessions on two workspaces over one repo', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.addWorkspace(ADD);
+      await h.manager.refresh('second');
+
+      expect(laneOf(h.manager.board('second'), 'DOC-1')).toBe('working');
+    });
+
+    it('refuses a duplicate id without touching the file', async () => {
+      await expect(h.manager.addWorkspace({ ...ADD, id: 'ws' })).rejects.toMatchObject({
+        name: 'ConfigError',
+      });
+      await expect(readFile(join(h.dir, 'config.json'), 'utf8')).rejects.toThrow();
+    });
+
+    it('removes a workspace and keeps its sessions and worktrees', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.addWorkspace(ADD);
+
+      await h.manager.removeWorkspace('second');
+
+      expect(h.manager.workspaceIds()).toEqual(['ws']);
+      expect(h.store.session('qc-DOC-1-implement')).toBeDefined();
+      expect(h.store.worktree('app', 'DOC-1')).toBeDefined();
+      expect(() => h.manager.board('second')).toThrow(ActionError);
+    });
+
+    it('answers 404 when removing an unknown workspace', async () => {
+      await expect(h.manager.removeWorkspace('ghost')).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('pushes a config frame on both changes', async () => {
+      await settle();
+      const frames: EventFrame[] = [];
+      const unsubscribe = h.manager.subscribe((frame) => frames.push(frame));
+
+      await h.manager.addWorkspace(ADD);
+      await h.manager.removeWorkspace('second');
+      unsubscribe();
+
+      const configs = frames.filter((frame) => frame.type === 'config');
+      expect(configs).toHaveLength(2);
+      expect(configs[0]?.type === 'config' && configs[0].config.workspaces).toHaveLength(2);
+      expect(configs[1]?.type === 'config' && configs[1].config.workspaces).toHaveLength(1);
     });
   });
 

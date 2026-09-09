@@ -13,19 +13,19 @@ import {
 } from '../core/config.js';
 import type { Config } from '../core/types.js';
 import { createApp } from './app.js';
-import { buildConnectors } from './connectors.js';
+import { buildConnectors, buildWorkspaceRuntime } from './connectors.js';
 import { SessionManager, consoleLogger, readDerivedCacheTtlSeconds } from './session-manager.js';
 import { Store } from './store.js';
 
 /**
  * Loads the configuration, printing the issue list and exiting on failure.
  *
- * @param home - Home directory used to resolve the path and expand `~`.
+ * @param path - Absolute path of the configuration file.
+ * @param home - Home directory used to expand `~`.
  * @returns The validated configuration.
  * @throws {Error} When loading fails for a reason that is not a `ConfigError`.
  */
-function loadOrExit(home: string): Config {
-  const path = resolveConfigPath(process.env, home);
+function loadOrExit(path: string, home: string): Config {
   try {
     return loadConfig(path, { home });
   } catch (cause) {
@@ -44,7 +44,8 @@ function loadOrExit(home: string): Config {
  */
 async function main(): Promise<void> {
   const home = homedir();
-  const config = loadOrExit(home);
+  const configPath = resolveConfigPath(process.env, home);
+  const config = loadOrExit(configPath, home);
   for (const warning of checkEnvironment(config, process.env)) {
     console.warn(`warning: ${warning}`);
   }
@@ -52,12 +53,14 @@ async function main(): Promise<void> {
   const store = new Store(config.dataDir);
   await store.load();
 
-  const { runner, workspaces } = buildConnectors(config, home);
+  const { runner, repos, workspaces } = buildConnectors(config, home);
   const manager = new SessionManager({
     config,
+    configPath,
     store,
     runner,
     workspaces,
+    createRuntime: (next, workspaceId) => buildWorkspaceRuntime(next, workspaceId, repos),
     derivedCacheTtlSeconds: readDerivedCacheTtlSeconds(join(home, '.claude', 'settings.json')),
     logger: consoleLogger,
   });

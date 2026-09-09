@@ -10,10 +10,11 @@ import { Store } from '../../src/server/store.js';
 import { makeIssue } from '../core/helpers.js';
 import {
   FakeIssueSource,
+  FakeRepo,
   FakeRunner,
-  FakeWorkspace,
   RecordingLogger,
   makeConfig,
+  makeRuntime,
 } from './fakes.js';
 
 const SESSION_ID = 'qc-DOC-1-implement';
@@ -76,27 +77,22 @@ describe('hook ingress', () => {
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'qc-hooks-'));
     const config = makeConfig(dir);
-    const workspaceConfig = config.workspaces['ws'];
-    if (workspaceConfig === undefined) throw new Error('the test config lost its workspace');
     store = new Store(dir);
     await store.load();
     logger = new RecordingLogger();
+    const source = new FakeIssueSource('ws', [makeIssue()]);
+    const repo = new FakeRepo('app', {
+      cwd: '/repos/worktrees/DOC-1',
+      branch: 'DOC-1-document-the-thing',
+      needsBootstrap: false,
+    });
     manager = new SessionManager({
       config,
+      configPath: join(dir, 'config.json'),
       store,
       runner: new FakeRunner(),
-      workspaces: [
-        {
-          id: 'ws',
-          config: workspaceConfig,
-          issues: new FakeIssueSource('ws', [makeIssue()]),
-          workspace: new FakeWorkspace('ws', {
-            cwd: '/repos/worktrees/DOC-1',
-            branch: 'DOC-1-document-the-thing',
-            needsBootstrap: false,
-          }),
-        },
-      ],
+      workspaces: [makeRuntime(config, 'ws', source, repo)],
+      createRuntime: (next, workspaceId) => makeRuntime(next, workspaceId, source, repo),
       derivedCacheTtlSeconds: 300,
       logger,
     });

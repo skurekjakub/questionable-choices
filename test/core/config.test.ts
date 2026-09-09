@@ -4,13 +4,17 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   ConfigError,
+  applyWorkspaceChange,
   checkEnvironment,
   expandHome,
   formatConfigIssues,
   loadConfig,
   parseConfig,
+  removeWorkspace,
   resolveConfigPath,
+  serializeConfig,
   startDefaults,
+  workspaceIdFor,
 } from '../../src/core/config.js';
 
 const HOME = '/home/tester';
@@ -38,17 +42,17 @@ function minimal(overrides: Record<string, unknown> = {}): Record<string, unknow
       models: [{ id: 'm1', label: 'M1' }],
       defaultModel: 'm1',
     },
-    workspaces: {
-      ws: {
-        name: 'Workspace',
-        issues: {
-          type: 'jira',
-          site: 'example.atlassian.net',
-          emailEnv: 'JIRA_EMAIL',
-          tokenEnv: 'JIRA_TOKEN',
-          epic: 'DOC-1',
-        },
-        repo: '~/repos/app',
+    connectors: {
+      tracker: {
+        type: 'jira',
+        site: 'example.atlassian.net',
+        emailEnv: 'JIRA_EMAIL',
+        tokenEnv: 'JIRA_TOKEN',
+      },
+    },
+    repos: {
+      app: {
+        path: '~/repos/app',
         worktreeDir: '~/repos/worktrees',
         playbooks: [
           {
@@ -58,6 +62,14 @@ function minimal(overrides: Record<string, unknown> = {}): Record<string, unknow
             promptTemplate: 'Work on {{key}}',
           },
         ],
+      },
+    },
+    workspaces: {
+      ws: {
+        name: 'Workspace',
+        epic: 'DOC-1',
+        connector: 'tracker',
+        repo: 'app',
       },
     },
     ...overrides,
@@ -91,11 +103,30 @@ describe('the shipped example', () => {
       command: 'cmd.exe',
       args: ['/c', 'code', '--remote', 'wsl+Ubuntu', '{{path}}'],
     });
-    expect(Object.keys(config.workspaces)).toEqual(['docs-workspace']);
-    const workspace = config.workspaces['docs-workspace'];
+    expect(Object.keys(config.workspaces)).toEqual(['docs-nextjs', 'docs-nextjs-migration']);
+    const workspace = config.workspaces['docs-nextjs'];
     expect(workspace?.name).toBe('Docs · Next.js');
-    expect(workspace?.issues.epic).toBe('DOC-3807');
-    expect(workspace?.playbooks.map((playbook) => playbook.id)).toEqual(['implement', 'test']);
+    expect(workspace?.epic).toBe('DOC-3807');
+    expect(workspace?.connector).toBe('kentico-jira');
+    expect(config.connectors['kentico-jira']?.site).toBe('kentico.atlassian.net');
+    expect(config.repos['docs-workspace']?.playbooks.map((playbook) => playbook.id)).toEqual([
+      'implement',
+      'test',
+    ]);
+  });
+
+  it('defaults the review statuses and the poll interval of a bare workspace', () => {
+    const config = parseConfig(exampleDocument(), { home: HOME });
+    const workspace = config.workspaces['docs-nextjs-migration'];
+    expect(workspace?.reviewStatuses).toEqual(['Ready for review']);
+    expect(workspace?.pollSeconds).toBe(120);
+  });
+
+  it('round-trips through serializeConfig', () => {
+    const config = parseConfig(exampleDocument(), { home: HOME });
+    expect(parseConfig(JSON.parse(JSON.stringify(serializeConfig(config))), { home: '' })).toEqual(
+      config,
+    );
   });
 
   it('validates without the optional editor block', () => {
@@ -123,29 +154,22 @@ describe('defaults', () => {
     expect(config.runner.tmuxPrefix).toBe('qc');
     expect(config.runner.defaultEffort).toBe('medium');
     expect(config.runner.defaultPermissionMode).toBe('default');
+    const repo = config.repos['app'];
+    expect(repo?.baseRef).toBe('origin/main');
+    expect(repo?.branchPattern).toBe('{{key}}-{{slug}}');
+    expect(repo?.bootstrap).toBeUndefined();
+    expect(repo?.playbooks[0]?.primaryFor).toEqual([]);
+    expect(repo?.playbooks[0]?.description).toBe('');
     const workspace = config.workspaces['ws'];
-    expect(workspace?.baseRef).toBe('origin/main');
-    expect(workspace?.branchPattern).toBe('{{key}}-{{slug}}');
-    expect(workspace?.bootstrap).toBeUndefined();
-    expect(workspace?.issues.pollSeconds).toBe(120);
-    expect(workspace?.issues.reviewStatuses).toEqual([]);
-    expect(workspace?.playbooks[0]?.primaryFor).toEqual([]);
-    expect(workspace?.playbooks[0]?.description).toBe('');
+    expect(workspace?.pollSeconds).toBe(120);
+    expect(workspace?.reviewStatuses).toEqual(['Ready for review']);
   });
 
-  it('accepts a jql override instead of an epic', () => {
+  it('accepts a jql override alongside the epic', () => {
     const document = minimal();
     const workspaces = document['workspaces'] as Record<string, Record<string, unknown>>;
-    (workspaces['ws'] as Record<string, unknown>)['issues'] = {
-      type: 'jira',
-      site: 'example.atlassian.net',
-      emailEnv: 'E',
-      tokenEnv: 'T',
-      jql: 'project = DOC',
-    };
-    expect(parseConfig(document, { home: HOME }).workspaces['ws']?.issues.jql).toBe(
-      'project = DOC',
-    );
+    (workspaces['ws'] as Record<string, unknown>)['jql'] = 'project = DOC';
+    expect(parseConfig(document, { home: HOME }).workspaces['ws']?.jql).toBe('project = DOC');
   });
 });
 
@@ -167,8 +191,8 @@ describe('home expansion', () => {
   it('expands every path field of a config', () => {
     const config = parseConfig(minimal({ dataDir: '~/data' }), { home: HOME });
     expect(config.dataDir).toBe(`${HOME}/data`);
-    expect(config.workspaces['ws']?.repo).toBe(`${HOME}/repos/app`);
-    expect(config.workspaces['ws']?.worktreeDir).toBe(`${HOME}/repos/worktrees`);
+    expect(config.repos['app']?.path).toBe(`${HOME}/repos/app`);
+    expect(config.repos['app']?.worktreeDir).toBe(`${HOME}/repos/worktrees`);
   });
 });
 
@@ -193,6 +217,30 @@ describe('rejections', () => {
    */
   const workspaceOf = (document: Record<string, unknown>): Record<string, unknown> =>
     (document['workspaces'] as Record<string, Record<string, unknown>>)['ws'] as Record<
+      string,
+      unknown
+    >;
+
+  /**
+   * Reads the single repo out of a document under construction.
+   *
+   * @param document - The document.
+   * @returns The repo object.
+   */
+  const repoOf = (document: Record<string, unknown>): Record<string, unknown> =>
+    (document['repos'] as Record<string, Record<string, unknown>>)['app'] as Record<
+      string,
+      unknown
+    >;
+
+  /**
+   * Reads the single connector out of a document under construction.
+   *
+   * @param document - The document.
+   * @returns The connector object.
+   */
+  const connectorOf = (document: Record<string, unknown>): Record<string, unknown> =>
+    (document['connectors'] as Record<string, Record<string, unknown>>)['tracker'] as Record<
       string,
       unknown
     >;
@@ -229,41 +277,48 @@ describe('rejections', () => {
     {
       name: 'a playbook default naming an unoffered model',
       document: broken((document) => {
-        const playbooks = workspaceOf(document)['playbooks'] as Record<string, unknown>[];
+        const playbooks = repoOf(document)['playbooks'] as Record<string, unknown>[];
         (playbooks[0] as Record<string, unknown>)['defaults'] = { model: 'ghost' };
       }),
-      locator: 'workspaces.ws.playbooks[0].defaults.model',
+      locator: 'repos.app.playbooks[0].defaults.model',
     },
     {
       name: 'duplicate playbook ids',
       document: broken((document) => {
-        const playbooks = workspaceOf(document)['playbooks'] as Record<string, unknown>[];
+        const playbooks = repoOf(document)['playbooks'] as Record<string, unknown>[];
         playbooks.push({ ...(playbooks[0] as Record<string, unknown>) });
       }),
-      locator: 'workspaces.ws.playbooks[1].id',
+      locator: 'repos.app.playbooks[1].id',
     },
     {
       name: 'a playbook claiming a lane that does not exist',
       document: broken((document) => {
-        const playbooks = workspaceOf(document)['playbooks'] as Record<string, unknown>[];
+        const playbooks = repoOf(document)['playbooks'] as Record<string, unknown>[];
         (playbooks[0] as Record<string, unknown>)['primaryFor'] = ['icebox'];
       }),
-      locator: 'workspaces.ws.playbooks[0].primaryFor[0]',
+      locator: 'repos.app.playbooks[0].primaryFor[0]',
     },
     {
       name: 'an unknown isolation',
       document: broken((document) => {
-        const playbooks = workspaceOf(document)['playbooks'] as Record<string, unknown>[];
+        const playbooks = repoOf(document)['playbooks'] as Record<string, unknown>[];
         (playbooks[0] as Record<string, unknown>)['isolation'] = 'container';
       }),
-      locator: 'workspaces.ws.playbooks[0].isolation',
+      locator: 'repos.app.playbooks[0].isolation',
     },
     {
-      name: 'a workspace with no playbooks',
+      name: 'a repo with no playbooks',
       document: broken((document) => {
-        workspaceOf(document)['playbooks'] = [];
+        repoOf(document)['playbooks'] = [];
       }),
-      locator: 'workspaces.ws.playbooks',
+      locator: 'repos.app.playbooks',
+    },
+    {
+      name: 'a repo with no path',
+      document: broken((document) => {
+        delete repoOf(document)['path'];
+      }),
+      locator: 'repos.app.path',
     },
     {
       name: 'a workspace with no name',
@@ -273,36 +328,46 @@ describe('rejections', () => {
       locator: 'workspaces.ws.name',
     },
     {
-      name: 'an issue source naming neither epic nor jql',
+      name: 'a workspace naming no epic',
       document: broken((document) => {
-        const issues = workspaceOf(document)['issues'] as Record<string, unknown>;
-        delete issues['epic'];
+        delete workspaceOf(document)['epic'];
       }),
-      locator: 'workspaces.ws.issues.epic',
+      locator: 'workspaces.ws.epic',
     },
     {
-      name: 'an issue source with no credentials named',
+      name: 'a workspace pointing at a connector that is not configured',
       document: broken((document) => {
-        const issues = workspaceOf(document)['issues'] as Record<string, unknown>;
-        issues['emailEnv'] = '';
+        workspaceOf(document)['connector'] = 'ghost';
       }),
-      locator: 'workspaces.ws.issues.emailEnv',
+      locator: 'workspaces.ws.connector',
     },
     {
-      name: 'an unknown issue source type',
+      name: 'a workspace pointing at a repo that is not configured',
       document: broken((document) => {
-        const issues = workspaceOf(document)['issues'] as Record<string, unknown>;
-        issues['type'] = 'github';
+        workspaceOf(document)['repo'] = 'ghost';
       }),
-      locator: 'workspaces.ws.issues.type',
+      locator: 'workspaces.ws.repo',
+    },
+    {
+      name: 'a connector with no credentials named',
+      document: broken((document) => {
+        connectorOf(document)['emailEnv'] = '';
+      }),
+      locator: 'connectors.tracker.emailEnv',
+    },
+    {
+      name: 'an unknown connector type',
+      document: broken((document) => {
+        connectorOf(document)['type'] = 'github';
+      }),
+      locator: 'connectors.tracker.type',
     },
     {
       name: 'a poll interval below the floor',
       document: broken((document) => {
-        const issues = workspaceOf(document)['issues'] as Record<string, unknown>;
-        issues['pollSeconds'] = 1;
+        workspaceOf(document)['pollSeconds'] = 1;
       }),
-      locator: 'workspaces.ws.issues.pollSeconds',
+      locator: 'workspaces.ws.pollSeconds',
     },
     {
       name: 'a port outside the valid range',
@@ -312,6 +377,8 @@ describe('rejections', () => {
       locator: 'port',
     },
     { name: 'no workspaces at all', document: minimal({ workspaces: {} }), locator: 'workspaces' },
+    { name: 'no repos at all', document: minimal({ repos: {} }), locator: 'repos' },
+    { name: 'no connectors at all', document: minimal({ connectors: {} }), locator: 'connectors' },
     { name: 'no runner block', document: { workspaces: {} }, locator: 'runner' },
   ];
 
@@ -380,7 +447,143 @@ describe('checkEnvironment', () => {
   ])('warns about %s', (_name, env, expected) => {
     const warnings = checkEnvironment(config, env);
     expect(warnings.length).toBe(expected);
-    expect(warnings.every((warning) => warning.includes("workspace 'ws'"))).toBe(true);
+    expect(warnings.every((warning) => warning.includes("connector 'tracker'"))).toBe(true);
+  });
+});
+
+describe('applyWorkspaceChange', () => {
+  const config = parseConfig(minimal(), { home: HOME });
+
+  it('adds a workspace against an existing connector', () => {
+    const next = applyWorkspaceChange(config, {
+      id: 'second',
+      name: 'Second',
+      epic: 'DOC-9',
+      repo: 'app',
+      connector: 'tracker',
+    });
+
+    expect(Object.keys(next.workspaces)).toEqual(['ws', 'second']);
+    expect(next.workspaces['second']).toEqual({
+      name: 'Second',
+      epic: 'DOC-9',
+      connector: 'tracker',
+      repo: 'app',
+      reviewStatuses: ['Ready for review'],
+      pollSeconds: 120,
+    });
+    expect(Object.keys(config.workspaces)).toEqual(['ws']);
+  });
+
+  it('creates the inline connector alongside the workspace', () => {
+    const next = applyWorkspaceChange(config, {
+      name: 'Other Tracker',
+      epic: 'OPS-1',
+      repo: 'app',
+      newConnector: {
+        id: 'ops',
+        site: 'ops.atlassian.net',
+        emailEnv: 'OPS_EMAIL',
+        tokenEnv: 'OPS_TOKEN',
+      },
+      reviewStatuses: ['In review'],
+      jql: 'project = OPS',
+    });
+
+    expect(next.connectors['ops']?.site).toBe('ops.atlassian.net');
+    const added = next.workspaces['other-tracker'];
+    expect(added?.connector).toBe('ops');
+    expect(added?.reviewStatuses).toEqual(['In review']);
+    expect(added?.jql).toBe('project = OPS');
+  });
+
+  it('slugs the id out of the name when the request names none', () => {
+    expect(workspaceIdFor({ name: 'Docs · Next.js', epic: 'DOC-1', repo: 'app' })).toBe(
+      'docs-next-js',
+    );
+  });
+
+  it.each([
+    [
+      'a duplicate id',
+      { id: 'ws', name: 'Again', epic: 'DOC-2', repo: 'app', connector: 'tracker' },
+      'id',
+    ],
+    [
+      'neither connector nor newConnector',
+      { name: 'Bare', epic: 'DOC-2', repo: 'app' },
+      'connector',
+    ],
+    [
+      'both connector and newConnector',
+      {
+        name: 'Both',
+        epic: 'DOC-2',
+        repo: 'app',
+        connector: 'tracker',
+        newConnector: { id: 'x', site: 's', emailEnv: 'E', tokenEnv: 'T' },
+      },
+      'connector',
+    ],
+    [
+      'an inline connector whose id is taken',
+      {
+        name: 'Taken',
+        epic: 'DOC-2',
+        repo: 'app',
+        newConnector: { id: 'tracker', site: 's', emailEnv: 'E', tokenEnv: 'T' },
+      },
+      'newConnector.id',
+    ],
+    [
+      'a repo that is not configured',
+      { name: 'Ghost repo', epic: 'DOC-2', repo: 'ghost', connector: 'tracker' },
+      'workspaces.ghost-repo.repo',
+    ],
+    [
+      'an epic that is missing',
+      { name: 'No epic', epic: '', repo: 'app', connector: 'tracker' },
+      'workspaces.no-epic.epic',
+    ],
+  ])('refuses %s at %s', (_name, request, locator) => {
+    try {
+      applyWorkspaceChange(config, request);
+      throw new Error('expected the request to be rejected');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConfigError);
+      expect((error as ConfigError).issues.map((issue) => issue.path)).toContain(locator);
+    }
+  });
+});
+
+describe('removeWorkspace', () => {
+  const config = applyWorkspaceChange(parseConfig(minimal(), { home: HOME }), {
+    id: 'second',
+    name: 'Second',
+    epic: 'DOC-9',
+    repo: 'app',
+    connector: 'tracker',
+  });
+
+  it('drops one workspace and leaves the repos and connectors alone', () => {
+    const next = removeWorkspace(config, 'second');
+    expect(Object.keys(next.workspaces)).toEqual(['ws']);
+    expect(Object.keys(next.repos)).toEqual(['app']);
+    expect(Object.keys(next.connectors)).toEqual(['tracker']);
+  });
+
+  it('refuses an unknown id at the id path', () => {
+    try {
+      removeWorkspace(config, 'ghost');
+      throw new Error('expected the removal to be rejected');
+    } catch (error) {
+      expect((error as ConfigError).issues[0]?.path).toBe('id');
+    }
+  });
+
+  it('refuses to remove the last workspace', () => {
+    const single = parseConfig(minimal(), { home: HOME });
+    expect(() => removeWorkspace(single, 'ws')).toThrow(ConfigError);
   });
 });
 

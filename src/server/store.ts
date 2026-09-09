@@ -11,7 +11,7 @@ export interface WorktreeRecord {
   path: string;
   /** Branch checked out there, or null when the checkout has none of its own. */
   branch: string | null;
-  /** Whether the workspace's bootstrap command has already run there. */
+  /** Whether the repo's bootstrap command has already run there. */
   bootstrapped: boolean;
 }
 
@@ -21,9 +21,9 @@ export interface WorktreeRecord {
 export type FlagsByWorkspace = Record<string, Record<string, IssueFlags>>;
 
 /**
- * Known checkouts, keyed by workspace id and then by issue key.
+ * Known checkouts, keyed by repo id and then by issue key.
  */
-export type WorktreesByWorkspace = Record<string, Record<string, WorktreeRecord>>;
+export type WorktreesByRepo = Record<string, Record<string, WorktreeRecord>>;
 
 const SESSIONS_FILE = 'sessions.json';
 const FLAGS_FILE = 'flags.json';
@@ -37,7 +37,7 @@ const WORKTREES_FILE = 'worktrees.json';
  * @returns Nothing.
  * @throws {Error} When the directory is unwritable or the rename fails.
  */
-async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   // A rename is atomic only within one filesystem, so the temporary file is a
   // sibling of the destination rather than a file under the system temp dir.
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -80,7 +80,7 @@ export class Store {
 
   private records: SessionRecord[] = [];
   private flags: FlagsByWorkspace = {};
-  private worktrees: WorktreesByWorkspace = {};
+  private worktrees: WorktreesByRepo = {};
   private queue: Promise<void> = Promise.resolve();
 
   /**
@@ -105,7 +105,7 @@ export class Store {
     await mkdir(join(this.dataDir, 'sessions'), { recursive: true });
     this.records = await readJson<SessionRecord[]>(this.path(SESSIONS_FILE), []);
     this.flags = await readJson<FlagsByWorkspace>(this.path(FLAGS_FILE), {});
-    this.worktrees = await readJson<WorktreesByWorkspace>(this.path(WORKTREES_FILE), {});
+    this.worktrees = await readJson<WorktreesByRepo>(this.path(WORKTREES_FILE), {});
   }
 
   /**
@@ -207,58 +207,54 @@ export class Store {
   }
 
   /**
-   * Checkouts known for every issue on one workspace.
+   * Checkouts known for every issue in one repo.
    *
-   * @param workspaceId - Workspace whose checkouts to read.
+   * @param repoId - Repo whose checkouts to read.
    * @returns The checkouts keyed by issue key; empty when there are none.
    */
-  worktreesOf(workspaceId: string): Record<string, WorktreeRecord> {
-    return this.worktrees[workspaceId] ?? {};
+  worktreesOf(repoId: string): Record<string, WorktreeRecord> {
+    return this.worktrees[repoId] ?? {};
   }
 
   /**
    * Looks one issue's checkout up.
    *
-   * @param workspaceId - Workspace the issue belongs to.
+   * @param repoId - Repo the checkout was made in.
    * @param issueKey - Key of the issue.
    * @returns The checkout, or undefined when the issue has none.
    */
-  worktree(workspaceId: string, issueKey: string): WorktreeRecord | undefined {
-    return this.worktrees[workspaceId]?.[issueKey];
+  worktree(repoId: string, issueKey: string): WorktreeRecord | undefined {
+    return this.worktrees[repoId]?.[issueKey];
   }
 
   /**
    * Records the checkout made for one issue and persists the file.
    *
-   * @param workspaceId - Workspace the issue belongs to.
+   * @param repoId - Repo the checkout was made in.
    * @param issueKey - Key of the issue.
    * @param worktree - The checkout to remember.
    * @returns Nothing.
    * @throws {Error} When the file cannot be written.
    */
-  async setWorktree(
-    workspaceId: string,
-    issueKey: string,
-    worktree: WorktreeRecord,
-  ): Promise<void> {
-    const perWorkspace = this.worktrees[workspaceId] ?? {};
-    perWorkspace[issueKey] = worktree;
-    this.worktrees[workspaceId] = perWorkspace;
+  async setWorktree(repoId: string, issueKey: string, worktree: WorktreeRecord): Promise<void> {
+    const perRepo = this.worktrees[repoId] ?? {};
+    perRepo[issueKey] = worktree;
+    this.worktrees[repoId] = perRepo;
     await this.enqueue(() => writeJsonAtomic(this.path(WORKTREES_FILE), this.worktrees));
   }
 
   /**
    * Forgets the checkout made for one issue and persists the file.
    *
-   * @param workspaceId - Workspace the issue belongs to.
+   * @param repoId - Repo the checkout was made in.
    * @param issueKey - Key of the issue whose checkout is gone.
    * @returns Nothing.
    * @throws {Error} When the file cannot be written.
    */
-  async clearWorktree(workspaceId: string, issueKey: string): Promise<void> {
-    const perWorkspace = this.worktrees[workspaceId];
-    if (perWorkspace === undefined || perWorkspace[issueKey] === undefined) return;
-    delete perWorkspace[issueKey];
+  async clearWorktree(repoId: string, issueKey: string): Promise<void> {
+    const perRepo = this.worktrees[repoId];
+    if (perRepo === undefined || perRepo[issueKey] === undefined) return;
+    delete perRepo[issueKey];
     await this.enqueue(() => writeJsonAtomic(this.path(WORKTREES_FILE), this.worktrees));
   }
 

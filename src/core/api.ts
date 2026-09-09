@@ -14,6 +14,16 @@ import type {
 } from './types.js';
 
 /**
+ * One reason a document was rejected, with the path that caused it.
+ */
+export interface ConfigIssue {
+  /** Dotted path into the document, e.g. `workspaces.docs.epic`. */
+  path: string;
+  /** Human-readable explanation. */
+  message: string;
+}
+
+/**
  * Body of every non-2xx JSON response.
  */
 export interface ErrorResponse {
@@ -21,6 +31,8 @@ export interface ErrorResponse {
   error: string;
   /** Extra context, e.g. git's stderr or the command that failed. */
   detail?: string | undefined;
+  /** Per-field validation problems, when the refusal came from a schema. */
+  issues?: ConfigIssue[] | undefined;
 }
 
 /**
@@ -31,6 +43,33 @@ export interface WorkspaceSummary {
   id: string;
   /** Name shown in the switcher. */
   name: string;
+  /** Key of the epic the board projects. */
+  epic: string;
+  /** Id of the repo the sessions are worked in. */
+  repo: string;
+  /** Id of the connector the issues are read through. */
+  connector: string;
+}
+
+/**
+ * A repo as the add-workspace dialog lists it.
+ */
+export interface RepoSummary {
+  /** Repo id, referenced by a workspace's `repo`. */
+  id: string;
+  /** Absolute path of the main checkout. */
+  path: string;
+}
+
+/**
+ * A connector as the add-workspace dialog lists it. Credentials never leave
+ * the server: only the site is reported.
+ */
+export interface ConnectorSummary {
+  /** Connector id, referenced by a workspace's `connector`. */
+  id: string;
+  /** Issue-tracker site host. */
+  site: string;
 }
 
 /**
@@ -65,8 +104,50 @@ export interface PublicRunnerConfig {
 export interface PublicConfigResponse {
   /** Workspaces, in switcher order. */
   workspaces: WorkspaceSummary[];
+  /** Repos a workspace can be pointed at, in configuration order. */
+  repos: RepoSummary[];
+  /** Connectors a workspace can read through, in configuration order. */
+  connectors: ConnectorSummary[];
   /** Picker options and defaults. */
   runner: PublicRunnerConfig;
+}
+
+/**
+ * A connector created inline from the add-workspace dialog.
+ */
+export interface NewConnectorRequest {
+  /** Id the new connector gets in the configuration file. */
+  id: string;
+  /** Issue-tracker site host, e.g. `example.atlassian.net`. */
+  site: string;
+  /** Name of the environment variable holding the account email. */
+  emailEnv: string;
+  /** Name of the environment variable holding the API token. */
+  tokenEnv: string;
+}
+
+/**
+ * Body of `POST /api/workspaces`.
+ *
+ * Exactly one of `connector` and `newConnector` must be present.
+ */
+export interface CreateWorkspaceRequest {
+  /** Workspace id; derived from the name when absent. */
+  id?: string | undefined;
+  /** Name shown in the switcher. */
+  name: string;
+  /** Key of the epic the board projects. */
+  epic: string;
+  /** Id of an existing repo. */
+  repo: string;
+  /** Id of an existing connector. */
+  connector?: string | undefined;
+  /** A connector to create alongside the workspace. */
+  newConnector?: NewConnectorRequest | undefined;
+  /** Status names that land in the Review column; defaulted when absent. */
+  reviewStatuses?: string[] | undefined;
+  /** Raw query replacing the default epic-children one. */
+  jql?: string | undefined;
 }
 
 /**
@@ -313,6 +394,12 @@ export type EventFrame =
       type: 'session';
       /** The record after the change. */
       record: SessionRecord;
+    }
+  | {
+      /** A workspace was added or removed. */
+      type: 'config';
+      /** The public configuration after the change. */
+      config: PublicConfigResponse;
     };
 
 /**

@@ -2,7 +2,14 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { existsSync } from 'node:fs';
 import { Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import type { CreateSessionRequest, ErrorResponse, SetFlagsRequest } from '../core/api.js';
+import type {
+  CreateSessionRequest,
+  CreateWorkspaceRequest,
+  ErrorResponse,
+  NewConnectorRequest,
+  SetFlagsRequest,
+} from '../core/api.js';
+import { ConfigError } from '../core/config.js';
 import { registerHookRoutes } from './hooks.js';
 import { ActionError, consoleLogger, type Logger, type SessionManager } from './session-manager.js';
 import { registerWebSocketRoutes, type UpgradeWebSocketFn } from './terminal-ws.js';
@@ -33,6 +40,65 @@ function asObject(body: unknown): Record<string, unknown> {
 }
 
 /**
+ * Reads an optional string field out of a request body.
+ *
+ * @param body - The parsed body.
+ * @param key - Field to read.
+ * @returns The value, or undefined when the field is absent or not a string.
+ */
+function optionalString(body: Record<string, unknown>, key: string): string | undefined {
+  const value = body[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Reads the inline connector out of a create-workspace body.
+ *
+ * @param body - The parsed body.
+ * @returns The connector, or undefined when the body carries none.
+ */
+function newConnectorOf(body: Record<string, unknown>): NewConnectorRequest | undefined {
+  const raw = body['newConnector'];
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  return {
+    id: String(value['id'] ?? ''),
+    site: String(value['site'] ?? ''),
+    emailEnv: String(value['emailEnv'] ?? ''),
+    tokenEnv: String(value['tokenEnv'] ?? ''),
+  };
+}
+
+/**
+ * Reads the workspace a `POST /api/workspaces` body describes.
+ *
+ * Nothing is validated here; the core schema is the one arbiter, so a body
+ * that names nothing at all comes back as its zod issues rather than as 500s.
+ *
+ * @param body - The parsed body.
+ * @returns The request.
+ */
+function createWorkspaceRequestOf(body: Record<string, unknown>): CreateWorkspaceRequest {
+  const reviewStatuses = body['reviewStatuses'];
+  const newConnector = newConnectorOf(body);
+  const id = optionalString(body, 'id');
+  const connector = optionalString(body, 'connector');
+  const jql = optionalString(body, 'jql');
+  return {
+    ...(id === undefined ? {} : { id }),
+    name: String(body['name'] ?? ''),
+    epic: String(body['epic'] ?? ''),
+    repo: String(body['repo'] ?? ''),
+    ...(connector === undefined ? {} : { connector }),
+    ...(newConnector === undefined ? {} : { newConnector }),
+    ...(Array.isArray(reviewStatuses)
+      ? { reviewStatuses: reviewStatuses.map((status) => String(status)) }
+      : {}),
+    ...(jql === undefined ? {} : { jql }),
+  };
+}
+
+/**
  * Builds the Hono app: REST routes, hook ingress, WebSocket endpoints and the
  * built SPA with a history-mode fallback.
  *
@@ -45,6 +111,13 @@ export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
 
   app.onError((cause, c) => {
+    if (cause instanceof ConfigError) {
+      // A duplicate id is the one refusal the UI can resolve by renaming, so it
+      // gets 409; every other issue is a field the dialog can point at.
+      const duplicate = cause.issues.some((issue) => issue.path === 'id');
+      const body: ErrorResponse = { error: cause.message, issues: cause.issues };
+      return c.json(body, duplicate ? 409 : 400);
+    }
     if (cause instanceof ActionError) {
       const body: ErrorResponse = {
         error: cause.message,
@@ -58,6 +131,17 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get('/api/config/public', (c) => c.json(manager.publicConfig()));
+
+  app.post('/api/workspaces', async (c) => {
+    const body = asObject(await c.req.json<unknown>().catch(() => ({})));
+    const summary = await manager.addWorkspace(createWorkspaceRequestOf(body));
+    return c.json(summary, 201);
+  });
+
+  app.delete('/api/workspaces/:id', async (c) => {
+    await manager.removeWorkspace(c.req.param('id'));
+    return c.body(null, 204);
+  });
 
   app.get('/api/workspaces/:id/board', (c) => c.json(manager.board(c.req.param('id'))));
 

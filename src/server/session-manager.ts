@@ -5,15 +5,23 @@ import { join } from 'node:path';
 import type {
   BoardView,
   CreateSessionRequest,
+  CreateWorkspaceRequest,
   EventFrame,
   IssueDetailResponse,
   PrefillResponse,
   PublicConfigResponse,
   RemoveWorktreeResponse,
   SessionEventsResponse,
+  WorkspaceSummary,
 } from '../core/api.js';
 import { CACHE_TTL_1H_SECONDS, CACHE_TTL_5M_SECONDS } from '../core/cache-clock.js';
-import { startDefaults } from '../core/config.js';
+import {
+  applyWorkspaceChange,
+  removeWorkspace,
+  serializeConfig,
+  startDefaults,
+  workspaceIdFor,
+} from '../core/config.js';
 import { missingIssueKeys, project } from '../core/projection.js';
 import { branchName, editorCommand, renderPrompt, sessionName } from '../core/prompt.js';
 import { isLive, reduce } from '../core/state-machine.js';
@@ -28,13 +36,14 @@ import {
   type IssueSource,
   type PermissionModeSetting,
   type Playbook,
+  type Repo,
+  type RepoConfig,
   type Runner,
   type SessionRecord,
   type SessionState,
-  type Workspace,
   type WorkspaceConfig,
 } from '../core/types.js';
-import { Store } from './store.js';
+import { Store, writeJsonAtomic } from './store.js';
 
 /**
  * Interval between reconciler passes, in milliseconds.
@@ -99,11 +108,19 @@ export interface WorkspaceRuntime {
   id: string;
   /** The workspace's validated configuration. */
   config: WorkspaceConfig;
+  /** Configuration of the repo the workspace names, supplying the playbooks. */
+  repoConfig: RepoConfig;
+  /** Repo connector providing this board's checkouts; shared between workspaces. */
+  repo: Repo;
   /** Issue source listing this board's issues. */
   issues: IssueSource;
-  /** Workspace connector providing this board's checkouts. */
-  workspace: Workspace;
 }
+
+/**
+ * Builds the runtime of one workspace out of a configuration that already
+ * contains it.
+ */
+export type WorkspaceRuntimeFactory = (config: Config, workspaceId: string) => WorkspaceRuntime;
 
 /**
  * Spawns the owner's editor on a checkout.
@@ -116,12 +133,16 @@ export type EditorSpawner = (command: string, args: string[]) => void;
 export interface SessionManagerOptions {
   /** Validated configuration. */
   config: Config;
+  /** Absolute path of the configuration file, rewritten when a workspace changes. */
+  configPath: string;
   /** Durable state. */
   store: Store;
   /** Runner used for every session on every workspace. */
   runner: Runner;
   /** One entry per configured workspace. */
   workspaces: WorkspaceRuntime[];
+  /** Builds the runtime of a workspace added while the server runs. */
+  createRuntime: WorkspaceRuntimeFactory;
   /** TTL in seconds of the derived prompt-cache fallback. */
   derivedCacheTtlSeconds: number;
   /** Clock, in epoch milliseconds; replaceable in tests. */
@@ -203,19 +224,21 @@ function messageOf(cause: unknown): string {
  * issue polling, board projection and fan-out to the WebSocket layer.
  */
 export class SessionManager {
-  /** Raw channels: `board` and `session`, both carrying an `EventFrame`. */
+  /** Raw channels: `board`, `session` and `config`, each carrying an `EventFrame`. */
   readonly events = new EventEmitter();
   /** Runner every session on every workspace runs through. */
   readonly runner: Runner;
-  /** Validated configuration. */
-  readonly config: Config;
+  /** Validated configuration, as the last accepted workspace change left it. */
+  config: Config;
   /** Durable state. */
   readonly store: Store;
 
+  private readonly configPath: string;
+  private readonly createRuntime: WorkspaceRuntimeFactory;
   private readonly workspaces = new Map<string, WorkspaceRuntime>();
   private readonly caches = new Map<string, IssueCache>();
   private readonly boardTimers = new Map<string, NodeJS.Timeout>();
-  private readonly pollTimers: NodeJS.Timeout[] = [];
+  private readonly pollTimers = new Map<string, NodeJS.Timeout>();
   private readonly derivedCacheTtlSeconds: number;
   private readonly now: () => number;
   private readonly spawnEditor: EditorSpawner;
@@ -229,22 +252,15 @@ export class SessionManager {
    */
   constructor(options: SessionManagerOptions) {
     this.config = options.config;
+    this.configPath = options.configPath;
     this.store = options.store;
     this.runner = options.runner;
+    this.createRuntime = options.createRuntime;
     this.derivedCacheTtlSeconds = options.derivedCacheTtlSeconds;
     this.now = options.now ?? Date.now;
     this.spawnEditor = options.spawnEditor ?? spawnDetached;
     this.logger = options.logger ?? consoleLogger;
-    for (const runtime of options.workspaces) {
-      this.workspaces.set(runtime.id, runtime);
-      this.caches.set(runtime.id, {
-        issues: [],
-        extras: new Map(),
-        fetchedAt: new Date(this.now()).toISOString(),
-        sourceError: null,
-        inFlight: null,
-      });
-    }
+    for (const runtime of options.workspaces) this.adopt(runtime);
     // Every terminal and every board viewer adds two listeners, so the default
     // ceiling of ten would warn as soon as a few tabs are open.
     this.events.setMaxListeners(0);
@@ -259,9 +275,11 @@ export class SessionManager {
   subscribe(listener: (frame: EventFrame) => void): () => void {
     this.events.on('board', listener);
     this.events.on('session', listener);
+    this.events.on('config', listener);
     return () => {
       this.events.off('board', listener);
       this.events.off('session', listener);
+      this.events.off('config', listener);
     };
   }
 
@@ -274,15 +292,7 @@ export class SessionManager {
   async start(): Promise<void> {
     await this.reconcile();
     await Promise.all([...this.workspaces.keys()].map((id) => this.refresh(id)));
-    for (const runtime of this.workspaces.values()) {
-      const timer = setInterval(() => {
-        void this.refresh(runtime.id).catch((cause: unknown) => {
-          this.logger.warn(`poll of workspace '${runtime.id}' failed: ${messageOf(cause)}`);
-        });
-      }, runtime.config.issues.pollSeconds * 1000);
-      timer.unref();
-      this.pollTimers.push(timer);
-    }
+    for (const runtime of this.workspaces.values()) this.startPolling(runtime);
     this.reconcileTimer = setInterval(() => {
       void this.reconcile();
     }, RECONCILE_INTERVAL_MS);
@@ -295,12 +305,112 @@ export class SessionManager {
    * @returns Nothing.
    */
   stop(): void {
-    for (const timer of this.pollTimers) clearInterval(timer);
-    this.pollTimers.length = 0;
+    for (const timer of this.pollTimers.values()) clearInterval(timer);
+    this.pollTimers.clear();
     for (const timer of this.boardTimers.values()) clearTimeout(timer);
     this.boardTimers.clear();
     if (this.reconcileTimer !== null) clearInterval(this.reconcileTimer);
     this.reconcileTimer = null;
+  }
+
+  /**
+   * Registers a workspace runtime and gives it an empty issue cache.
+   *
+   * @param runtime - The runtime to take ownership of.
+   * @returns Nothing.
+   */
+  private adopt(runtime: WorkspaceRuntime): void {
+    this.workspaces.set(runtime.id, runtime);
+    this.caches.set(runtime.id, {
+      issues: [],
+      extras: new Map(),
+      fetchedAt: new Date(this.now()).toISOString(),
+      sourceError: null,
+      inFlight: null,
+    });
+  }
+
+  /**
+   * Starts one workspace's poll timer, replacing any timer it already had.
+   *
+   * @param runtime - Workspace to poll.
+   * @returns Nothing.
+   */
+  private startPolling(runtime: WorkspaceRuntime): void {
+    const previous = this.pollTimers.get(runtime.id);
+    if (previous !== undefined) clearInterval(previous);
+    const timer = setInterval(() => {
+      void this.refresh(runtime.id).catch((cause: unknown) => {
+        this.logger.warn(`poll of workspace '${runtime.id}' failed: ${messageOf(cause)}`);
+      });
+    }, runtime.config.pollSeconds * 1000);
+    timer.unref();
+    this.pollTimers.set(runtime.id, timer);
+  }
+
+  /**
+   * Adds a workspace: validates the request, rewrites the configuration file
+   * and brings the board up without a restart.
+   *
+   * The file is written before anything is applied in memory, so a rejected
+   * write leaves the running server exactly as it was.
+   *
+   * @param request - Workspace to add, naming an existing or an inline connector.
+   * @returns The new workspace, as the switcher lists it.
+   * @throws {ConfigError} When the request or the resulting configuration is invalid.
+   * @throws {Error} When the configuration file cannot be written.
+   */
+  async addWorkspace(request: CreateWorkspaceRequest): Promise<WorkspaceSummary> {
+    const next = applyWorkspaceChange(this.config, request);
+    const id = workspaceIdFor(request);
+    await this.writeConfig(next);
+    this.config = next;
+    const runtime = this.createRuntime(next, id);
+    this.adopt(runtime);
+    this.startPolling(runtime);
+    this.emitConfig();
+    void this.refresh(id).catch((cause: unknown) => {
+      this.logger.warn(`first refresh of workspace '${id}' failed: ${messageOf(cause)}`);
+    });
+    return this.summaryOf(id, runtime.config);
+  }
+
+  /**
+   * Removes a workspace: stops its polling, drops its runtime and rewrites the
+   * configuration file. Sessions, flags and worktrees are left alone; they
+   * belong to the repo, which other workspaces may still name.
+   *
+   * @param workspaceId - Workspace to remove.
+   * @returns Nothing.
+   * @throws {ActionError} When no workspace has that id.
+   * @throws {ConfigError} When removing it would leave the configuration invalid.
+   * @throws {Error} When the configuration file cannot be written.
+   */
+  async removeWorkspace(workspaceId: string): Promise<void> {
+    this.requireWorkspace(workspaceId);
+    const next = removeWorkspace(this.config, workspaceId);
+    await this.writeConfig(next);
+    this.config = next;
+    const timer = this.pollTimers.get(workspaceId);
+    if (timer !== undefined) clearInterval(timer);
+    this.pollTimers.delete(workspaceId);
+    const board = this.boardTimers.get(workspaceId);
+    if (board !== undefined) clearTimeout(board);
+    this.boardTimers.delete(workspaceId);
+    this.workspaces.delete(workspaceId);
+    this.caches.delete(workspaceId);
+    this.emitConfig();
+  }
+
+  /**
+   * Writes a configuration back to the file the server loaded it from.
+   *
+   * @param config - Configuration to write.
+   * @returns Nothing.
+   * @throws {Error} When the file cannot be written.
+   */
+  private async writeConfig(config: Config): Promise<void> {
+    await writeJsonAtomic(this.configPath, serializeConfig(config));
   }
 
   /**
@@ -310,9 +420,13 @@ export class SessionManager {
    */
   publicConfig(): PublicConfigResponse {
     return {
-      workspaces: [...this.workspaces.values()].map((runtime) => ({
-        id: runtime.id,
-        name: runtime.config.name,
+      workspaces: [...this.workspaces.values()].map((runtime) =>
+        this.summaryOf(runtime.id, runtime.config),
+      ),
+      repos: Object.entries(this.config.repos).map(([id, repo]) => ({ id, path: repo.path })),
+      connectors: Object.entries(this.config.connectors).map(([id, connector]) => ({
+        id,
+        site: connector.site,
       })),
       runner: {
         models: this.config.runner.models,
@@ -338,12 +452,15 @@ export class SessionManager {
     const runtime = this.requireWorkspace(workspaceId);
     const cache = this.requireCache(workspaceId);
     const worktrees: Record<string, string> = {};
-    for (const [issueKey, worktree] of Object.entries(this.store.worktreesOf(workspaceId))) {
+    for (const [issueKey, worktree] of Object.entries(
+      this.store.worktreesOf(runtime.config.repo),
+    )) {
       worktrees[issueKey] = worktree.path;
     }
     return project({
       workspaceId,
       workspace: runtime.config,
+      repo: runtime.repoConfig,
       issues: this.boardIssues(cache),
       sessions: this.store.sessions(),
       flags: this.store.flagsOf(workspaceId),
@@ -390,21 +507,30 @@ export class SessionManager {
    * @throws {ActionError} When the workspace or the issue is unknown.
    */
   async issueDetail(workspaceId: string, issueKey: string): Promise<IssueDetailResponse> {
-    this.requireWorkspace(workspaceId);
+    const runtime = this.requireWorkspace(workspaceId);
     const issue = await this.requireIssue(workspaceId, issueKey);
-    const sessions = this.store
-      .sessions()
-      .filter(
-        (record) =>
-          record.workspaceId === workspaceId && record.issueKey === issueKey && !record.archived,
-      )
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return {
       issue,
-      sessions,
-      worktreePath: this.store.worktree(workspaceId, issueKey)?.path ?? null,
+      sessions: this.sessionsFor(runtime.config.repo, issueKey),
+      worktreePath: this.store.worktree(runtime.config.repo, issueKey)?.path ?? null,
       flags: this.store.flagsOf(workspaceId)[issueKey] ?? {},
     };
+  }
+
+  /**
+   * Every non-archived session one repo has for one issue, newest first.
+   *
+   * @param repoId - Repo the sessions were worked in.
+   * @param issueKey - Key of the issue.
+   * @returns The records, newest first.
+   */
+  private sessionsFor(repoId: string, issueKey: string): SessionRecord[] {
+    return this.store
+      .sessions()
+      .filter(
+        (record) => record.repoId === repoId && record.issueKey === issueKey && !record.archived,
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   /**
@@ -434,19 +560,21 @@ export class SessionManager {
       warnings.push(`issue text may be stale: ${cache.sourceError}`);
     }
 
-    const known = this.store.worktree(workspaceId, issueKey);
+    const known = this.store.worktree(runtime.config.repo, issueKey);
     let branch: string | null;
     let worktree: string;
     if (playbook.isolation === 'shared') {
       branch = null;
-      worktree = runtime.config.repo;
+      worktree = runtime.repoConfig.path;
     } else if (known !== undefined) {
       branch = known.branch;
       worktree = known.path;
     } else {
-      worktree = join(runtime.config.worktreeDir, issueKey);
+      worktree = join(runtime.repoConfig.worktreeDir, issueKey);
       branch =
-        playbook.isolation === 'worktree' ? branchName(runtime.config.branchPattern, issue) : null;
+        playbook.isolation === 'worktree'
+          ? branchName(runtime.repoConfig.branchPattern, issue)
+          : null;
       if (playbook.isolation === 'issue-worktree') {
         warnings.push(
           `no worktree is registered for ${issueKey}; its branch is resolved when the session starts`,
@@ -492,15 +620,11 @@ export class SessionManager {
       throw new ActionError(400, 'the prompt must not be empty');
     }
 
-    const clash = this.store
-      .sessions()
-      .find(
-        (record) =>
-          record.workspaceId === workspaceId &&
-          record.issueKey === issueKey &&
-          record.playbookId === playbook.id &&
-          isLive(record.state),
-      );
+    const repoId = runtime.config.repo;
+    const history = this.sessionsFor(repoId, issueKey);
+    const clash = history.find(
+      (record) => record.playbookId === playbook.id && isLive(record.state),
+    );
     if (clash !== undefined) {
       throw new ActionError(
         409,
@@ -512,7 +636,9 @@ export class SessionManager {
     const issue = await this.requireIssue(workspaceId, issueKey);
     let checkout;
     try {
-      checkout = await runtime.workspace.prepare(issue, playbook);
+      checkout = await runtime.repo.prepare(issue, playbook, {
+        knownBranch: history[0]?.branch ?? null,
+      });
     } catch (cause) {
       throw new ActionError(409, `cannot prepare a checkout for ${issueKey}`, messageOf(cause));
     }
@@ -522,7 +648,7 @@ export class SessionManager {
       id: sessionName(this.config.runner.tmuxPrefix, issueKey, playbook.id),
       issueKey,
       playbookId: playbook.id,
-      workspaceId,
+      repoId,
       cwd: checkout.cwd,
       branch: checkout.branch,
       model,
@@ -542,7 +668,7 @@ export class SessionManager {
       runs: [],
     };
     await this.store.saveSession(record);
-    await this.store.setWorktree(workspaceId, issueKey, {
+    await this.store.setWorktree(repoId, issueKey, {
       path: checkout.cwd,
       branch: checkout.branch,
       bootstrapped: !checkout.needsBootstrap,
@@ -552,7 +678,9 @@ export class SessionManager {
       await this.runner.start({
         record,
         needsBootstrap: checkout.needsBootstrap,
-        ...(runtime.config.bootstrap === undefined ? {} : { bootstrap: runtime.config.bootstrap }),
+        ...(runtime.repoConfig.bootstrap === undefined
+          ? {}
+          : { bootstrap: runtime.repoConfig.bootstrap }),
       });
     } catch (cause) {
       const failed = await this.patch(record, { state: 'failed' });
@@ -589,7 +717,7 @@ export class SessionManager {
     }
     const next = await this.patch(record, { state: 'starting', pending: null, endedAt: null });
     this.emitSession(next);
-    this.scheduleBoard(record.workspaceId);
+    this.scheduleRepoBoards(record.repoId);
     return next;
   }
 
@@ -639,7 +767,7 @@ export class SessionManager {
     const record = this.requireSession(sessionId);
     const next = await this.patch(record, { done });
     this.emitSession(next);
-    this.scheduleBoard(record.workspaceId);
+    this.scheduleRepoBoards(record.repoId);
     return next;
   }
 
@@ -657,7 +785,7 @@ export class SessionManager {
     }
     const next = await this.patch(record, { archived: true });
     this.emitSession(next);
-    this.scheduleBoard(record.workspaceId);
+    this.scheduleRepoBoards(record.repoId);
     return next;
   }
 
@@ -672,10 +800,10 @@ export class SessionManager {
    */
   async removeWorktree(sessionId: string, force: boolean): Promise<RemoveWorktreeResponse> {
     const record = this.requireSession(sessionId);
-    const runtime = this.requireWorkspace(record.workspaceId);
-    const path = this.store.worktree(record.workspaceId, record.issueKey)?.path ?? record.cwd;
-    if (path === runtime.config.repo) {
-      throw new ActionError(409, `${path} is the workspace's main checkout, not a worktree`);
+    const runtime = this.requireRepo(record.repoId);
+    const path = this.store.worktree(record.repoId, record.issueKey)?.path ?? record.cwd;
+    if (path === runtime.repoConfig.path) {
+      throw new ActionError(409, `${path} is the repo's main checkout, not a worktree`);
     }
     const blocking = this.store
       .sessions()
@@ -688,12 +816,12 @@ export class SessionManager {
       );
     }
     try {
-      await runtime.workspace.removeWorktree(record.issueKey, force);
+      await runtime.repo.removeWorktree(record.issueKey, force);
     } catch (cause) {
       throw new ActionError(409, `cannot remove ${path}`, messageOf(cause));
     }
-    await this.store.clearWorktree(record.workspaceId, record.issueKey);
-    this.scheduleBoard(record.workspaceId);
+    await this.store.clearWorktree(record.repoId, record.issueKey);
+    this.scheduleRepoBoards(record.repoId);
     return { path, removed: true };
   }
 
@@ -723,8 +851,8 @@ export class SessionManager {
    *   checkout, or the editor cannot be spawned.
    */
   async openEditor(workspaceId: string, issueKey: string): Promise<void> {
-    this.requireWorkspace(workspaceId);
-    const worktree = this.store.worktree(workspaceId, issueKey);
+    const runtime = this.requireWorkspace(workspaceId);
+    const worktree = this.store.worktree(runtime.config.repo, issueKey);
     if (worktree === undefined) {
       throw new ActionError(409, `${issueKey} has no checkout to open`);
     }
@@ -780,13 +908,15 @@ export class SessionManager {
 
     await this.store.saveSession(result.record);
     this.emitSession(result.record);
-    this.scheduleBoard(before.workspaceId);
+    this.scheduleRepoBoards(before.repoId);
     if (isLive(before.state) && !isLive(result.record.state)) {
       // A session leaving the live set usually means its issue just moved in
       // the tracker, so the board's issue list is refetched rather than waited on.
-      void this.refresh(before.workspaceId).catch((cause: unknown) => {
-        this.logger.warn(`refresh after ${sessionId} exited failed: ${messageOf(cause)}`);
-      });
+      for (const runtime of this.workspacesOfRepo(before.repoId)) {
+        void this.refresh(runtime.id).catch((cause: unknown) => {
+          this.logger.warn(`refresh after ${sessionId} exited failed: ${messageOf(cause)}`);
+        });
+      }
     }
     return result.record;
   }
@@ -837,7 +967,7 @@ export class SessionManager {
       });
       this.logger.info(`reconciler marked ${record.id} ${state}`);
       this.emitSession(next);
-      this.scheduleBoard(record.workspaceId);
+      this.scheduleRepoBoards(record.repoId);
     }
   }
 
@@ -864,7 +994,7 @@ export class SessionManager {
     if (!listed) return;
 
     const extras = new Map<string, Issue>();
-    for (const key of missingIssueKeys(runtime.id, cache.issues, this.store.sessions())) {
+    for (const key of missingIssueKeys(runtime.config.repo, cache.issues, this.store.sessions())) {
       try {
         const issue = await runtime.issues.get(key);
         if (issue !== null) extras.set(key, issue);
@@ -930,6 +1060,32 @@ export class SessionManager {
   }
 
   /**
+   * Every workspace that names one repo.
+   *
+   * @param repoId - Repo the workspaces must name.
+   * @returns The runtimes, in configuration order.
+   */
+  private workspacesOfRepo(repoId: string): WorkspaceRuntime[] {
+    return [...this.workspaces.values()].filter((runtime) => runtime.config.repo === repoId);
+  }
+
+  /**
+   * Looks up any workspace that can act on one repo.
+   *
+   * @param repoId - Repo the caller needs a runtime for.
+   * @returns The first workspace naming that repo.
+   * @throws {ActionError} When no workspace names it, e.g. after the last one
+   *   naming it was removed.
+   */
+  private requireRepo(repoId: string): WorkspaceRuntime {
+    const runtime = this.workspacesOfRepo(repoId)[0];
+    if (runtime === undefined) {
+      throw new ActionError(404, `no workspace uses repo '${repoId}'`);
+    }
+    return runtime;
+  }
+
+  /**
    * Looks a workspace's issue cache up.
    *
    * @param workspaceId - Workspace id.
@@ -964,12 +1120,12 @@ export class SessionManager {
    * @throws {ActionError} When the workspace has no such playbook.
    */
   private requirePlaybook(runtime: WorkspaceRuntime, playbookId: string): Playbook {
-    const playbook = runtime.config.playbooks.find((entry) => entry.id === playbookId);
+    const playbook = runtime.repoConfig.playbooks.find((entry) => entry.id === playbookId);
     if (playbook === undefined) {
       throw new ActionError(
         400,
-        `workspace '${runtime.id}' has no playbook '${playbookId}'`,
-        `known playbooks: ${runtime.config.playbooks.map((entry) => entry.id).join(', ')}`,
+        `repo '${runtime.config.repo}' has no playbook '${playbookId}'`,
+        `known playbooks: ${runtime.repoConfig.playbooks.map((entry) => entry.id).join(', ')}`,
       );
     }
     return playbook;
@@ -1055,6 +1211,45 @@ export class SessionManager {
    */
   private emitSession(record: SessionRecord): void {
     this.events.emit('session', { type: 'session', record } satisfies EventFrame);
+  }
+
+  /**
+   * Pushes the public configuration to every subscriber.
+   *
+   * @returns Nothing.
+   */
+  private emitConfig(): void {
+    this.events.emit('config', {
+      type: 'config',
+      config: this.publicConfig(),
+    } satisfies EventFrame);
+  }
+
+  /**
+   * Describes one workspace the way the switcher lists it.
+   *
+   * @param id - Workspace id.
+   * @param workspace - The workspace's configuration.
+   * @returns The summary.
+   */
+  private summaryOf(id: string, workspace: WorkspaceConfig): WorkspaceSummary {
+    return {
+      id,
+      name: workspace.name,
+      epic: workspace.epic,
+      repo: workspace.repo,
+      connector: workspace.connector,
+    };
+  }
+
+  /**
+   * Queues a board recomputation for every workspace over one repo.
+   *
+   * @param repoId - Repo whose sessions changed.
+   * @returns Nothing.
+   */
+  private scheduleRepoBoards(repoId: string): void {
+    for (const runtime of this.workspacesOfRepo(repoId)) this.scheduleBoard(runtime.id);
   }
 
   /**
