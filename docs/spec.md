@@ -114,7 +114,8 @@ editor
 runner
   type                     'claude-tmux'
   claudeBin                default 'claude'
-  tmuxPrefix               default 'qc' → tmux session names qc-<KEY>-<playbook>
+  tmuxPrefix               default 'qc' → tmux session names qc-<KEY>-<playbook>,
+                           suffixed with a timestamp when that name is taken (§5.1)
   models[]                 {id,label} shown in the picker
   defaultModel / defaultEffort / defaultPermissionMode
 connectors{id}
@@ -174,7 +175,9 @@ it per session.
 
 ```ts
 interface SessionRecord {
-  id: string; // tmux session name, e.g. qc-DOC-3847-implement
+  id: string; // tmux session name, e.g. qc-DOC-3847-implement; a compact
+  // timestamp is appended when a record already holds that name, so a second
+  // run of the same playbook cannot overwrite the first one's history
   issueKey: string;
   playbookId: string;
   repoId: string; // sessions belong to a repo and an issue, not to a workspace
