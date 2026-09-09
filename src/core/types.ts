@@ -507,14 +507,14 @@ export interface RunnerTerminal {
    */
   onExit(listener: (exitCode: number) => void): void;
   /**
-   * Writes bytes into the terminal.
+   * Writes bytes into the terminal, discarding them once it has ended.
    *
    * @param data - Bytes to write.
    * @returns Nothing.
    */
   write(data: string): void;
   /**
-   * Resizes the terminal.
+   * Resizes the terminal, doing nothing once it has ended.
    *
    * @param cols - New column count.
    * @param rows - New row count.

@@ -268,10 +268,20 @@ export class ClaudeTmuxRunner implements Runner {
         pty.onExit(({ exitCode }) => listener(exitCode));
       },
       write(data: string): void {
-        pty.write(data);
+        try {
+          pty.write(data);
+        } catch {
+          // The pty's descriptor is closed as soon as its tmux client exits,
+          // and node-pty throws on the next call rather than reporting it.
+        }
       },
       resize(nextCols: number, nextRows: number): void {
-        pty.resize(nextCols, nextRows);
+        try {
+          pty.resize(nextCols, nextRows);
+        } catch {
+          // Same closed descriptor as write, raised as `ioctl(2) failed,
+          // EBADF` when a viewer left open past a kill reflows its terminal.
+        }
       },
       dispose(): void {
         try {
