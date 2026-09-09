@@ -370,6 +370,29 @@ describe('SessionStart', () => {
         .changed,
     ).toBe(false);
   });
+
+  it('hands a resumed session back to the owner', () => {
+    const before = makeRecord({ state: 'starting', claudeSessionId: 'abc' });
+    const result = reduce(
+      before,
+      hookEvent({ hook_event_name: 'SessionStart', session_id: 'abc', source: 'resume' }),
+      NOW,
+    );
+    expect(result.record.state).toBe('idle');
+    expect(result.changed).toBe(true);
+    expect(result.notify).toBe(false);
+  });
+
+  it('leaves a resumed session that already moved on alone', () => {
+    const before = makeRecord({ state: 'working', claudeSessionId: 'abc' });
+    expect(
+      reduce(
+        before,
+        hookEvent({ hook_event_name: 'SessionStart', session_id: 'abc', source: 'resume' }),
+        NOW,
+      ).changed,
+    ).toBe(false);
+  });
 });
 
 describe('Stop', () => {

@@ -487,9 +487,18 @@ export function reduce(
   const hook = event.hook;
   switch (hook.hook_event_name) {
     case 'SessionStart': {
+      const patch: SessionPatch = {};
       const id = hook.session_id;
-      if (id === undefined || id === '' || id === record.claudeSessionId) return unchanged;
-      return apply({ claudeSessionId: id });
+      if (id !== undefined && id !== '' && id !== record.claudeSessionId)
+        patch.claudeSessionId = id;
+      // A resumed session replays its transcript and stops at the prompt with
+      // nothing queued, so no UserPromptSubmit or Stop ever follows: this is
+      // the only event that can report the owner's turn has come back, and a
+      // resume of an already-known session carries no new id to report it by.
+      if (hook.source === 'resume' && record.state === 'starting') patch.state = 'idle';
+      if (Object.keys(patch).length === 0) return unchanged;
+      // The owner pressed Resume; announcing their own click helps nobody.
+      return apply(patch, false);
     }
 
     case 'SessionEnd':
