@@ -241,8 +241,12 @@ Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 | launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                   |
 | statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9)                                              |
 
-Unknown events are ignored and logged. Every accepted event is appended to
-`<dataDir>/sessions/<id>/events.jsonl` (raw payload + resulting state).
+Unknown events are ignored and logged. Every hook and launcher signal is
+appended to `<dataDir>/sessions/<id>/events.jsonl` (raw payload + resulting
+state) whether or not it moved the record. The one exception is a status-line
+payload that changed nothing: `refreshInterval: 1` posts one every second, and
+a 19-minute verification session logged 870 of them against 47 real events —
+1.4 MB in which the lifecycle was unreadable.
 
 Hook facts the design relies on, measured on 2026-09-09 against Claude Code
 2.1.266 with the §8.1 settings file and kept as

@@ -897,8 +897,10 @@ export class SessionManager {
    * Reduces one lifecycle event into a session record, logs it and fans out
    * whatever changed.
    *
-   * The event is appended to the session's log whether or not it moved the
-   * record, so the log stays a faithful transcript of what arrived.
+   * Every hook and launcher signal is appended to the session's log whether or
+   * not it moved the record, so the log stays a faithful transcript of what
+   * arrived. A status-line payload that changed nothing is the exception: it is
+   * a once-a-second poll, not a signal, and logging it buries the lifecycle.
    *
    * @param sessionId - Session the event belongs to.
    * @param event - The event to apply.
@@ -912,11 +914,13 @@ export class SessionManager {
     const result = reduce(before, event, nowMs, {
       derivedCacheTtlSeconds: this.derivedCacheTtlSeconds,
     });
-    await this.store.appendEvent(sessionId, {
-      at: new Date(nowMs).toISOString(),
-      event: raw,
-      state: result.record.state,
-    });
+    if (result.changed || event.type !== 'statusline') {
+      await this.store.appendEvent(sessionId, {
+        at: new Date(nowMs).toISOString(),
+        event: raw,
+        state: result.record.state,
+      });
+    }
     if (!result.changed) return result.record;
 
     await this.store.saveSession(result.record);

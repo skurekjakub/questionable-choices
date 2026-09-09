@@ -200,4 +200,16 @@ describe('hook ingress', () => {
       source: 'statusline',
     });
   });
+
+  it('logs a statusline payload that moved the cache and no repeat of it', async () => {
+    const payload = JSON.parse(
+      await readFile(new URL('../fixtures/statusline-payload.json', import.meta.url), 'utf8'),
+    ) as Record<string, unknown>;
+
+    await post(app, `/api/hooks/${SESSION_ID}/statusline`, payload);
+    await post(app, `/api/hooks/${SESSION_ID}/statusline`, payload);
+    await post(app, `/api/hooks/${SESSION_ID}/statusline`, {});
+
+    expect(await store.readEvents(SESSION_ID)).toHaveLength(1);
+  });
 });
