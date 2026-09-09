@@ -136,6 +136,15 @@ Fable 5.1 · ⚡high · ⎇ DOC-3871-indentation-of-codelinks · DOC-3871 · 54k
 | `56c0104` | `src/server/session-manager.ts` — `spawn` reports a missing executable as an asynchronous `error` event, not a throw, so the try/catch around the detached editor launch caught nothing and the unhandled event killed the whole server. A misconfigured `editor.command` took every live session's state tracking with it.                                       |
 | `c37dba6` | `src/server/main.ts` — `SIGINT`/`SIGTERM` never completed: `server.close` waits for every open connection and an attached browser holds its event socket, plus one terminal socket per session view, open for the life of the tab. tsx force-killed the dev server on every reload.                                                                               |
 | `acbcda9` | `src/server/session-manager.ts` — `refreshInterval: 1` posts a status-line payload every second and each one was logged. This run wrote 870 of them against 47 real events, 1.4 MB in which the lifecycle was unreadable. A payload the reducer rejects as unchanged is no longer logged. Spec §5.3 moved with it.                                                |
+| `9072534` | `src/connectors/runners/claude-tmux/index.ts` — the browser was left showing a killed session, reflowed its terminal, and the resize frame reached a pty whose descriptor node-pty had already closed. `ioctl(2) failed, EBADF` went uncaught and took the server down mid-run, losing every other session's tracking. `write` had the same hazard.               |
+
+Three of those six are the same shape: a failure that arrives outside the
+request that caused it — an async `spawn` error, an unhandled `error` event, a
+throw from a socket handler — and the server has no last-resort guard, so any
+one of them ends every session's state tracking at once. There is no
+`uncaughtException` handler, deliberately: swallowing these would have hidden
+all three rather than fixing them. But the reconciler cannot recover a record
+whose events were never received, so a crash is not merely an outage.
 
 ## What still does not work
 
