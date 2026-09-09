@@ -23,6 +23,11 @@ export const JIRA_PAGE_SIZE = 100;
 export const JIRA_MAX_PAGES = 50;
 
 /**
+ * Milliseconds a single Jira request may take before it is aborted.
+ */
+export const JIRA_TIMEOUT_MS = 15_000;
+
+/**
  * The `fields` block of a Jira REST issue, narrowed to what the board reads.
  */
 export interface JiraIssueFields {
@@ -120,6 +125,37 @@ export interface JiraClientOptions {
   fetch?: FetchLike | undefined;
   /** Pages a search walks before giving up; defaults to `JIRA_MAX_PAGES`. */
   maxPages?: number | undefined;
+  /** Milliseconds one request may take; defaults to `JIRA_TIMEOUT_MS`. */
+  timeoutMs?: number | undefined;
+}
+
+/**
+ * Thrown when a JQL search still has pages left after the page cap.
+ *
+ * A truncated list read as complete makes the projection treat the issues it
+ * never saw as gone, so the search fails instead.
+ */
+export class JiraTruncatedError extends Error {
+  /** The query that matched more issues than the cap allows. */
+  readonly jql: string;
+  /** Issues collected before the cap was reached. */
+  readonly collected: number;
+
+  /**
+   * Builds a truncated-search error.
+   *
+   * @param jql - The query that matched too many issues.
+   * @param pages - Pages that were walked before giving up.
+   * @param collected - Issues collected before the cap was reached.
+   */
+  constructor(jql: string, pages: number, collected: number) {
+    super(
+      `the search still had pages left after ${pages} of them (${collected} issues); narrow the query: ${jql}`,
+    );
+    this.name = 'JiraTruncatedError';
+    this.jql = jql;
+    this.collected = collected;
+  }
 }
 
 const BODY_SNIPPET_LENGTH = 500;
@@ -146,6 +182,7 @@ export class JiraClient {
   private readonly authorization: string;
   private readonly fetchImpl: FetchLike;
   private readonly maxPages: number;
+  private readonly timeoutMs: number;
 
   /**
    * Builds a client for one site.
@@ -158,6 +195,7 @@ export class JiraClient {
     this.authorization = `Basic ${Buffer.from(`${options.email}:${options.token}`).toString('base64')}`;
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.maxPages = options.maxPages ?? JIRA_MAX_PAGES;
+    this.timeoutMs = options.timeoutMs ?? JIRA_TIMEOUT_MS;
   }
 
   /**
@@ -165,25 +203,36 @@ export class JiraClient {
    *
    * @param path - Path below the site root, starting with a slash.
    * @param init - Method, headers and body for the request.
-   * @returns The parsed response body, or null for a 404.
-   * @throws {JiraHttpError} When Jira answers any other non-2xx status.
+   * @param missingAsNull - Whether a 404 means "no such resource" rather than a
+   *   failure; only true where the path names one resource.
+   * @returns The parsed response body, or null for a 404 the caller allowed.
+   * @throws {JiraHttpError} When Jira answers a non-2xx status, or answers 2xx
+   *   with a body that is not JSON.
    */
-  private async request(path: string, init: RequestInit): Promise<unknown> {
+  private async request(path: string, init: RequestInit, missingAsNull = false): Promise<unknown> {
     const url = `https://${this.site}${path}`;
     const response = await this.fetchImpl(url, {
       ...init,
+      signal: AbortSignal.timeout(this.timeoutMs),
       headers: {
         accept: 'application/json',
         authorization: this.authorization,
         ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
       },
     });
-    if (response.status === 404) return null;
+    if (missingAsNull && response.status === 404) return null;
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       throw new JiraHttpError(response.status, url, body.slice(0, BODY_SNIPPET_LENGTH));
     }
-    return (await response.json()) as unknown;
+    const text = await response.text();
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      // An SSO or login interstitial answers 200 with HTML; reported raw it
+      // reaches the owner's banner as a JSON parser's complaint.
+      throw new JiraHttpError(response.status, url, text.slice(0, BODY_SNIPPET_LENGTH));
+    }
   }
 
   /**
@@ -193,6 +242,8 @@ export class JiraClient {
    * @param fields - Issue fields to request; defaults to `JIRA_ISSUE_FIELDS`.
    * @returns Every issue the query matched, in query order.
    * @throws {JiraHttpError} When Jira rejects the query.
+   * @throws {JiraTruncatedError} When the query still has pages left after the
+   *   page cap, which would present a partial epic as the whole one.
    */
   async searchJql(
     jql: string,
@@ -210,8 +261,7 @@ export class JiraClient {
       const parsed = (await this.request('/rest/api/3/search/jql', {
         method: 'POST',
         body: JSON.stringify(body),
-      })) as JiraSearchResponse | null;
-      if (parsed === null) return collected;
+      })) as JiraSearchResponse;
       for (const issue of parsed.issues ?? []) collected.push(issue);
       const token = parsed.nextPageToken;
       if (parsed.isLast === true || typeof token !== 'string' || token === '') return collected;
@@ -219,7 +269,7 @@ export class JiraClient {
       // loop bound is the only thing that stops it.
       nextPageToken = token;
     }
-    return collected;
+    throw new JiraTruncatedError(jql, this.maxPages, collected.length);
   }
 
   /**
@@ -235,9 +285,11 @@ export class JiraClient {
     fields: readonly string[] = JIRA_ISSUE_FIELDS,
   ): Promise<JiraIssueResource | null> {
     const query = `?fields=${encodeURIComponent(fields.join(','))}`;
-    const parsed = (await this.request(`/rest/api/3/issue/${encodeURIComponent(key)}${query}`, {
-      method: 'GET',
-    })) as JiraIssueResource | null;
+    const parsed = (await this.request(
+      `/rest/api/3/issue/${encodeURIComponent(key)}${query}`,
+      { method: 'GET' },
+      true,
+    )) as JiraIssueResource | null;
     return parsed;
   }
 }

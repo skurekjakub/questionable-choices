@@ -7,12 +7,10 @@ import type { IssueFlags, SessionRecord } from '../core/types.js';
  * What the app remembers about the checkout it made for one issue.
  */
 export interface WorktreeRecord {
-  /** Absolute path of the worktree, or of the repo for isolation `shared`. */
+  /** Absolute path of the worktree; only worktrees are recorded, never the main checkout. */
   path: string;
   /** Branch checked out there, or null when the checkout has none of its own. */
   branch: string | null;
-  /** Whether the repo's bootstrap command has already run there. */
-  bootstrapped: boolean;
 }
 
 /**

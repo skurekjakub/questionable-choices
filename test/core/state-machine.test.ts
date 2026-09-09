@@ -317,6 +317,79 @@ describe('reduce refusals', () => {
   });
 });
 
+describe('a Notification that lags the dialog it describes', () => {
+  const PROMPT = 'prompt-1';
+
+  /**
+   * Replays a turn whose tool returned before the notification arrived.
+   *
+   * @param notificationType - Notification type the late payload carries.
+   * @returns The state the record ended in.
+   */
+  function answeredBeforeTheNotification(notificationType: string): SessionState {
+    const asked = reduce(
+      makeRecord({ state: 'working' }),
+      hookEvent({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'AskUserQuestion',
+        prompt_id: PROMPT,
+        tool_input: { questions: [{ question: 'Which format?' }] },
+      }),
+      NOW,
+    );
+    const answered = reduce(
+      asked.record,
+      hookEvent({
+        hook_event_name: 'PostToolUse',
+        tool_name: 'AskUserQuestion',
+        prompt_id: PROMPT,
+      }),
+      NOW + 3_000,
+    );
+    expect(answered.record.state).toBe('working');
+    const late = reduce(
+      answered.record,
+      hookEvent({
+        hook_event_name: 'Notification',
+        notification_type: notificationType,
+        prompt_id: PROMPT,
+        message: 'Claude needs your permission',
+      }),
+      NOW + 6_000,
+    );
+    expect(late.notify).toBe(false);
+    return late.record.state;
+  }
+
+  it('ignores a permission prompt for a tool that already returned', () => {
+    expect(answeredBeforeTheNotification('permission_prompt')).toBe('working');
+  });
+
+  it('ignores an elicitation dialog for a tool that already returned', () => {
+    expect(answeredBeforeTheNotification('elicitation_dialog')).toBe('working');
+  });
+
+  it('still opens a permission for a tool that has not returned', () => {
+    const running = reduce(
+      makeRecord({ state: 'working', lastToolResultPromptId: 'prompt-0' }),
+      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash', prompt_id: PROMPT }),
+      NOW,
+    );
+    const late = reduce(
+      running.record,
+      hookEvent({
+        hook_event_name: 'Notification',
+        notification_type: 'permission_prompt',
+        prompt_id: PROMPT,
+        message: 'Claude needs your permission',
+      }),
+      NOW + 6_000,
+    );
+    expect(late.record.state).toBe('waiting-permission');
+    expect(late.notify).toBe(true);
+  });
+});
+
 describe('SessionEnd', () => {
   it.each(SESSION_STATES)('ends a session in state %s', (state) => {
     const result = reduce(makeRecord({ state }), hookEvent({ hook_event_name: 'SessionEnd' }), NOW);

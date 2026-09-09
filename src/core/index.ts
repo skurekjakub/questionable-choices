@@ -2,7 +2,6 @@ export {
   COLUMN_IDS,
   COLUMN_NAMES,
   EFFORTS,
-  PERMISSION_MODES,
   PERMISSION_MODE_SETTINGS,
   SESSION_STATES,
 } from './types.js';
@@ -21,7 +20,6 @@ export type {
   ModelChoice,
   Pending,
   PendingKind,
-  PermissionMode,
   PermissionModeSetting,
   Playbook,
   PlaybookDefaults,
@@ -139,7 +137,6 @@ export type {
   CreateWorkspaceRequest,
   ErrorResponse,
   EventFrame,
-  IssueAction,
   IssueDetailResponse,
   NewConnectorRequest,
   PlaybookSummary,

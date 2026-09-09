@@ -116,8 +116,9 @@ connectors{id}
   site, emailEnv, tokenEnv
 workspaces{id}             what the header dropdown switches between
   name                     shown in the switcher
-  epic                     parent key; default JQL is
-                           parent = <epic> AND statusCategory != Done ORDER BY Rank ASC
+  epic                     parent key (`DOC-3807`) or numeric issue id; the shape is
+                           validated, and the value is quoted into the default JQL
+                           parent = "<epic>" AND statusCategory != Done ORDER BY Rank ASC
   jql?                     raw override of the whole query
   connector                connector id
   repo                     repo id
@@ -181,6 +182,7 @@ interface SessionRecord {
   state: SessionState;
   stateSince: string; // ISO
   pending: { kind: 'permission' | 'question'; summary: string } | null;
+  lastToolResultPromptId?: string | null; // prompt whose newest tool call returned
   lastAssistantMessage: string | null; // snippet, from Stop hook when present
   cache: {
     expiresAt: number | null;
@@ -192,6 +194,8 @@ interface SessionRecord {
   endedAt: string | null;
   done: boolean;
   archived: boolean;
+  // exitCode stays null on a killed run: kill takes the whole tmux shell down,
+  // so the launcher never posts one. Only a run that ended on its own has a code.
   runs: Array<{ startedAt: string; kind: 'start' | 'resume'; exitCode: number | null }>;
 }
 ```
@@ -232,14 +236,22 @@ Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 | hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                               |
 | hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`               |
 | hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict     |
-| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, only when no pending is set         |
-| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message                                      |
+| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, under the notification guard        |
+| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message, under the notification guard        |
 | hook PermissionDenied                           | any live                                | working            | clear pending                                                               |
 | hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl |
 | action interrupt                                | working, waiting-*                      | idle               | the runner sent Escape; no hook reports an interrupt                        |
 | hook SessionEnd                                 | any                                     | exited             | endedAt                                                                     |
 | launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                   |
 | statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9)                                              |
+
+The notification guard, shared by both Notification rows: a Notification only
+ever opens a pending, never redescribes or reclassifies one, so it is dropped
+when the record already needs the owner or already carries a `pending`. It is
+dropped too when its `prompt_id` is the one on `lastToolResultPromptId`, i.e.
+when a tool of that same turn has already returned: the dialog it describes was
+answered while it was in flight (it lags by ~6 s, and a question answered in 3 s
+lands its PostToolUse first).
 
 Unknown events are ignored and logged. Every hook and launcher signal is
 appended to `<dataDir>/sessions/<id>/events.jsonl` (raw payload + resulting
@@ -487,7 +499,9 @@ Same rule as the owner's statusline: Claude Code stamps
 `prompt_cache.expires_at` (epoch seconds) into the status-line payload; the
 time left is `expires_at - now`, capped at the TTL, full while a turn runs and
 counting down once it ends; cold when `warm` is false or `expires_at` has
-passed.
+passed. A payload whose `ttl` label is one this app does not know counts down
+uncapped and takes its colour bands from the 5m TTL: the stamped expiry is the
+fact, the label only bounds it.
 
 The runner's generated `statusline.sh` reads stdin once, POSTs it to
 `/api/hooks/<id>/statusline` in the background (`-m 1`, output discarded), and
@@ -621,7 +635,8 @@ the header; one notification per transition into the needs-you set, titled
 ```
 sessions.json           SessionRecord[] (write-through, atomic rename)
 flags.json              { [workspaceId]: { [issueKey]: { review?, done? } } }
-worktrees.json          { [repoId]: { [issueKey]: { path, branch, bootstrapped } } }
+worktrees.json          { [repoId]: { [issueKey]: { path, branch } } }
+                        worktrees only; a `shared` session's main checkout is not one
 sessions/<id>/          prompt.txt settings.json statusline.sh run.sh events.jsonl
 ```
 

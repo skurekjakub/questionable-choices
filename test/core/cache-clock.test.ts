@@ -57,10 +57,17 @@ describe('cacheFromStatusline', () => {
     });
   });
 
-  it('treats an unrecognised ttl as a zero-length cache', () => {
+  it('reports an unrecognised ttl as unknown', () => {
     const cache = cacheFromStatusline({ prompt_cache: { ttl: '2h', expires_at: 100, warm: true } });
     expect(cache?.ttlSeconds).toBe(0);
-    expect(describeCache(cache, 0).state).toBe('cold');
+  });
+
+  it('counts a warm cache down even when its ttl label is unrecognised', () => {
+    const cache = cacheFromStatusline({
+      prompt_cache: { ttl: '2h', expires_at: 3_000, warm: true },
+    });
+    expect(describeCache(cache, 0)).toMatchObject({ state: 'warm', secondsLeft: 3_000 });
+    expect(describeCache(cache, 4_000_000).state).toBe('cold');
   });
 });
 

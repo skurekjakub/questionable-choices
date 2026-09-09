@@ -30,17 +30,21 @@ export const DEFAULT_POLL_SECONDS = 120;
 export class ConfigError extends Error {
   /** Every problem found, not just the first. */
   readonly issues: ConfigIssue[];
+  /** Whether the document was rejected because an id is already taken. */
+  readonly duplicate: boolean;
 
   /**
    * Builds a configuration error.
    *
    * @param message - Summary line, shown before the issue list.
    * @param issues - Every problem found in the document.
+   * @param duplicate - Whether an already-taken id is what caused the refusal.
    */
-  constructor(message: string, issues: ConfigIssue[]) {
+  constructor(message: string, issues: ConfigIssue[], duplicate = false) {
     super(message);
     this.name = 'ConfigError';
     this.issues = issues;
+    this.duplicate = duplicate;
   }
 }
 
@@ -146,7 +150,12 @@ const connectorSchema = z.object({
 
 const workspaceSchema = z.object({
   name: nonEmpty('workspace name'),
-  epic: nonEmpty('epic'),
+  epic: z
+    .string()
+    .regex(
+      /^([A-Za-z][A-Za-z0-9]*-\d+|\d+)$/,
+      'epic must be an issue key such as DOC-3807, or a numeric issue id',
+    ),
   jql: nonEmpty('jql').optional(),
   connector: nonEmpty('connector'),
   repo: nonEmpty('repo'),
@@ -414,9 +423,11 @@ export function workspaceIdFor(request: CreateWorkspaceRequest): string {
 export function applyWorkspaceChange(config: Config, request: CreateWorkspaceRequest): Config {
   const id = workspaceIdFor(request);
   const issues: ConfigIssue[] = [];
+  let duplicate = false;
   if (id === '') {
     issues.push({ path: 'id', message: 'a workspace needs an id, or a name to derive one from' });
   } else if (config.workspaces[id] !== undefined) {
+    duplicate = true;
     issues.push({ path: 'id', message: `a workspace with id '${id}' already exists` });
   }
   const named = request.connector !== undefined && request.connector !== '';
@@ -428,12 +439,13 @@ export function applyWorkspaceChange(config: Config, request: CreateWorkspaceReq
     });
   }
   if (inline !== undefined && config.connectors[inline.id] !== undefined) {
+    duplicate = true;
     issues.push({
       path: 'newConnector.id',
       message: `a connector with id '${inline.id}' already exists`,
     });
   }
-  if (issues.length > 0) throw new ConfigError('Invalid workspace request', issues);
+  if (issues.length > 0) throw new ConfigError('Invalid workspace request', issues, duplicate);
 
   const document = serializeConfig(config);
   const connectorId = inline === undefined ? (request.connector ?? '') : inline.id;

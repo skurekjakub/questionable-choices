@@ -44,9 +44,16 @@ function constantFetch(body: string, status = 200): { fetch: FetchLike; urls: st
 describe('buildJql', () => {
   it("lists the epic's unfinished children in rank order", () => {
     expect(buildJql({ epic: 'DOC-3807', jql: undefined })).toBe(
-      'parent = DOC-3807 AND statusCategory != Done ORDER BY Rank ASC',
+      'parent = "DOC-3807" AND statusCategory != Done ORDER BY Rank ASC',
     );
     expect(epicChildrenJql('DOC-1')).toContain('ORDER BY Rank ASC');
+  });
+
+  it('quotes an epic that would otherwise rewrite the query', () => {
+    expect(buildJql({ epic: 'X" ORDER BY created DESC', jql: undefined })).toBe(
+      'parent = "X\\" ORDER BY created DESC" AND statusCategory != Done ORDER BY Rank ASC',
+    );
+    expect(buildJql({ epic: 'DOC 1', jql: undefined })).toContain('parent = "DOC 1" AND');
   });
 
   it('lets a raw jql replace the whole query', () => {

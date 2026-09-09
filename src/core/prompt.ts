@@ -43,11 +43,11 @@ export function slug(text: string): string {
 }
 
 /**
- * Renders a workspace's branch pattern for an issue.
+ * Renders a repo's branch pattern for an issue.
  *
  * The pattern may use `{{key}}` and `{{slug}}`.
  *
- * @param pattern - Branch-name template from the workspace config.
+ * @param pattern - Branch-name template from the repo config.
  * @param issue - Issue supplying the key and the summary the slug comes from.
  * @returns The branch name.
  */
@@ -61,13 +61,20 @@ export function branchName(pattern: string, issue: Issue): string {
  * @param prefix - Runner's `tmuxPrefix`, e.g. `qc`.
  * @param issueKey - Key of the issue the session works on.
  * @param playbookId - Id of the playbook that produced the prompt.
+ * @param suffix - Discriminator appended when the plain name is already taken.
  * @returns The session name, e.g. `qc-DOC-3847-implement`.
  */
-export function sessionName(prefix: string, issueKey: string, playbookId: string): string {
+export function sessionName(
+  prefix: string,
+  issueKey: string,
+  playbookId: string,
+  suffix?: string | undefined,
+): string {
   // tmux treats '.' and ':' as window/pane separators in target names, so every
   // character outside [A-Za-z0-9_-] is folded to a dash.
   const safe = (part: string): string => part.replace(/[^A-Za-z0-9_-]+/g, '-');
-  return `${safe(prefix)}-${safe(issueKey)}-${safe(playbookId)}`;
+  const base = `${safe(prefix)}-${safe(issueKey)}-${safe(playbookId)}`;
+  return suffix === undefined || suffix === '' ? base : `${base}-${safe(suffix)}`;
 }
 
 /**

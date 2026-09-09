@@ -17,6 +17,7 @@ import type {
 import { CACHE_TTL_1H_SECONDS, CACHE_TTL_5M_SECONDS } from '../core/cache-clock.js';
 import {
   applyWorkspaceChange,
+  checkEnvironment,
   removeWorkspace,
   serializeConfig,
   startDefaults,
@@ -43,12 +44,19 @@ import {
   type SessionState,
   type WorkspaceConfig,
 } from '../core/types.js';
+import { KeyedMutex } from './mutex.js';
 import { Store, writeJsonAtomic } from './store.js';
+import { messageOf } from './util.js';
 
 /**
  * Interval between reconciler passes, in milliseconds.
  */
 export const RECONCILE_INTERVAL_MS = 10_000;
+
+/**
+ * Key every configuration mutation is serialised on.
+ */
+const CONFIG_LOCK_KEY = 'config';
 
 /**
  * Window over which board recomputations for one workspace are coalesced.
@@ -222,13 +230,16 @@ export const spawnDetached: EditorSpawner = (command, args, onError) => {
 };
 
 /**
- * Turns anything thrown into a message.
+ * Renders a timestamp as a compact, tmux-safe discriminator.
  *
- * @param cause - The thrown value.
- * @returns The error message, or its string form.
+ * @param nowMs - Time in epoch milliseconds.
+ * @returns The timestamp as `YYYYMMDDTHHMMSS`.
  */
-function messageOf(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
+function compactTimestamp(nowMs: number): string {
+  return new Date(nowMs)
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.\d+Z$/, '');
 }
 
 /**
@@ -255,7 +266,10 @@ export class SessionManager {
   private readonly now: () => number;
   private readonly spawnEditor: EditorSpawner;
   private readonly logger: Logger;
+  private readonly sessionLock = new KeyedMutex();
+  private readonly configLock = new KeyedMutex();
   private reconcileTimer: NodeJS.Timeout | null = null;
+  private reconciling = false;
 
   /**
    * Builds a manager over already-constructed connectors.
@@ -364,27 +378,33 @@ export class SessionManager {
    * Adds a workspace: validates the request, rewrites the configuration file
    * and brings the board up without a restart.
    *
-   * The file is written before anything is applied in memory, so a rejected
-   * write leaves the running server exactly as it was.
+   * The runtime is built before the file is written, so a connector the
+   * configuration cannot be built from leaves both the file and the running
+   * server exactly as they were.
    *
    * @param request - Workspace to add, naming an existing or an inline connector.
    * @returns The new workspace, as the switcher lists it.
    * @throws {ConfigError} When the request or the resulting configuration is invalid.
-   * @throws {Error} When the configuration file cannot be written.
+   * @throws {Error} When a connector cannot be built or the file cannot be written.
    */
   async addWorkspace(request: CreateWorkspaceRequest): Promise<WorkspaceSummary> {
-    const next = applyWorkspaceChange(this.config, request);
-    const id = workspaceIdFor(request);
-    await this.writeConfig(next);
-    this.config = next;
-    const runtime = this.createRuntime(next, id);
-    this.adopt(runtime);
-    this.startPolling(runtime);
-    this.emitConfig();
-    void this.refresh(id).catch((cause: unknown) => {
-      this.logger.warn(`first refresh of workspace '${id}' failed: ${messageOf(cause)}`);
+    return this.configLock.run(CONFIG_LOCK_KEY, async () => {
+      const next = applyWorkspaceChange(this.config, request);
+      const id = workspaceIdFor(request);
+      const runtime = this.createRuntime(next, id);
+      await this.writeConfig(next);
+      this.config = next;
+      this.adopt(runtime);
+      this.startPolling(runtime);
+      for (const warning of checkEnvironment(next, process.env)) {
+        this.logger.warn(warning);
+      }
+      this.emitConfig();
+      void this.refresh(id).catch((cause: unknown) => {
+        this.logger.warn(`first refresh of workspace '${id}' failed: ${messageOf(cause)}`);
+      });
+      return this.summaryOf(id, runtime.config);
     });
-    return this.summaryOf(id, runtime.config);
   }
 
   /**
@@ -399,19 +419,21 @@ export class SessionManager {
    * @throws {Error} When the configuration file cannot be written.
    */
   async removeWorkspace(workspaceId: string): Promise<void> {
-    this.requireWorkspace(workspaceId);
-    const next = removeWorkspace(this.config, workspaceId);
-    await this.writeConfig(next);
-    this.config = next;
-    const timer = this.pollTimers.get(workspaceId);
-    if (timer !== undefined) clearInterval(timer);
-    this.pollTimers.delete(workspaceId);
-    const board = this.boardTimers.get(workspaceId);
-    if (board !== undefined) clearTimeout(board);
-    this.boardTimers.delete(workspaceId);
-    this.workspaces.delete(workspaceId);
-    this.caches.delete(workspaceId);
-    this.emitConfig();
+    await this.configLock.run(CONFIG_LOCK_KEY, async () => {
+      this.requireWorkspace(workspaceId);
+      const next = removeWorkspace(this.config, workspaceId);
+      await this.writeConfig(next);
+      this.config = next;
+      const timer = this.pollTimers.get(workspaceId);
+      if (timer !== undefined) clearInterval(timer);
+      this.pollTimers.delete(workspaceId);
+      const board = this.boardTimers.get(workspaceId);
+      if (board !== undefined) clearTimeout(board);
+      this.boardTimers.delete(workspaceId);
+      this.workspaces.delete(workspaceId);
+      this.caches.delete(workspaceId);
+      this.emitConfig();
+    });
   }
 
   /**
@@ -610,7 +632,8 @@ export class SessionManager {
    *
    * The record is persisted before the runner is invoked, so a crash between
    * the two leaves a record the reconciler can close instead of an orphan
-   * tmux session.
+   * tmux session. The whole sequence holds the lock of the session name it
+   * would take, so two simultaneous starts cannot both pass the liveness check.
    *
    * @param workspaceId - Workspace the issue belongs to.
    * @param issueKey - Key of the issue to work on.
@@ -631,79 +654,108 @@ export class SessionManager {
     if (typeof request.prompt !== 'string' || request.prompt.trim() === '') {
       throw new ActionError(400, 'the prompt must not be empty');
     }
+    const baseId = sessionName(this.config.runner.tmuxPrefix, issueKey, playbook.id);
 
-    const repoId = runtime.config.repo;
-    const history = this.sessionsFor(repoId, issueKey);
-    const clash = history.find(
-      (record) => record.playbookId === playbook.id && isLive(record.state),
-    );
-    if (clash !== undefined) {
-      throw new ActionError(
-        409,
-        `${issueKey} already has a live '${playbook.id}' session`,
-        `session ${clash.id} is ${clash.state}`,
+    return this.sessionLock.run(baseId, async () => {
+      const repoId = runtime.config.repo;
+      const history = this.sessionsFor(repoId, issueKey);
+      const clash = history.find(
+        (record) => record.playbookId === playbook.id && isLive(record.state),
       );
-    }
+      if (clash !== undefined) {
+        throw new ActionError(
+          409,
+          `${issueKey} already has a live '${playbook.id}' session`,
+          `session ${clash.id} is ${clash.state}`,
+        );
+      }
 
-    const issue = await this.requireIssue(workspaceId, issueKey);
-    let checkout;
-    try {
-      checkout = await runtime.repo.prepare(issue, playbook, {
-        knownBranch: history[0]?.branch ?? null,
-      });
-    } catch (cause) {
-      throw new ActionError(409, `cannot prepare a checkout for ${issueKey}`, messageOf(cause));
-    }
+      const issue = await this.requireIssue(workspaceId, issueKey);
+      let checkout;
+      try {
+        checkout = await runtime.repo.prepare(issue, playbook, {
+          knownBranch: history[0]?.branch ?? null,
+        });
+      } catch (cause) {
+        throw new ActionError(409, `cannot prepare a checkout for ${issueKey}`, messageOf(cause));
+      }
 
-    const startedAt = new Date(this.now()).toISOString();
-    const record: SessionRecord = {
-      id: sessionName(this.config.runner.tmuxPrefix, issueKey, playbook.id),
-      issueKey,
-      playbookId: playbook.id,
-      repoId,
-      cwd: checkout.cwd,
-      branch: checkout.branch,
-      model,
-      effort,
-      permissionMode,
-      prompt: request.prompt,
-      claudeSessionId: null,
-      state: 'starting',
-      stateSince: startedAt,
-      pending: null,
-      lastAssistantMessage: null,
-      cache: null,
-      createdAt: startedAt,
-      endedAt: null,
-      done: false,
-      archived: false,
-      runs: [],
-    };
-    await this.store.saveSession(record);
-    await this.store.setWorktree(repoId, issueKey, {
-      path: checkout.cwd,
-      branch: checkout.branch,
-      bootstrapped: !checkout.needsBootstrap,
-    });
+      const startedAt = new Date(this.now()).toISOString();
+      const record: SessionRecord = {
+        id: this.freeSessionId(issueKey, playbook.id),
+        issueKey,
+        playbookId: playbook.id,
+        repoId,
+        cwd: checkout.cwd,
+        branch: checkout.branch,
+        model,
+        effort,
+        permissionMode,
+        prompt: request.prompt,
+        claudeSessionId: null,
+        state: 'starting',
+        stateSince: startedAt,
+        pending: null,
+        lastAssistantMessage: null,
+        cache: null,
+        createdAt: startedAt,
+        endedAt: null,
+        done: false,
+        archived: false,
+        runs: [],
+      };
+      await this.store.saveSession(record);
+      // A `shared` session runs in the main checkout, which is nobody's
+      // worktree: recording it there would make Remove worktree offer to
+      // delete the repo.
+      if (playbook.isolation !== 'shared') {
+        await this.store.setWorktree(repoId, issueKey, {
+          path: checkout.cwd,
+          branch: checkout.branch,
+        });
+      }
 
-    try {
-      await this.runner.start({
-        record,
-        needsBootstrap: checkout.needsBootstrap,
-        ...(runtime.repoConfig.bootstrap === undefined
-          ? {}
-          : { bootstrap: runtime.repoConfig.bootstrap }),
-      });
-    } catch (cause) {
-      const failed = await this.patch(record, { state: 'failed' });
-      this.emitSession(failed);
+      try {
+        await this.runner.start({
+          record,
+          needsBootstrap: checkout.needsBootstrap,
+          ...(runtime.repoConfig.bootstrap === undefined
+            ? {}
+            : { bootstrap: runtime.repoConfig.bootstrap }),
+        });
+      } catch (cause) {
+        const failed = await this.patch(record, { state: 'failed' });
+        this.emitSession(failed);
+        this.scheduleBoard(workspaceId);
+        throw new ActionError(409, `cannot launch ${record.id}`, messageOf(cause));
+      }
+
+      this.emitSession(record);
       this.scheduleBoard(workspaceId);
-      throw new ActionError(409, `cannot launch ${record.id}`, messageOf(cause));
-    }
+      return record;
+    });
+  }
 
-    this.emitSession(record);
-    this.scheduleBoard(workspaceId);
-    return record;
+  /**
+   * Picks a session id no record holds yet.
+   *
+   * Starting the same playbook on the same issue again must not overwrite the
+   * archived record of the previous run, nor append to its event log.
+   *
+   * @param issueKey - Key of the issue the session works on.
+   * @param playbookId - Id of the playbook being started.
+   * @returns The plain session name, or one suffixed until it is free.
+   */
+  private freeSessionId(issueKey: string, playbookId: string): string {
+    const prefix = this.config.runner.tmuxPrefix;
+    const base = sessionName(prefix, issueKey, playbookId);
+    if (this.store.session(base) === undefined) return base;
+    const stamp = compactTimestamp(this.now());
+    for (let attempt = 0; ; attempt += 1) {
+      const suffix = attempt === 0 ? stamp : `${stamp}-${attempt}`;
+      const candidate = sessionName(prefix, issueKey, playbookId, suffix);
+      if (this.store.session(candidate) === undefined) return candidate;
+    }
   }
 
   /**
@@ -727,10 +779,28 @@ export class SessionManager {
     } catch (cause) {
       throw new ActionError(409, `cannot resume ${sessionId}`, messageOf(cause));
     }
-    const next = await this.patch(record, { state: 'starting', pending: null, endedAt: null });
-    this.emitSession(next);
-    this.scheduleRepoBoards(record.repoId);
-    return next;
+    return this.mutateSession(sessionId, async (current) => {
+      const next = await this.patch(current, { state: 'starting', pending: null, endedAt: null });
+      this.emitSession(next);
+      this.scheduleRepoBoards(next.repoId);
+      return next;
+    });
+  }
+
+  /**
+   * Runs a read-modify-write on one session record, serialised against every
+   * other mutation of that session.
+   *
+   * @param sessionId - Session the work belongs to.
+   * @param work - Called with the record as it is inside the critical section.
+   * @returns Whatever `work` resolved to.
+   * @throws {ActionError} When no record has that id by the time the work runs.
+   */
+  private async mutateSession<T>(
+    sessionId: string,
+    work: (record: SessionRecord) => Promise<T>,
+  ): Promise<T> {
+    return this.sessionLock.run(sessionId, async () => work(this.requireSession(sessionId)));
   }
 
   /**
@@ -776,11 +846,12 @@ export class SessionManager {
    * @throws {ActionError} When the session is unknown.
    */
   async setSessionDone(sessionId: string, done: boolean): Promise<SessionRecord> {
-    const record = this.requireSession(sessionId);
-    const next = await this.patch(record, { done });
-    this.emitSession(next);
-    this.scheduleRepoBoards(record.repoId);
-    return next;
+    return this.mutateSession(sessionId, async (record) => {
+      const next = await this.patch(record, { done });
+      this.emitSession(next);
+      this.scheduleRepoBoards(next.repoId);
+      return next;
+    });
   }
 
   /**
@@ -791,14 +862,18 @@ export class SessionManager {
    * @throws {ActionError} When the session is unknown or still live.
    */
   async archiveSession(sessionId: string): Promise<SessionRecord> {
-    const record = this.requireSession(sessionId);
-    if (isLive(record.state)) {
-      throw new ActionError(409, `${sessionId} is still ${record.state}; kill it before archiving`);
-    }
-    const next = await this.patch(record, { archived: true });
-    this.emitSession(next);
-    this.scheduleRepoBoards(record.repoId);
-    return next;
+    return this.mutateSession(sessionId, async (record) => {
+      if (isLive(record.state)) {
+        throw new ActionError(
+          409,
+          `${sessionId} is still ${record.state}; kill it before archiving`,
+        );
+      }
+      const next = await this.patch(record, { archived: true });
+      this.emitSession(next);
+      this.scheduleRepoBoards(next.repoId);
+      return next;
+    });
   }
 
   /**
@@ -902,6 +977,10 @@ export class SessionManager {
    * arrived. A status-line payload that changed nothing is the exception: it is
    * a once-a-second poll, not a signal, and logging it buries the lifecycle.
    *
+   * Two events that arrive together would otherwise each reduce the record they
+   * read at entry and write the loser's version back, so the whole sequence is
+   * serialised per session and re-reads the record inside the lock.
+   *
    * @param sessionId - Session the event belongs to.
    * @param event - The event to apply.
    * @param raw - The payload exactly as it arrived, for the log.
@@ -909,33 +988,34 @@ export class SessionManager {
    * @throws {ActionError} When the session is unknown.
    */
   async applyEvent(sessionId: string, event: SessionEvent, raw: unknown): Promise<SessionRecord> {
-    const before = this.requireSession(sessionId);
-    const nowMs = this.now();
-    const result = reduce(before, event, nowMs, {
-      derivedCacheTtlSeconds: this.derivedCacheTtlSeconds,
-    });
-    if (result.changed || event.type !== 'statusline') {
-      await this.store.appendEvent(sessionId, {
-        at: new Date(nowMs).toISOString(),
-        event: raw,
-        state: result.record.state,
+    return this.mutateSession(sessionId, async (before) => {
+      const nowMs = this.now();
+      const result = reduce(before, event, nowMs, {
+        derivedCacheTtlSeconds: this.derivedCacheTtlSeconds,
       });
-    }
-    if (!result.changed) return result.record;
-
-    await this.store.saveSession(result.record);
-    this.emitSession(result.record);
-    this.scheduleRepoBoards(before.repoId);
-    if (isLive(before.state) && !isLive(result.record.state)) {
-      // A session leaving the live set usually means its issue just moved in
-      // the tracker, so the board's issue list is refetched rather than waited on.
-      for (const runtime of this.workspacesOfRepo(before.repoId)) {
-        void this.refresh(runtime.id).catch((cause: unknown) => {
-          this.logger.warn(`refresh after ${sessionId} exited failed: ${messageOf(cause)}`);
+      if (result.changed || event.type !== 'statusline') {
+        await this.store.appendEvent(sessionId, {
+          at: new Date(nowMs).toISOString(),
+          event: raw,
+          state: result.record.state,
         });
       }
-    }
-    return result.record;
+      if (!result.changed) return result.record;
+
+      await this.store.saveSession(result.record);
+      this.emitSession(result.record);
+      this.scheduleRepoBoards(before.repoId);
+      if (isLive(before.state) && !isLive(result.record.state)) {
+        // A session leaving the live set usually means its issue just moved in
+        // the tracker, so the board's issue list is refetched rather than waited on.
+        for (const runtime of this.workspacesOfRepo(before.repoId)) {
+          void this.refresh(runtime.id).catch((cause: unknown) => {
+            this.logger.warn(`refresh after ${sessionId} exited failed: ${messageOf(cause)}`);
+          });
+        }
+      }
+      return result.record;
+    });
   }
 
   /**
@@ -961,30 +1041,46 @@ export class SessionManager {
    * Closes records whose tmux session has gone away.
    *
    * A record that never got as far as launching `claude` is marked `failed`;
-   * one that did is marked `exited`.
+   * one that did is marked `exited`. A record younger than one pass that has
+   * not launched yet is left alone: its tmux session may still be on its way up.
    *
    * @returns Nothing.
    */
   async reconcile(): Promise<void> {
-    for (const record of this.store.sessions()) {
-      if (!isLive(record.state)) continue;
-      let alive: boolean;
-      try {
-        alive = await this.runner.isAlive(record.id);
-      } catch (cause) {
-        this.logger.warn(`cannot probe ${record.id}: ${messageOf(cause)}`);
-        continue;
+    if (this.reconciling) return;
+    this.reconciling = true;
+    try {
+      for (const record of this.store.sessions()) {
+        if (!isLive(record.state)) continue;
+        if (
+          record.runs.length === 0 &&
+          this.now() - Date.parse(record.createdAt) < RECONCILE_INTERVAL_MS
+        ) {
+          continue;
+        }
+        let alive: boolean;
+        try {
+          alive = await this.runner.isAlive(record.id);
+        } catch (cause) {
+          this.logger.warn(`cannot probe ${record.id}: ${messageOf(cause)}`);
+          continue;
+        }
+        if (alive) continue;
+        await this.mutateSession(record.id, async (current) => {
+          if (!isLive(current.state)) return;
+          const state: SessionState = current.runs.length === 0 ? 'failed' : 'exited';
+          const next = await this.patch(current, {
+            state,
+            pending: null,
+            endedAt: new Date(this.now()).toISOString(),
+          });
+          this.logger.info(`reconciler marked ${next.id} ${state}`);
+          this.emitSession(next);
+          this.scheduleRepoBoards(next.repoId);
+        });
       }
-      if (alive) continue;
-      const state: SessionState = record.runs.length === 0 ? 'failed' : 'exited';
-      const next = await this.patch(record, {
-        state,
-        pending: null,
-        endedAt: new Date(this.now()).toISOString(),
-      });
-      this.logger.info(`reconciler marked ${record.id} ${state}`);
-      this.emitSession(next);
-      this.scheduleRepoBoards(record.repoId);
+    } finally {
+      this.reconciling = false;
     }
   }
 
@@ -1055,7 +1151,9 @@ export class SessionManager {
     try {
       issue = await runtime.issues.get(issueKey);
     } catch (cause) {
-      throw new ActionError(502, `cannot fetch ${issueKey}`, messageOf(cause));
+      // A refusal the owner can read is worth more than an accurate gateway
+      // status: the dialog shows a 4xx body verbatim and gives up on a 5xx.
+      throw new ActionError(409, `cannot fetch ${issueKey}`, messageOf(cause));
     }
     if (issue === null)
       throw new ActionError(404, `${issueKey} is not on workspace '${workspaceId}'`);
@@ -1227,7 +1325,7 @@ export class SessionManager {
    * @returns Nothing.
    */
   private emitSession(record: SessionRecord): void {
-    this.events.emit('session', { type: 'session', record } satisfies EventFrame);
+    this.emit('session', { type: 'session', record });
   }
 
   /**
@@ -1236,10 +1334,25 @@ export class SessionManager {
    * @returns Nothing.
    */
   private emitConfig(): void {
-    this.events.emit('config', {
-      type: 'config',
-      config: this.publicConfig(),
-    } satisfies EventFrame);
+    this.emit('config', { type: 'config', config: this.publicConfig() });
+  }
+
+  /**
+   * Pushes one frame on one channel, absorbing a subscriber that throws.
+   *
+   * A viewer's socket must not be able to turn a persisted event into a 500 for
+   * whoever posted it.
+   *
+   * @param channel - Channel name the frame goes out on.
+   * @param frame - The frame to push.
+   * @returns Nothing.
+   */
+  private emit(channel: 'board' | 'session' | 'config', frame: EventFrame): void {
+    try {
+      this.events.emit(channel, frame);
+    } catch (cause) {
+      this.logger.error(`a '${channel}' subscriber threw: ${messageOf(cause)}`);
+    }
   }
 
   /**
@@ -1281,7 +1394,7 @@ export class SessionManager {
       this.boardTimers.delete(workspaceId);
       try {
         const view = this.board(workspaceId);
-        this.events.emit('board', { type: 'board', workspaceId, view } satisfies EventFrame);
+        this.emit('board', { type: 'board', workspaceId, view });
       } catch (cause) {
         this.logger.error(`cannot project workspace '${workspaceId}': ${messageOf(cause)}`);
       }

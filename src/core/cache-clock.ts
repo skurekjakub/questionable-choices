@@ -96,15 +96,18 @@ export function cacheChanged(a: SessionCache | null, b: SessionCache | null): bo
 /**
  * Seconds left before the cached prefix goes cold, capped at the TTL.
  *
+ * A cache whose TTL is unknown counts down uncapped: the expiry the payload
+ * stamped is the fact, the TTL only bounds it.
+ *
  * @param cache - Cache state, or null when nothing has reported one.
  * @param nowMs - Current time in epoch milliseconds.
  * @returns Whole seconds remaining; 0 once the cache is cold or unknown.
  */
 export function secondsLeft(cache: SessionCache | null, nowMs: number): number {
-  if (cache === null || cache.expiresAt === null || cache.ttlSeconds <= 0) return 0;
+  if (cache === null || cache.expiresAt === null) return 0;
   const left = cache.expiresAt - Math.floor(nowMs / 1000);
   if (left <= 0) return 0;
-  return left > cache.ttlSeconds ? cache.ttlSeconds : left;
+  return cache.ttlSeconds > 0 && left > cache.ttlSeconds ? cache.ttlSeconds : left;
 }
 
 /**
@@ -156,8 +159,9 @@ export function describeCache(cache: SessionCache | null, nowMs: number): CacheD
   if (left <= 0) return { state: 'cold', secondsLeft: 0, label: '❄ cold', tone: 'red' };
   // Integer thresholds, matching the statusline's `ttl_s * 5 / 60` shell
   // arithmetic: 5/60 and 15/60 of the TTL, not fixed 5- and 15-minute marks.
-  const red = Math.floor((cache.ttlSeconds * 5) / 60);
-  const yellow = Math.floor((cache.ttlSeconds * 15) / 60);
+  const ttl = cache.ttlSeconds > 0 ? cache.ttlSeconds : CACHE_TTL_5M_SECONDS;
+  const red = Math.floor((ttl * 5) / 60);
+  const yellow = Math.floor((ttl * 15) / 60);
   const tone: CacheTone = left <= red ? 'red' : left <= yellow ? 'yellow' : 'dim';
   return { state: 'warm', secondsLeft: left, label: `⏳ ${formatDuration(left)}`, tone };
 }

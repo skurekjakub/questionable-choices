@@ -133,7 +133,9 @@ export function buildSettings(context: SettingsContext): GeneratedSettings {
     hooks,
     statusLine: {
       type: 'command',
-      command: `bash ${context.dir}/statusline.sh`,
+      // Claude Code runs this through a shell, so a data directory holding a
+      // space would otherwise split into a command and its arguments.
+      command: `bash ${shellQuote(`${context.dir}/statusline.sh`)}`,
       refreshInterval: 1,
     },
   };

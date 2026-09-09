@@ -48,6 +48,29 @@ function isNode(value: unknown): value is AdfNode {
 }
 
 /**
+ * Reads a node's children as an array.
+ *
+ * A description whose `content` is not an array is malformed rather than
+ * fatal: the board degrades to less text, never to a failed fetch.
+ *
+ * @param nodes - The node's `content`, whatever the document carried.
+ * @returns The children, or an empty array when there are none to read.
+ */
+function childrenOf(nodes: AdfNode[] | undefined): AdfNode[] {
+  return Array.isArray(nodes) ? nodes.filter(isNode) : [];
+}
+
+/**
+ * Reads a node's marks as an array.
+ *
+ * @param marks - The node's `marks`, whatever the document carried.
+ * @returns The marks, or an empty array when there are none to read.
+ */
+function marksOf(marks: AdfMark[] | undefined): AdfMark[] {
+  return Array.isArray(marks) ? marks.filter((mark): mark is AdfMark => isNode(mark)) : [];
+}
+
+/**
  * Reads a string attribute off a node.
  *
  * @param node - Node to read from.
@@ -84,7 +107,9 @@ function numericAttr(node: AdfNode, name: string): number | null {
  * @returns The concatenated text.
  */
 function rawText(nodes: AdfNode[] | undefined): string {
-  return (nodes ?? []).map((node) => node.text ?? rawText(node.content)).join('');
+  return childrenOf(nodes)
+    .map((node) => node.text ?? rawText(node.content))
+    .join('');
 }
 
 /**
@@ -97,7 +122,7 @@ function renderInlineNode(node: AdfNode): string {
   switch (node.type) {
     case 'text': {
       const text = node.text ?? '';
-      const href = node.marks?.find((mark) => mark.type === 'link')?.attrs?.['href'];
+      const href = marksOf(node.marks).find((mark) => mark.type === 'link')?.attrs?.['href'];
       return typeof href === 'string' && href !== '' ? `${text} (${href})` : text;
     }
     case 'hardBreak':
@@ -120,7 +145,7 @@ function renderInlineNode(node: AdfNode): string {
  * @returns The concatenated text.
  */
 function renderInline(nodes: AdfNode[] | undefined): string {
-  return (nodes ?? []).map(renderInlineNode).join('');
+  return childrenOf(nodes).map(renderInlineNode).join('');
 }
 
 /**
@@ -148,7 +173,7 @@ function renderList(list: AdfNode, ordered: boolean): string {
   const order = numericAttr(list, 'order');
   let counter = ordered && order !== null && order > 0 ? order : 1;
   const rendered: string[] = [];
-  for (const item of list.content ?? []) {
+  for (const item of childrenOf(list.content)) {
     if (item.type !== 'listItem') continue;
     const marker = ordered ? `${counter}. ` : '- ';
     counter += 1;
@@ -203,7 +228,7 @@ function renderBlock(node: AdfNode): string {
  */
 function renderBlocks(nodes: AdfNode[] | undefined): string[] {
   const blocks: string[] = [];
-  for (const node of nodes ?? []) {
+  for (const node of childrenOf(nodes)) {
     const text = renderBlock(node);
     if (text !== '') blocks.push(text);
   }

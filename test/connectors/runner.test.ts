@@ -141,7 +141,7 @@ describe('ClaudeTmuxRunner.writeSessionFiles', () => {
     const settings = JSON.parse(await readFile(join(dir, 'settings.json'), 'utf8')) as {
       statusLine: { command: string };
     };
-    expect(settings.statusLine.command).toBe(`bash ${dir}/statusline.sh`);
+    expect(settings.statusLine.command).toBe(`bash '${dir}/statusline.sh'`);
     expect(await readFile(join(dir, 'statusline.sh'), 'utf8')).toContain(
       `/api/hooks/${record.id}/statusline`,
     );

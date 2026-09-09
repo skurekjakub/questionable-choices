@@ -89,7 +89,7 @@ describe('buildSettings', () => {
   it('overrides the status line with the generated script, refreshed every second', () => {
     expect(settings.statusLine).toEqual({
       type: 'command',
-      command: `bash ${DIR}/statusline.sh`,
+      command: `bash '${DIR}/statusline.sh'`,
       refreshInterval: 1,
     });
   });

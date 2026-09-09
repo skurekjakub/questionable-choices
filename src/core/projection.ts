@@ -1,5 +1,5 @@
 import type { BoardColumn, BoardView, Card, CardSession, PlaybookSummary } from './api.js';
-import { isLive, needsYou } from './state-machine.js';
+import { LIVE_STATES, NEEDS_YOU_STATES, isLive, needsYou } from './state-machine.js';
 import {
   COLUMN_IDS,
   COLUMN_NAMES,
@@ -8,22 +8,29 @@ import {
   type IssueFlags,
   type RepoConfig,
   type SessionRecord,
+  type SessionState,
   type WorkspaceConfig,
 } from './types.js';
 
 /**
- * States in which a session is making progress on its own.
+ * States in which a session is making progress on its own: live but not
+ * blocked on the owner.
  */
-const BUSY_STATES: ReadonlySet<string> = new Set(['bootstrapping', 'starting', 'working']);
+const BUSY_STATES: ReadonlySet<SessionState> = new Set(
+  [...LIVE_STATES].filter((state) => !NEEDS_YOU_STATES.has(state)),
+);
 
 /**
- * States in which a session is blocked on the owner.
+ * States in which a dialog is on screen, as opposed to a merely idle prompt.
  */
-const WAITING_STATES: ReadonlySet<string> = new Set([
-  'waiting-permission',
-  'waiting-question',
-  'idle',
-]);
+const DIALOG_STATES: ReadonlySet<SessionState> = new Set(
+  [...NEEDS_YOU_STATES].filter((state) => state !== 'idle'),
+);
+
+/**
+ * The one state that means "your turn" without a dialog on screen.
+ */
+const IDLE_STATES: ReadonlySet<SessionState> = new Set<SessionState>(['idle']);
 
 /**
  * Builds the shell command that attaches a terminal to a session.
@@ -137,11 +144,7 @@ function toCardSession(record: SessionRecord): CardSession {
  * @returns 0 for a card with a dialog on screen, 1 for a merely idle one.
  */
 function needsYouRank(card: Card): number {
-  return card.sessions.some(
-    (session) => session.state === 'waiting-permission' || session.state === 'waiting-question',
-  )
-    ? 0
-    : 1;
+  return card.sessions.some((session) => DIALOG_STATES.has(session.state)) ? 0 : 1;
 }
 
 /**
@@ -151,7 +154,7 @@ function needsYouRank(card: Card): number {
  * @param states - States a session must be in to count.
  * @returns The ISO timestamp, or an empty string when no session qualifies.
  */
-function oldestStateSince(card: Card, states: ReadonlySet<string>): string {
+function oldestStateSince(card: Card, states: ReadonlySet<SessionState>): string {
   let oldest = '';
   for (const session of card.sessions) {
     if (!states.has(session.state)) continue;
@@ -170,9 +173,12 @@ function oldestStateSince(card: Card, states: ReadonlySet<string>): string {
 function orderCards(columnId: ColumnId, cards: Card[]): Card[] {
   if (columnId === 'needs-you') {
     return [...cards].sort((a, b) => {
-      const rank = needsYouRank(a) - needsYouRank(b);
-      if (rank !== 0) return rank;
-      return oldestStateSince(a, WAITING_STATES).localeCompare(oldestStateSince(b, WAITING_STATES));
+      const rank = needsYouRank(a);
+      if (rank !== needsYouRank(b)) return rank - needsYouRank(b);
+      // Cards of one rank are compared on the sessions that earned them that
+      // rank, so an older idle session cannot outrank a longer-blocked dialog.
+      const states = rank === 0 ? DIALOG_STATES : IDLE_STATES;
+      return oldestStateSince(a, states).localeCompare(oldestStateSince(b, states));
     });
   }
   if (columnId === 'working') {

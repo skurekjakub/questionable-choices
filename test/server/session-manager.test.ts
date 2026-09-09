@@ -7,12 +7,13 @@ import type { Config } from '../../src/core/types.js';
 import {
   ActionError,
   BOARD_DEBOUNCE_MS,
+  RECONCILE_INTERVAL_MS,
   SessionManager,
   readDerivedCacheTtlSeconds,
   spawnDetached,
 } from '../../src/server/session-manager.js';
 import { Store } from '../../src/server/store.js';
-import { makeIssue } from '../core/helpers.js';
+import { makeIssue, makePlaybook } from '../core/helpers.js';
 import {
   FakeIssueSource,
   FakeRepo,
@@ -139,7 +140,6 @@ describe('SessionManager', () => {
       expect(h.store.worktree('app', 'DOC-1')).toEqual({
         path: '/repos/worktrees/DOC-1',
         branch: 'DOC-1-document-the-thing',
-        bootstrapped: false,
       });
       expect(h.runner.started[0]?.needsBootstrap).toBe(true);
       expect(h.runner.started[0]?.bootstrap).toBe('npm ci');
@@ -199,6 +199,45 @@ describe('SessionManager', () => {
       await expect(h.manager.startSession('ws', 'DOC-404', START)).rejects.toMatchObject({
         status: 404,
       });
+    });
+
+    it('refuses the loser of two simultaneous starts instead of clobbering the winner', async () => {
+      const [first, second] = await Promise.allSettled([
+        h.manager.startSession('ws', 'DOC-1', START),
+        h.manager.startSession('ws', 'DOC-1', START),
+      ]);
+
+      const outcomes = [first?.status, second?.status].sort();
+      expect(outcomes).toEqual(['fulfilled', 'rejected']);
+      expect(h.runner.started).toHaveLength(1);
+      expect(h.store.sessions()).toHaveLength(1);
+      expect(h.store.session('qc-DOC-1-implement')?.state).toBe('starting');
+    });
+
+    it('starts the same playbook again under a new id rather than over the old record', async () => {
+      const first = await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.killSession(first.id);
+      await h.manager.archiveSession(first.id);
+      h.clock.ms += 60_000;
+
+      const second = await h.manager.startSession('ws', 'DOC-1', START);
+
+      expect(second.id).not.toBe(first.id);
+      expect(second.id.startsWith(`${first.id}-`)).toBe(true);
+      expect(h.store.session(first.id)?.archived).toBe(true);
+      expect(h.store.sessions()).toHaveLength(2);
+    });
+
+    it('does not register the main checkout as a worktree for a shared playbook', async () => {
+      h.repo.result = { cwd: '/repos/app', branch: null, needsBootstrap: false };
+      const config = h.config.repos['app'];
+      config?.playbooks.push(
+        makePlaybook({ id: 'triage', label: 'Triage', isolation: 'shared', primaryFor: [] }),
+      );
+
+      await h.manager.startSession('ws', 'DOC-1', { ...START, playbookId: 'triage' });
+
+      expect(h.store.worktree('app', 'DOC-1')).toBeUndefined();
     });
 
     it('hands the repo the branch of the newest record for the issue', async () => {
@@ -372,9 +411,18 @@ describe('SessionManager', () => {
     it('marks a session that never launched claude as failed', async () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       h.runner.alive.clear();
+      h.clock.ms += RECONCILE_INTERVAL_MS;
 
       await h.manager.reconcile();
       expect(h.store.session('qc-DOC-1-implement')?.state).toBe('failed');
+    });
+
+    it('leaves a record whose launcher has not reported yet alone for one pass', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.runner.alive.clear();
+
+      await h.manager.reconcile();
+      expect(h.store.session('qc-DOC-1-implement')?.state).toBe('starting');
     });
 
     it('marks a session whose tmux session is gone as exited', async () => {

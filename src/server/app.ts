@@ -7,12 +7,14 @@ import type {
   CreateWorkspaceRequest,
   ErrorResponse,
   NewConnectorRequest,
+  RemoveWorktreeRequest,
   SetFlagsRequest,
 } from '../core/api.js';
 import { ConfigError } from '../core/config.js';
 import { registerHookRoutes } from './hooks.js';
 import { ActionError, consoleLogger, type Logger, type SessionManager } from './session-manager.js';
 import { registerWebSocketRoutes, type UpgradeWebSocketFn } from './terminal-ws.js';
+import { messageOf, readJsonObject } from './util.js';
 
 /**
  * What the app needs to serve the API, the hooks and the SPA.
@@ -29,14 +31,13 @@ export interface AppDeps {
 }
 
 /**
- * Reads a request body as a JSON object.
+ * Reports whether a path belongs to the server rather than to the SPA.
  *
- * @param body - The already-parsed body, or whatever arrived instead.
- * @returns The object, or an empty one when the body was not one.
+ * @param path - Request path.
+ * @returns True for the API and WebSocket namespaces.
  */
-function asObject(body: unknown): Record<string, unknown> {
-  if (body === null || typeof body !== 'object' || Array.isArray(body)) return {};
-  return body as Record<string, unknown>;
+function isServerPath(path: string): boolean {
+  return path.startsWith('/api/') || path.startsWith('/ws/');
 }
 
 /**
@@ -112,11 +113,8 @@ export function createApp(deps: AppDeps): Hono {
 
   app.onError((cause, c) => {
     if (cause instanceof ConfigError) {
-      // A duplicate id is the one refusal the UI can resolve by renaming, so it
-      // gets 409; every other issue is a field the dialog can point at.
-      const duplicate = cause.issues.some((issue) => issue.path === 'id');
       const body: ErrorResponse = { error: cause.message, issues: cause.issues };
-      return c.json(body, duplicate ? 409 : 400);
+      return c.json(body, cause.duplicate ? 409 : 400);
     }
     if (cause instanceof ActionError) {
       const body: ErrorResponse = {
@@ -125,7 +123,7 @@ export function createApp(deps: AppDeps): Hono {
       };
       return c.json(body, cause.status as ContentfulStatusCode);
     }
-    const message = cause instanceof Error ? cause.message : String(cause);
+    const message = messageOf(cause);
     logger.error(`${c.req.method} ${c.req.path} failed: ${message}`);
     return c.json({ error: 'internal error', detail: message } satisfies ErrorResponse, 500);
   });
@@ -133,7 +131,7 @@ export function createApp(deps: AppDeps): Hono {
   app.get('/api/config/public', (c) => c.json(manager.publicConfig()));
 
   app.post('/api/workspaces', async (c) => {
-    const body = asObject(await c.req.json<unknown>().catch(() => ({})));
+    const body = (await readJsonObject(c)) ?? {};
     const summary = await manager.addWorkspace(createWorkspaceRequestOf(body));
     return c.json(summary, 201);
   });
@@ -162,7 +160,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.post('/api/workspaces/:id/issues/:key/sessions', async (c) => {
-    const body = asObject(await c.req.json<unknown>().catch(() => ({})));
+    const body = (await readJsonObject(c)) ?? {};
     const request: CreateSessionRequest = {
       playbookId: String(body['playbookId'] ?? ''),
       prompt: String(body['prompt'] ?? ''),
@@ -177,7 +175,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.post('/api/workspaces/:id/issues/:key/flags', async (c) => {
-    const body = asObject(await c.req.json<unknown>().catch(() => ({})));
+    const body = (await readJsonObject(c)) ?? {};
     const patch: SetFlagsRequest = {
       ...(typeof body['review'] === 'boolean' ? { review: body['review'] } : {}),
       ...(typeof body['done'] === 'boolean' ? { done: body['done'] } : {}),
@@ -210,8 +208,9 @@ export function createApp(deps: AppDeps): Hono {
   );
 
   app.post('/api/sessions/:id/remove-worktree', async (c) => {
-    const body = asObject(await c.req.json<unknown>().catch(() => ({})));
-    return c.json(await manager.removeWorktree(c.req.param('id'), body['force'] === true));
+    const body = (await readJsonObject(c)) ?? {};
+    const request: RemoveWorktreeRequest = { force: body['force'] === true };
+    return c.json(await manager.removeWorktree(c.req.param('id'), request.force === true));
   });
 
   app.get('/api/sessions/:id/events', async (c) =>
@@ -230,7 +229,7 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   app.notFound((c) => {
-    if (c.req.path.startsWith('/api/') || c.req.path.startsWith('/ws/')) {
+    if (isServerPath(c.req.path)) {
       return c.json({ error: `no route for ${c.req.path}` } satisfies ErrorResponse, 404);
     }
     return c.text('Not found', 404);
@@ -238,10 +237,14 @@ export function createApp(deps: AppDeps): Hono {
 
   const webRoot = deps.webRoot;
   if (webRoot !== undefined && existsSync(webRoot)) {
-    app.use('/*', serveStatic({ root: webRoot }));
+    const asset = serveStatic({ root: webRoot });
+    const shell = serveStatic({ root: webRoot, path: 'index.html' });
+    // Both handlers match every path and index.html always exists, so without
+    // this guard an unrouted /api/ or /ws/ request is answered with the SPA.
+    app.use('/*', async (c, next) => (isServerPath(c.req.path) ? next() : asset(c, next)));
     // The SPA owns /session/:id, so anything that is not a real file falls back
     // to index.html rather than 404ing on a deep link.
-    app.get('/*', serveStatic({ root: webRoot, path: 'index.html' }));
+    app.get('/*', async (c, next) => (isServerPath(c.req.path) ? next() : shell(c, next)));
   }
 
   return app;

@@ -83,7 +83,6 @@ describe('Store', () => {
     await store.setWorktree('ws', 'DOC-1', {
       path: '/repos/worktrees/DOC-1',
       branch: 'DOC-1-x',
-      bootstrapped: false,
     });
     expect(store.worktree('ws', 'DOC-1')?.branch).toBe('DOC-1-x');
     await store.clearWorktree('ws', 'DOC-1');

@@ -343,14 +343,6 @@ export interface RemoveWorktreeResponse {
 }
 
 /**
- * Issue-scoped POST actions that take no body.
- *
- * `open-editor` answers 204 on success and 409 with an `ErrorResponse` when the
- * issue has no worktree to open.
- */
-export type IssueAction = 'open-editor';
-
-/**
  * Session-scoped POST actions that take no body and answer with the updated
  * `SessionRecord`.
  */

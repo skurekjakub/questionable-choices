@@ -134,7 +134,14 @@ export function createJiraIssueSource(
   return new JiraIssueSource(id, connector, query, client);
 }
 
-export { JiraClient, JiraHttpError, JIRA_ISSUE_FIELDS, normaliseSite } from './client.js';
+export {
+  JiraClient,
+  JiraHttpError,
+  JiraTruncatedError,
+  JIRA_ISSUE_FIELDS,
+  JIRA_TIMEOUT_MS,
+  normaliseSite,
+} from './client.js';
 export type {
   FetchLike,
   JiraClientOptions,
@@ -142,5 +149,5 @@ export type {
   JiraIssueResource,
   JiraSearchResponse,
 } from './client.js';
-export { DEFAULT_JQL_ORDER, buildJql, epicChildrenJql } from './jql.js';
+export { DEFAULT_JQL_ORDER, buildJql, epicChildrenJql, jqlQuote } from './jql.js';
 export { adfToText, issueUrl, mapIssue, statusCategoryFrom } from './map.js';

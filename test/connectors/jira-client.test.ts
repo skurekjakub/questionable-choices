@@ -3,6 +3,7 @@ import {
   JIRA_ISSUE_FIELDS,
   JiraClient,
   JiraHttpError,
+  JiraTruncatedError,
   normaliseSite,
   type FetchLike,
 } from '../../src/connectors/issues/jira/client.js';
@@ -127,7 +128,7 @@ describe('JiraClient.searchJql', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('gives up after maxPages when the site keeps handing back a token', async () => {
+  it('fails rather than pass a truncated page walk off as the whole epic', async () => {
     const { fetch, calls } = recordingFetch([
       json({ issues: [{ key: 'DOC-1' }], nextPageToken: 'same' }),
       json({ issues: [{ key: 'DOC-2' }], nextPageToken: 'same' }),
@@ -140,10 +141,37 @@ describe('JiraClient.searchJql', () => {
       maxPages: 2,
     });
 
-    const issues = await client.searchJql('parent = DOC-100');
-
-    expect(issues).toHaveLength(2);
+    await expect(client.searchJql('parent = DOC-100')).rejects.toBeInstanceOf(JiraTruncatedError);
     expect(calls).toHaveLength(2);
+  });
+
+  it('reports a 2xx body that is not JSON as a Jira error', async () => {
+    const { fetch } = recordingFetch([
+      new Response('<html>login</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+    ]);
+    const client = new JiraClient({
+      site: 'example.atlassian.net',
+      email: 'me@example.com',
+      token: 'secret',
+      fetch,
+    });
+
+    await expect(client.searchJql('parent = DOC-100')).rejects.toThrow(/login/);
+  });
+
+  it('reports a 404 on the search as a failure rather than an empty epic', async () => {
+    const { fetch } = recordingFetch([new Response('gone', { status: 404 })]);
+    const client = new JiraClient({
+      site: 'example.atlassian.net',
+      email: 'me@example.com',
+      token: 'secret',
+      fetch,
+    });
+
+    await expect(client.searchJql('parent = DOC-100')).rejects.toBeInstanceOf(JiraHttpError);
   });
 
   it('throws a JiraHttpError carrying the status and body', async () => {

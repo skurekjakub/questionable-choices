@@ -9,27 +9,19 @@ export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type Effort = (typeof EFFORTS)[number];
 
 /**
- * Permission modes the `claude` CLI accepts on `--permission-mode`.
+ * Permission-mode choices offered by the picker: every mode the `claude` CLI
+ * accepts on `--permission-mode`, plus the sentinel `'default'` that means
+ * "pass no `--permission-mode` flag at all".
  */
-export const PERMISSION_MODES = [
+export const PERMISSION_MODE_SETTINGS = [
   'acceptEdits',
   'auto',
   'bypassPermissions',
   'manual',
   'dontAsk',
   'plan',
+  'default',
 ] as const;
-
-/**
- * One permission mode understood by the `claude` CLI.
- */
-export type PermissionMode = (typeof PERMISSION_MODES)[number];
-
-/**
- * Permission-mode choices offered by the picker, including the sentinel
- * `'default'` that means "pass no `--permission-mode` flag at all".
- */
-export const PERMISSION_MODE_SETTINGS = [...PERMISSION_MODES, 'default'] as const;
 
 /**
  * A permission mode or the sentinel `'default'` meaning "pass no flag".
@@ -163,7 +155,11 @@ export interface SessionRun {
   startedAt: string;
   /** Whether this run was a fresh prompt or a `--resume`. */
   kind: 'start' | 'resume';
-  /** Process exit code, or null while the run is still going. */
+  /**
+   * Process exit code, or null when the run is still going or was killed.
+   * Killing a session takes the whole tmux shell down, so the launcher never
+   * reports a code: only a run that ended on its own has one.
+   */
   exitCode: number | null;
 }
 
@@ -200,6 +196,12 @@ export interface SessionRecord {
   stateSince: string;
   /** What the session is waiting for, or null when it is not waiting. */
   pending: Pending | null;
+  /**
+   * Prompt id of the turn whose newest tool call already returned, or null
+   * before any tool has returned. A `permission_prompt` notification carrying
+   * this id describes a dialog that is already gone.
+   */
+  lastToolResultPromptId?: string | null | undefined;
   /** Snippet of the last assistant message, when the Stop payload carried one. */
   lastAssistantMessage: string | null;
   /** Prompt-cache state, or null before anything reported one. */

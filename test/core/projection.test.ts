@@ -202,6 +202,27 @@ describe('ordering', () => {
     expect(keysIn(view, 'needs-you')).toEqual(['DOC-3', 'DOC-2', 'DOC-4', 'DOC-1']);
   });
 
+  it('ranks a blocked card on its dialog, not on an older idle session beside it', () => {
+    const rows = [
+      pair('DOC-1', 'waiting-permission', '2026-09-09T10:00:00.000Z'),
+      pair('DOC-2', 'waiting-permission', '2026-09-09T09:30:00.000Z'),
+    ];
+    const view = projectWith({
+      issues: rows.map((row) => row.issue),
+      sessions: [
+        ...rows.map((row) => row.session),
+        makeRecord({
+          id: 'qc-DOC-1-test',
+          issueKey: 'DOC-1',
+          playbookId: 'test',
+          state: 'idle',
+          stateSince: '2026-09-09T09:00:00.000Z',
+        }),
+      ],
+    });
+    expect(keysIn(view, 'needs-you')).toEqual(['DOC-2', 'DOC-1']);
+  });
+
   it('puts the longest-running working card on top', () => {
     const rows = [
       pair('DOC-1', 'working', '2026-09-09T11:00:00.000Z'),

@@ -6,13 +6,23 @@ import type { WorkspaceQuery } from '../../../core/types.js';
 export const DEFAULT_JQL_ORDER = 'ORDER BY Rank ASC';
 
 /**
+ * Quotes a value so JQL reads it as one string literal.
+ *
+ * @param value - Text to quote.
+ * @returns The double-quoted value, with backslashes and quotes escaped.
+ */
+export function jqlQuote(value: string): string {
+  return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+}
+
+/**
  * Builds the query listing an epic's unfinished children.
  *
  * @param epic - Key of the parent epic.
  * @returns The JQL query.
  */
 export function epicChildrenJql(epic: string): string {
-  return `parent = ${epic} AND statusCategory != Done ${DEFAULT_JQL_ORDER}`;
+  return `parent = ${jqlQuote(epic)} AND statusCategory != Done ${DEFAULT_JQL_ORDER}`;
 }
 
 /**

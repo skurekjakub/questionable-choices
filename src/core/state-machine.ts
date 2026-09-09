@@ -77,8 +77,11 @@ export interface SessionStartHookEvent extends HookEventBase {
   hook_event_name: 'SessionStart';
   /** Why the session started, e.g. `startup`, `resume`, `clear`. */
   source?: string | undefined;
-  /** The model the session runs on. */
-  model?: { id?: string | undefined; display_name?: string | undefined } | undefined;
+  /**
+   * The model the session runs on: a bare id on the hook payload, an object on
+   * the status-line payload.
+   */
+  model?: string | { id?: string | undefined; display_name?: string | undefined } | undefined;
 }
 
 /**
@@ -375,7 +378,14 @@ function questionSummary(input: unknown): string {
 type SessionPatch = Partial<
   Pick<
     SessionRecord,
-    'state' | 'pending' | 'claudeSessionId' | 'lastAssistantMessage' | 'cache' | 'endedAt' | 'runs'
+    | 'state'
+    | 'pending'
+    | 'claudeSessionId'
+    | 'lastToolResultPromptId'
+    | 'lastAssistantMessage'
+    | 'cache'
+    | 'endedAt'
+    | 'runs'
   >
 >;
 
@@ -516,7 +526,8 @@ export function reduce(
     case 'PostToolUse':
     case 'PostToolUseFailure':
     case 'PermissionDenied':
-      return live ? apply(busy) : unchanged;
+      if (!live) return unchanged;
+      return apply({ ...busy, lastToolResultPromptId: hook.prompt_id ?? null });
 
     case 'PermissionRequest': {
       if (!live) return unchanged;
@@ -531,16 +542,25 @@ export function reduce(
 
     case 'Notification': {
       if (!live) return unchanged;
+      // This lags the dialog by seconds, fires for questions too and says only
+      // "Claude needs your permission", so it is a last-resort signal: it may
+      // open a pending, never redescribe or reclassify one.
+      if (needsYou(record.state) || record.pending !== null) return unchanged;
+      // A tool of this turn has already returned, so the dialog this describes
+      // is one the owner answered while the notification was in flight.
+      const promptId = hook.prompt_id;
+      if (
+        promptId !== undefined &&
+        promptId !== '' &&
+        promptId === (record.lastToolResultPromptId ?? null)
+      ) {
+        return unchanged;
+      }
       const message = oneLine(hook.message ?? '');
       if (hook.notification_type === 'permission_prompt') {
-        // This lags the dialog by seconds, fires for questions too and says
-        // only "Claude needs your permission", so it is a last-resort signal:
-        // it may open a pending, never redescribe or reclassify one.
-        if (needsYou(record.state) || record.pending !== null) return unchanged;
         return apply(permission(message === '' ? 'Permission requested' : message));
       }
       if (hook.notification_type === 'elicitation_dialog') {
-        if (record.pending !== null) return unchanged;
         return apply(question(message === '' ? 'Claude asked you a question' : message));
       }
       return unchanged;
