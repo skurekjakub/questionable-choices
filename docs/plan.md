@@ -115,7 +115,8 @@ Files: `src/web/**`.
   `docs/verification.md` with timestamps and the events.jsonl excerpt.
 - README: what it is, prerequisites (tmux, claude, node ≥ 22, env vars),
   `cp config.example.json ~/.config/questionable-choices/config.json`,
-  `npm run dev`, `npm run build && npm start`, how to add a workspace (UI) and a repo (config).
+  `npm run config:check`, `npm run dev`, `npm run build && npm start`, how to
+  add a workspace (UI) and a repo (config).
 - `docs/connectors.md` per spec §16.
 
 ## Package 4 — review

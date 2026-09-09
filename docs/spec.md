@@ -137,11 +137,20 @@ repos{id}
     promptTemplate         see §7
 ```
 
+`epic` is required even when `jql` overrides the query: a workspace is one
+epic, and its key is what the switcher and the header show.
+
 Workspaces are added and removed from the UI (§12); the server validates the
 request with the same zod schema, writes the whole config back to the file
 (tmp + rename; the file is JSON, so no comments to preserve) and applies it
-live. A connector may be created inline from the same dialog. Repos stay
-file-only: a playbook set is not a form.
+live. A rewritten file carries absolute paths: `~` is expanded while parsing
+and is not restored. A connector may be created inline from the same dialog.
+Repos stay file-only: a playbook set is not a form.
+
+`npm run config:check` loads the same file the server would, prints the
+resolved path, one line per workspace and repo and one line per named
+credential variable that does not resolve, and exits 1 on a zod failure or a
+repo path that is not a git checkout.
 
 Valid `effort`: low, medium, high, xhigh, max. Valid `permissionMode`:
 acceptEdits, auto, bypassPermissions, manual, dontAsk, plan, plus `default`
@@ -285,7 +294,9 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
 
 1. Server validates: playbook exists, no live session for (issue, playbook),
    model/effort/permission values are in the allowed sets.
-2. Workspace `prepare(issue, playbook)` resolves `cwd` and `branch`:
+2. `Repo.prepare(issue, playbook, hints)` resolves `cwd` and `branch`; the
+   server passes `hints.knownBranch` from the newest non-archived record for
+   that issue in that repo:
    - `worktree`: `git fetch <remote of baseRef>`; if `<worktreeDir>/<KEY>` is
      already a registered worktree, reuse it (no bootstrap); else
      `git worktree add -b <branch> <path> <baseRef>` and mark `needsBootstrap`.
@@ -295,7 +306,7 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
      `git branch -r --list 'origin/<KEY>-*'`. Recreate the worktree from it
      (`needsBootstrap` true). No branch → start refused with a message that
      names what was searched.
-   - `shared`: cwd = `repo`, branch = null, no bootstrap.
+   - `shared`: cwd = the repo's `path`, branch = null, no bootstrap.
 3. Runner writes `<dataDir>/sessions/<id>/`: `prompt.txt`, `settings.json`
    (§8), `statusline.sh` (§9), `run.sh`, then
    `tmux new-session -d -s <id> -c <cwd> -x 220 -y 50 bash <dir>/run.sh` and
@@ -304,7 +315,8 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
    - POST launcher `bootstrap-start`; run bootstrap when `needsBootstrap`;
      on non-zero exit POST `bootstrap-failed` and `exec bash` (window stays
      open for inspection).
-   - POST `claude-start`; `exec`-less call of
+   - POST `claude-start` with `{}` on a fresh start and `{"mode":"resume"}` on
+     a resume, so the record's run list says which it was; `exec`-less call of
      `claude --settings <dir>/settings.json --name <KEY> [--model] [--effort] [--permission-mode] "$(cat prompt.txt)"`
      (or `--resume <id>` instead of the prompt on resume).
    - POST `claude-exit` with the exit code; `exec bash`.
@@ -538,9 +550,10 @@ WS /ws/events     server → client: { type: 'board', workspaceId, view }   (deb
 WS /ws/terminal/:sessionId           see §8.3
 ```
 
-Errors: JSON `{ error: string, detail?: string }` with 4xx for refusals
-(no live session, no branch found, dirty worktree) so the UI can show them
-verbatim.
+Errors: JSON `{ error: string, detail?: string, issues?: [{path, message}] }`
+with 4xx for refusals (no live session, no branch found, dirty worktree) so the
+UI can show them verbatim. `issues` carries the zod problems of a rejected
+workspace request, each path pointing at the field that caused it.
 
 ## 12. Web UI
 
