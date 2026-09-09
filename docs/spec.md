@@ -196,26 +196,26 @@ failed          bootstrap or launch failed; tmux window holds the failed shell
 
 Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 
-| Event                                           | From                            | To                 | Side data                                                                   |
-| ----------------------------------------------- | ------------------------------- | ------------------ | --------------------------------------------------------------------------- |
-| launcher `bootstrap-start`                      | any                             | bootstrapping      |                                                                             |
-| launcher `bootstrap-failed`                     | bootstrapping                   | failed             |                                                                             |
-| launcher `claude-start`                         | bootstrapping, starting, exited | starting           | new run appended                                                            |
-| hook SessionStart                               | starting                        | starting           | record `claudeSessionId`                                                    |
-| hook UserPromptSubmit                           | any live                        | working            | clear pending                                                               |
-| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                        | working            | clear pending                                                               |
-| hook PreToolUse (AskUserQuestion)               | any live                        | waiting-question   | pending.summary = question text from tool_input                             |
-| hook PostToolUse / PostToolUseFailure (any)     | any live                        | working            | clear pending                                                               |
-| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                        | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`               |
-| hook PermissionRequest (AskUserQuestion)        | any live                        | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict     |
-| hook Notification (permission_prompt)           | any live                        | waiting-permission | pending.summary = notification message, only when no pending is set         |
-| hook Notification (elicitation_dialog)          | any live                        | waiting-question   | pending.summary = notification message                                      |
-| hook PermissionDenied                           | any live                        | working            | clear pending                                                               |
-| hook Stop                                       | any live                        | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl |
-| action interrupt                                | working, waiting-*              | idle               | the runner sent Escape; no hook reports an interrupt                        |
-| hook SessionEnd                                 | any                             | exited             | endedAt                                                                     |
-| launcher `claude-exit`                          | any                             | exited             | exit code on the last run                                                   |
-| statusline payload                              | any                             | unchanged          | cache from `prompt_cache` (§9)                                              |
+| Event                                           | From                                    | To                 | Side data                                                                   |
+| ----------------------------------------------- | --------------------------------------- | ------------------ | --------------------------------------------------------------------------- |
+| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                             |
+| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                             |
+| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended                                                            |
+| hook SessionStart                               | starting                                | starting           | record `claudeSessionId`                                                    |
+| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                               |
+| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                               |
+| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                             |
+| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                               |
+| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`               |
+| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict     |
+| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, only when no pending is set         |
+| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message                                      |
+| hook PermissionDenied                           | any live                                | working            | clear pending                                                               |
+| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl |
+| action interrupt                                | working, waiting-*                      | idle               | the runner sent Escape; no hook reports an interrupt                        |
+| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                     |
+| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                   |
+| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9)                                              |
 
 Unknown events are ignored and logged. Every accepted event is appended to
 `<dataDir>/sessions/<id>/events.jsonl` (raw payload + resulting state).

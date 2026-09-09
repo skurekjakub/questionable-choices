@@ -1,0 +1,347 @@
+import type {
+  ColumnId,
+  Effort,
+  Isolation,
+  IssueFlags,
+  Issue,
+  ModelChoice,
+  Pending,
+  PermissionModeSetting,
+  SessionCache,
+  SessionRecord,
+  SessionState,
+  StatusCategory,
+} from './types.js';
+
+/**
+ * Body of every non-2xx JSON response.
+ */
+export interface ErrorResponse {
+  /** Message shown to the owner verbatim. */
+  error: string;
+  /** Extra context, e.g. git's stderr or the command that failed. */
+  detail?: string | undefined;
+}
+
+/**
+ * A workspace as the switcher lists it. One workspace is one board.
+ */
+export interface WorkspaceSummary {
+  /** Workspace id, used in every workspace-scoped route. */
+  id: string;
+  /** Name shown in the switcher. */
+  name: string;
+}
+
+/**
+ * The picker's defaults, as `GET /api/config/public` reports them.
+ */
+export interface RunnerDefaults {
+  /** Model preselected when the playbook names none. */
+  model: string;
+  /** Effort preselected when the playbook names none. */
+  effort: Effort;
+  /** Permission mode preselected when the playbook names none. */
+  permissionMode: PermissionModeSetting;
+}
+
+/**
+ * Everything the pickers need, as `GET /api/config/public` reports it.
+ */
+export interface PublicRunnerConfig {
+  /** Models offered by the picker. */
+  models: ModelChoice[];
+  /** Values preselected when a playbook has no opinion. */
+  defaults: RunnerDefaults;
+  /** Every effort level the CLI accepts, in picker order. */
+  efforts: Effort[];
+  /** Every permission mode the picker offers, including `'default'`. */
+  permissionModes: PermissionModeSetting[];
+}
+
+/**
+ * Response of `GET /api/config/public`.
+ */
+export interface PublicConfigResponse {
+  /** Workspaces, in switcher order. */
+  workspaces: WorkspaceSummary[];
+  /** Picker options and defaults. */
+  runner: PublicRunnerConfig;
+}
+
+/**
+ * A playbook as the card menu and the start dialog list it.
+ */
+export interface PlaybookSummary {
+  /** Playbook id. */
+  id: string;
+  /** Label shown on the button or menu entry. */
+  label: string;
+  /** One-sentence explanation. */
+  description: string;
+  /** How the session's checkout is isolated. */
+  isolation: Isolation;
+}
+
+/**
+ * The issue fields a card renders.
+ */
+export interface CardIssue {
+  /** Tracker key, e.g. `DOC-3847`. */
+  key: string;
+  /** One-line title. */
+  summary: string;
+  /** Issue type name. */
+  type: string;
+  /** Status name as the tracker spells it. */
+  status: string;
+  /** Normalised status bucket. */
+  statusCategory: StatusCategory;
+  /** Label names, in tracker order. */
+  labels: string[];
+  /** Browser URL of the issue. */
+  url: string;
+}
+
+/**
+ * One session row on a card.
+ */
+export interface CardSession {
+  /** Session id, which is also the tmux session name. */
+  id: string;
+  /** Id of the playbook that produced the prompt. */
+  playbookId: string;
+  /** Current lifecycle state. */
+  state: SessionState;
+  /** ISO timestamp of the last state change; the "time in state" ticks from it. */
+  stateSince: string;
+  /** What the session is waiting for, or null when it is not waiting. */
+  pending: Pending | null;
+  /** Prompt-cache state the countdown ticks from, or null when unknown. */
+  cache: SessionCache | null;
+  /** Owner-set "this session did its job" flag. */
+  done: boolean;
+  /** Whether the session still counts as running. */
+  live: boolean;
+  /** Whether the session is blocked on the owner. */
+  needsYou: boolean;
+  /** Branch the session works on, or null for isolation `shared`. */
+  branch: string | null;
+  /** Shell command that attaches a terminal to this session. */
+  attachCommand: string;
+}
+
+/**
+ * One issue on the board, with the sessions attached to it.
+ */
+export interface Card {
+  /** The issue the card is about. */
+  issue: CardIssue;
+  /** Lane the card sits in. */
+  column: ColumnId;
+  /** Non-archived sessions for this issue, most relevant first. */
+  sessions: CardSession[];
+  /** Playbook the column's primary button starts, or null when there is none. */
+  primaryPlaybookId: string | null;
+  /** Absolute worktree path, or null when the issue has none to open. */
+  worktreePath: string | null;
+  /** Owner-set flags that can override the lane. */
+  flags: IssueFlags;
+  /** Whether any session on the card is blocked on the owner. */
+  needsYou: boolean;
+}
+
+/**
+ * One lane of the board.
+ */
+export interface BoardColumn {
+  /** Lane id. */
+  id: ColumnId;
+  /** Lane heading. */
+  name: string;
+  /** Cards in display order. */
+  cards: Card[];
+  /** Number of cards, so the heading needs no length lookup. */
+  count: number;
+}
+
+/**
+ * The board as `GET /api/workspaces/:id/board` reports it.
+ */
+export interface BoardView {
+  /** Id of the workspace this board is the view of. */
+  workspaceId: string;
+  /** Name shown in the switcher and the header. */
+  name: string;
+  /** Playbooks offered on this board's cards. */
+  playbooks: PlaybookSummary[];
+  /** The five lanes, in display order. */
+  columns: BoardColumn[];
+  /** Message from the last failed source refresh, or null when the list is fresh. */
+  sourceError: string | null;
+  /** ISO timestamp of the last successful source refresh. */
+  fetchedAt: string;
+  /** Number of cards with a session blocked on the owner. */
+  needsYouCount: number;
+}
+
+/**
+ * Response of `GET /api/workspaces/:id/issues/:key`.
+ */
+export interface IssueDetailResponse {
+  /** The issue, including its description. */
+  issue: Issue;
+  /** Every non-archived session for the issue, newest first. */
+  sessions: SessionRecord[];
+  /** Absolute worktree path, or null when the issue has none to open. */
+  worktreePath: string | null;
+  /** Owner-set flags for the issue. */
+  flags: IssueFlags;
+}
+
+/**
+ * Response of `GET /api/workspaces/:id/issues/:key/prefill`.
+ */
+export interface PrefillResponse {
+  /** Rendered prompt text, editable in the start dialog. */
+  prompt: string;
+  /** Model preselected in the dialog. */
+  model: string;
+  /** Effort preselected in the dialog. */
+  effort: Effort;
+  /** Permission mode preselected in the dialog. */
+  permissionMode: PermissionModeSetting;
+  /** Isolation the playbook will use. */
+  isolation: Isolation;
+  /** Non-blocking caveats, e.g. that the issue text may be stale. */
+  warnings: string[];
+}
+
+/**
+ * Body of `POST /api/workspaces/:id/issues/:key/sessions`.
+ */
+export interface CreateSessionRequest {
+  /** Playbook to start. */
+  playbookId: string;
+  /** Final prompt text, after any edits in the dialog. */
+  prompt: string;
+  /** Model to pass to the CLI. */
+  model: string;
+  /** Effort to pass to the CLI. */
+  effort: Effort;
+  /** Permission mode, or `'default'` to pass no flag. */
+  permissionMode: PermissionModeSetting;
+}
+
+/**
+ * Body of `POST /api/workspaces/:id/issues/:key/flags`.
+ */
+export interface SetFlagsRequest {
+  /** Force the issue into the Review column, or clear the flag. */
+  review?: boolean | undefined;
+  /** Force the issue into the Done column, or clear the flag. */
+  done?: boolean | undefined;
+}
+
+/**
+ * Body of `POST /api/sessions/:id/remove-worktree`.
+ */
+export interface RemoveWorktreeRequest {
+  /** Whether to pass `--force`, discarding a dirty tree. */
+  force?: boolean | undefined;
+}
+
+/**
+ * Response of `POST /api/sessions/:id/remove-worktree`.
+ */
+export interface RemoveWorktreeResponse {
+  /** Path that was removed. */
+  path: string;
+  /** Always true; a refusal comes back as an `ErrorResponse` instead. */
+  removed: true;
+}
+
+/**
+ * Issue-scoped POST actions that take no body.
+ *
+ * `open-editor` answers 204 on success and 409 with an `ErrorResponse` when the
+ * issue has no worktree to open.
+ */
+export type IssueAction = 'open-editor';
+
+/**
+ * Session-scoped POST actions that take no body and answer with the updated
+ * `SessionRecord`.
+ */
+export type SessionAction =
+  'resume' | 'interrupt' | 'kill' | 'mark-done' | 'unmark-done' | 'archive';
+
+/**
+ * One line of a session's raw event log.
+ */
+export interface SessionEventLogEntry {
+  /** ISO timestamp at which the event was accepted. */
+  at: string;
+  /** The raw payload, exactly as it arrived. */
+  event: unknown;
+  /** State the record was in after the event. */
+  state: SessionState;
+}
+
+/**
+ * Response of `GET /api/sessions/:id/events`.
+ */
+export interface SessionEventsResponse {
+  /** Accepted events, oldest first. */
+  events: SessionEventLogEntry[];
+}
+
+/**
+ * Frames the server pushes on `WS /ws/events`.
+ */
+export type EventFrame =
+  | {
+      /** A board's projection changed. */
+      type: 'board';
+      /** Workspace whose board the view belongs to. */
+      workspaceId: string;
+      /** The whole recomputed view. */
+      view: BoardView;
+    }
+  | {
+      /** One session record changed. */
+      type: 'session';
+      /** The record after the change. */
+      record: SessionRecord;
+    };
+
+/**
+ * Text frames a viewer sends on `WS /ws/terminal/:sessionId`. Binary frames on
+ * the same socket carry raw pty bytes and have no JSON shape.
+ */
+export type TerminalClientFrame = {
+  /** Resize the pty to the viewer's terminal size. */
+  type: 'resize';
+  /** New column count. */
+  cols: number;
+  /** New row count. */
+  rows: number;
+};
+
+/**
+ * Text frames the server sends on `WS /ws/terminal/:sessionId`. Binary frames
+ * on the same socket carry raw pty bytes and have no JSON shape.
+ */
+export type TerminalServerFrame =
+  | {
+      /** The pty could not be spawned or attached; the socket closes next. */
+      type: 'error';
+      /** Message shown to the owner verbatim. */
+      message: string;
+    }
+  | {
+      /** The pty ended, e.g. because tmux killed the session. */
+      type: 'exit';
+      /** Exit code of the pty. */
+      exitCode: number;
+    };
