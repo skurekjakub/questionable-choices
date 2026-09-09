@@ -1,0 +1,287 @@
+import type {
+  BoardView,
+  CreateSessionRequest,
+  ConfigIssue,
+  CreateWorkspaceRequest,
+  ErrorResponse,
+  IssueDetailResponse,
+  PrefillResponse,
+  PublicConfigResponse,
+  RemoveWorktreeResponse,
+  SessionAction,
+  SetFlagsRequest,
+  WorkspaceSummary,
+} from '../../core/api.js';
+import type { IssueFlags, SessionRecord } from './model.js';
+
+/**
+ * A non-2xx response from the local API, carrying the server's own wording.
+ */
+export class ApiError extends Error {
+  /** HTTP status of the refusal. */
+  readonly status: number;
+  /** Extra context the server supplied, e.g. git's stderr. */
+  readonly detail: string | null;
+  /** Per-field validation problems, empty unless a schema rejected the body. */
+  readonly issues: ConfigIssue[];
+
+  /**
+   * Builds an error from a refusal the server described.
+   *
+   * @param status - HTTP status of the response.
+   * @param message - Message to show the owner verbatim.
+   * @param detail - Extra context, or null when the server sent none.
+   * @param issues - Per-field validation problems, or an empty list.
+   */
+  constructor(status: number, message: string, detail: string | null, issues: ConfigIssue[] = []) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.detail = detail;
+    this.issues = issues;
+  }
+}
+
+/**
+ * Reads a response, turning any non-2xx into an {@link ApiError}.
+ *
+ * @param response - Response to interpret.
+ * @returns The parsed JSON body, or undefined for a 204.
+ * @throws {ApiError} When the status is not 2xx.
+ */
+async function readBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  let parsed: unknown = undefined;
+  if (text.length > 0) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = undefined;
+    }
+  }
+  if (response.ok) return parsed;
+  const body = parsed as ErrorResponse | undefined;
+  const message = body?.error ?? text.trim();
+  throw new ApiError(
+    response.status,
+    message.length > 0 ? message : `${response.status} ${response.statusText}`,
+    body?.detail ?? null,
+    body?.issues ?? [],
+  );
+}
+
+/**
+ * Issues a request against the local API.
+ *
+ * @param path - Path below the origin, starting with `/api`.
+ * @param init - Fetch options; a JSON body is serialised by the caller.
+ * @returns The parsed response body.
+ * @throws {ApiError} When the server refuses the request.
+ */
+async function request(path: string, init?: RequestInit): Promise<unknown> {
+  const response = await fetch(path, {
+    ...init,
+    headers: init?.body === undefined ? undefined : { 'content-type': 'application/json' },
+  });
+  return readBody(response);
+}
+
+/**
+ * Sends a POST with a JSON body.
+ *
+ * @param path - Path below the origin.
+ * @param body - Value serialised as the request body, or undefined for none.
+ * @returns The parsed response body.
+ * @throws {ApiError} When the server refuses the request.
+ */
+async function post(path: string, body?: unknown): Promise<unknown> {
+  return request(path, {
+    method: 'POST',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+/**
+ * Fetches the workspaces, the repos and connectors they can be built from, and
+ * the picker options.
+ *
+ * @returns The public configuration.
+ * @throws {ApiError} When the server refuses the request.
+ */
+export async function getPublicConfig(): Promise<PublicConfigResponse> {
+  return (await request('/api/config/public')) as PublicConfigResponse;
+}
+
+/**
+ * Adds a workspace, optionally creating its connector in the same request.
+ *
+ * @param body - The workspace to add.
+ * @returns The workspace as the switcher will list it.
+ * @throws {ApiError} With status 400 when the config is invalid, 409 on a duplicate id.
+ */
+export async function createWorkspace(body: CreateWorkspaceRequest): Promise<WorkspaceSummary> {
+  return (await post('/api/workspaces', body)) as WorkspaceSummary;
+}
+
+/**
+ * Removes a workspace, leaving its repo's sessions and worktrees in place.
+ *
+ * @param workspaceId - Id of the workspace to remove.
+ * @returns Nothing.
+ * @throws {ApiError} When the server refuses the request.
+ */
+export async function deleteWorkspace(workspaceId: string): Promise<void> {
+  await request(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: 'DELETE' });
+}
+
+/**
+ * Fetches a workspace's board.
+ *
+ * @param workspaceId - Id of the workspace to read.
+ * @returns The board view.
+ * @throws {ApiError} When the server refuses the request.
+ */
+export async function getBoard(workspaceId: string): Promise<BoardView> {
+  return (await request(`/api/workspaces/${encodeURIComponent(workspaceId)}/board`)) as BoardView;
+}
+
+/**
+ * Forces a refresh of a workspace's issue source.
+ *
+ * @param workspaceId - Id of the workspace to refresh.
+ * @returns The recomputed board view.
+ * @throws {ApiError} When the server refuses the request.
+ */
+export async function refreshBoard(workspaceId: string): Promise<BoardView> {
+  return (await post(`/api/workspaces/${encodeURIComponent(workspaceId)}/refresh`)) as BoardView;
+}
+
+/**
+ * Fetches one issue with its description and its sessions.
+ *
+ * @param workspaceId - Id of the workspace the issue belongs to.
+ * @param key - Tracker key of the issue.
+ * @returns The issue detail.
+ * @throws {ApiError} When the server refuses the request.
+ */
+export async function getIssue(workspaceId: string, key: string): Promise<IssueDetailResponse> {
+  const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(key)}`;
+  return (await request(path)) as IssueDetailResponse;
+}
+
+/**
+ * Fetches the start dialog's prefilled prompt and picker selections.
+ *
+ * @param workspaceId - Id of the workspace the issue belongs to.
+ * @param key - Tracker key of the issue.
+ * @param playbookId - Playbook whose template should be rendered.
+ * @returns The prefill, including any non-blocking warnings.
+ * @throws {ApiError} When the server refuses the request.
+ */
+export async function getPrefill(
+  workspaceId: string,
+  key: string,
+  playbookId: string,
+): Promise<PrefillResponse> {
+  const path =
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(key)}` +
+    `/prefill?playbook=${encodeURIComponent(playbookId)}`;
+  return (await request(path)) as PrefillResponse;
+}
+
+/**
+ * Starts a session for an issue.
+ *
+ * @param workspaceId - Id of the workspace the issue belongs to.
+ * @param key - Tracker key of the issue.
+ * @param body - Playbook, final prompt and runner selections.
+ * @returns The created session record.
+ * @throws {ApiError} When the server refuses the start.
+ */
+export async function createSession(
+  workspaceId: string,
+  key: string,
+  body: CreateSessionRequest,
+): Promise<SessionRecord> {
+  const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(key)}/sessions`;
+  return (await post(path, body)) as SessionRecord;
+}
+
+/**
+ * Sets or clears the owner's per-issue flags.
+ *
+ * @param workspaceId - Id of the workspace the issue belongs to.
+ * @param key - Tracker key of the issue.
+ * @param body - Flags to set; omitted flags are left alone.
+ * @returns The flags after the change.
+ * @throws {ApiError} When the server refuses the request.
+ */
+export async function setFlags(
+  workspaceId: string,
+  key: string,
+  body: SetFlagsRequest,
+): Promise<IssueFlags> {
+  const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(key)}/flags`;
+  return (await post(path, body)) as IssueFlags;
+}
+
+/**
+ * Opens the issue's checkout in the configured desktop editor.
+ *
+ * @param workspaceId - Id of the workspace the issue belongs to.
+ * @param key - Tracker key of the issue.
+ * @returns Nothing.
+ * @throws {ApiError} With status 409 when the issue has no worktree to open.
+ */
+export async function openEditor(workspaceId: string, key: string): Promise<void> {
+  const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(key)}/open-editor`;
+  await post(path);
+}
+
+/**
+ * Runs a session-scoped action that takes no body.
+ *
+ * @param sessionId - Id of the session to act on.
+ * @param action - Action to run.
+ * @returns The session record after the action.
+ * @throws {ApiError} When the server refuses the action.
+ */
+export async function sessionAction(
+  sessionId: string,
+  action: SessionAction,
+): Promise<SessionRecord> {
+  return (await post(`/api/sessions/${encodeURIComponent(sessionId)}/${action}`)) as SessionRecord;
+}
+
+/**
+ * Removes the worktree a session runs in.
+ *
+ * @param sessionId - Id of the session whose worktree should go.
+ * @param force - Whether to discard a dirty tree.
+ * @returns The path that was removed.
+ * @throws {ApiError} With status 409 when git refuses a dirty tree without force.
+ */
+export async function removeWorktree(
+  sessionId: string,
+  force: boolean,
+): Promise<RemoveWorktreeResponse> {
+  const path = `/api/sessions/${encodeURIComponent(sessionId)}/remove-worktree`;
+  return (await post(path, { force })) as RemoveWorktreeResponse;
+}
+
+/**
+ * Reduces an unknown thrown value to a message worth showing the owner.
+ *
+ * @param error - Value caught from a failed call.
+ * @returns The server's wording plus its detail, or a generic fallback.
+ */
+export function errorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const lines = [error.message];
+    if (error.detail !== null) lines.push(error.detail);
+    for (const issue of error.issues) lines.push(`${issue.path}: ${issue.message}`);
+    return lines.join('\n');
+  }
+  if (error instanceof Error) return error.message;
+  return String(error);
+}

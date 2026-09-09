@@ -1,0 +1,144 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ink-900);
+  color: var(--paper);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--lamp-cyan);
+  outline-offset: 2px;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.editorial {
+  font-family: var(--font-editorial);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 5px 10px;
+  border: var(--hairline);
+  border-radius: var(--r-control);
+  background: var(--ink-700);
+  color: var(--paper);
+  font-size: var(--fs-control);
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--ink-600);
+}
+
+.btn:disabled {
+  color: var(--paper-faint);
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--ink-600);
+  border-color: #3a4d57;
+}
+
+.btn-quiet {
+  background: transparent;
+}
+
+.btn-danger {
+  color: var(--lamp-red);
+  border-color: #4a2c26;
+}
+
+.btn-icon {
+  padding: 4px;
+  width: 26px;
+  height: 26px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--paper-dim);
+}
+
+.btn-icon:hover:not(:disabled) {
+  color: var(--paper);
+  background: var(--ink-700);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.field > span {
+  font-size: var(--fs-row);
+  color: var(--paper-dim);
+}
+
+.field select,
+.field input,
+.field textarea {
+  padding: 6px 8px;
+  background: var(--ink-900);
+  border: var(--hairline);
+  border-radius: var(--r-control);
+  font-size: var(--fs-control);
+}
+
+.field textarea {
+  font-family: var(--font-mono);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.banner {
+  padding: var(--sp-2) var(--sp-4);
+  border-bottom: var(--hairline);
+  background: #2a1c17;
+  color: #f0b8a8;
+  font-size: var(--fs-control);
+}
+
+.empty {
+  padding: var(--sp-4) var(--sp-3);
+  color: var(--paper-faint);
+  font-size: var(--fs-row);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
