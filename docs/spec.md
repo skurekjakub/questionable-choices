@@ -399,6 +399,10 @@ Binary frames carry pty bytes both ways; a JSON text frame
 (detaches that client only; tmux keeps running). Several viewers can attach;
 `window-size latest` makes tmux follow the most recent resize.
 
+Both WebSocket endpoints go through `@hono/node-server` 2's own
+`upgradeWebSocket`, with a `ws` `WebSocketServer({ noServer: true })` passed
+as `serve({ websocket: { server } })`. No other adapter.
+
 `node-pty` needs its install script approved under npm 12
 (`allowScripts` in package.json, already present).
 
