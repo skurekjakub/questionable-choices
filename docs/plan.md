@@ -41,7 +41,7 @@ Files: `src/core/*`, `test/core/*`.
 
 - `types.ts` — every domain type from spec §2, §5.1, §6, §7.
 - `config.ts` — zod schema for spec §4 + `loadConfig(path)`; `~` expansion;
-  cross-checks (board → workspace exists, playbook ids unique, `primaryFor`
+  cross-checks (playbook ids unique, `primaryFor`
   column ids valid, env vars named exist at load time → warning list, not
   failure).
 - `state-machine.ts` — `reduce(record, event, now) → { record, changed,
@@ -99,7 +99,7 @@ Files: `src/web/**`.
   `docs/design-notes.md`.
 - Board, card, issue drawer, start dialog, session view with xterm.js,
   notifications, title badge, cache countdown ticking client-side.
-- State: one `useBoard(boardId)` hook (fetch + WS), one `useSession(id)`.
+- State: one `useBoard(workspaceId)` hook (fetch + WS), one `useSession(id)`.
 - Until 2b lands, run against `src/web/dev-mock.ts` (a tiny mock of the API
   contract with sample cards in every state) behind `VITE_MOCK=1`.
 
@@ -115,7 +115,7 @@ Files: `src/web/**`.
   `docs/verification.md` with timestamps and the events.jsonl excerpt.
 - README: what it is, prerequisites (tmux, claude, node ≥ 22, env vars),
   `cp config.example.json ~/.config/questionable-choices/config.json`,
-  `npm run dev`, `npm run build && npm start`, how to add a board.
+  `npm run dev`, `npm run build && npm start`, how to add a workspace.
 - `docs/connectors.md` per spec §16.
 
 ## Package 4 — review

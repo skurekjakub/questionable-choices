@@ -42,7 +42,7 @@ Non-goals (MVP)
 
 | Term          | Meaning                                                                                                                            |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Board         | One issue source bound to one workspace. Configured in `boards[]`.                                                                 |
+| Board         | The dashboard view of one workspace: its issue source projected onto columns. A board's id is its workspace's id.                  |
 | Issue source  | Connector that lists issues for a board (Jira epic today).                                                                         |
 | Workspace     | A git repository plus its worktree policy, bootstrap command and playbooks.                                                        |
 | Runner        | Connector that launches, attaches, interrupts and kills sessions (`claude` in tmux today).                                         |
@@ -110,6 +110,15 @@ runner
   models[]                 {id,label} shown in the picker
   defaultModel / defaultEffort / defaultPermissionMode
 workspaces{id}
+  name                     shown in the workspace switcher
+  issues                   the workspace's issue source (one epic per workspace)
+    type                   'jira'
+    site, emailEnv, tokenEnv
+    epic                   parent key; default JQL is
+                           parent = <epic> AND statusCategory != Done ORDER BY Rank ASC
+    jql?                   raw override of the whole query
+    reviewStatuses[]       Jira status names that land in the Review column
+    pollSeconds            default 120
   repo                     absolute path of the main checkout
   worktreeDir              where worktrees go; worktree path = <worktreeDir>/<KEY>
   baseRef                  'origin/main'; fetched before every worktree add
@@ -121,16 +130,6 @@ workspaces{id}
     primaryFor[]           column ids where this playbook is the card's primary action
     defaults?              {model?, effort?, permissionMode?}
     promptTemplate         see §7
-boards[]
-  id, name, workspace (workspace id)
-  issues
-    type                   'jira'
-    site, emailEnv, tokenEnv
-    epic                   parent key; default JQL is
-                           parent = <epic> AND statusCategory != Done ORDER BY Rank ASC
-    jql?                   raw override of the whole query
-    reviewStatuses[]       Jira status names that land in the Review column
-    pollSeconds            default 120
 ```
 
 Valid `effort`: low, medium, high, xhigh, max. Valid `permissionMode`:
@@ -145,7 +144,6 @@ the picker offers exactly these.
 ```ts
 interface SessionRecord {
   id: string; // tmux session name, e.g. qc-DOC-3847-implement
-  boardId: string;
   issueKey: string;
   playbookId: string;
   workspaceId: string;
@@ -483,7 +481,7 @@ paginated on `nextPageToken`. Status category from
 `status.statusCategory.key` (`new` → todo, `indeterminate` → inprogress,
 `done` → done). Description ADF → plain text in the connector.
 
-Polling: every `pollSeconds`, plus `POST /api/boards/:id/refresh`, plus once
+Polling: every `pollSeconds`, plus `POST /api/workspaces/:id/refresh`, plus once
 whenever a session leaves the live set. On failure the last good list is
 served with `sourceError` set on the board payload; the UI shows a banner.
 
@@ -502,16 +500,16 @@ interface IssueSource {
 REST (JSON):
 
 ```
-GET  /api/config/public                → { boards: [{id,name}], runner: {models, defaults, efforts, permissionModes} }
-GET  /api/boards/:id                   → BoardView { board, columns[], sourceError, fetchedAt }
-POST /api/boards/:id/refresh           → BoardView
-GET  /api/boards/:id/issues/:key       → IssueDetail { issue (with description), sessions[], worktree }
-GET  /api/boards/:id/issues/:key/prefill?playbook=  → { prompt, model, effort, permissionMode, isolation, warnings[] }
-POST /api/boards/:id/issues/:key/sessions           { playbookId, prompt, model, effort, permissionMode } → SessionRecord
-POST /api/boards/:id/issues/:key/flags              { review?: boolean, done?: boolean } → IssueFlags
+GET  /api/config/public                → { workspaces: [{id,name}], runner: {models, defaults, efforts, permissionModes} }
+GET  /api/workspaces/:id/board         → BoardView { workspaceId, columns[], sourceError, fetchedAt }
+POST /api/workspaces/:id/refresh       → BoardView
+GET  /api/workspaces/:id/issues/:key   → IssueDetail { issue (with description), sessions[], worktree }
+GET  /api/workspaces/:id/issues/:key/prefill?playbook=  → { prompt, model, effort, permissionMode, isolation, warnings[] }
+POST /api/workspaces/:id/issues/:key/sessions           { playbookId, prompt, model, effort, permissionMode } → SessionRecord
+POST /api/workspaces/:id/issues/:key/flags              { review?: boolean, done?: boolean } → IssueFlags
+POST /api/workspaces/:id/issues/:key/open-editor        → 204, or 409 when the issue has no worktree
 POST /api/sessions/:id/resume | interrupt | kill | mark-done | unmark-done | archive
 POST /api/sessions/:id/remove-worktree { force?: boolean }
-POST /api/boards/:id/issues/:key/open-editor        → 204, or 409 when the issue has no worktree
 GET  /api/sessions/:id/events          → raw event log (debug)
 POST /api/hooks/:sessionId/:event      → 204 (hook ingress, loopback only)
 ```
@@ -519,7 +517,7 @@ POST /api/hooks/:sessionId/:event      → 204 (hook ingress, loopback only)
 WebSocket:
 
 ```
-WS /ws/events     server → client: { type: 'board', boardId, view }   (debounced 250 ms)
+WS /ws/events     server → client: { type: 'board', workspaceId, view }   (debounced 250 ms)
                                     { type: 'session', record }
 WS /ws/terminal/:sessionId           see §8.3
 ```
@@ -543,7 +541,8 @@ the implementer commits to one direction and records it in
 
 Board:
 
-- Header: board switcher (when more than one), synced-ago, refresh, count of
+- Header: workspace switcher (always shown; the active one is remembered in
+  localStorage), synced-ago, refresh, count of
   needs-you as a badge that also goes into `document.title` and the favicon.
 - Five columns, each scrollable, counts in the heading.
 - Card: key (mono) + type glyph, summary (two lines max), Jira status chip,
@@ -576,7 +575,7 @@ the header; one notification per transition into the needs-you set, titled
 
 ```
 sessions.json           SessionRecord[] (write-through, atomic rename)
-flags.json              { [boardId]: { [issueKey]: { review?, done? } } }
+flags.json              { [workspaceId]: { [issueKey]: { review?, done? } } }
 worktrees.json          { [workspaceId]: { [issueKey]: { path, branch, bootstrapped } } }
 sessions/<id>/          prompt.txt settings.json statusline.sh run.sh events.jsonl
 ```

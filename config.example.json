@@ -21,6 +21,16 @@
   },
   "workspaces": {
     "docs-workspace": {
+      "name": "Docs · Next.js",
+      "issues": {
+        "type": "jira",
+        "site": "kentico.atlassian.net",
+        "emailEnv": "JIRA_EMAIL_KENTICO_JIRA",
+        "tokenEnv": "JIRA_PAT_KENTICO_JIRA",
+        "epic": "DOC-3807",
+        "reviewStatuses": ["Ready for review"],
+        "pollSeconds": 120
+      },
       "repo": "/home/jakubs/repositories/docs-workspace",
       "worktreeDir": "/home/jakubs/repositories/worktrees",
       "baseRef": "origin/main",
@@ -46,21 +56,5 @@
         }
       ]
     }
-  },
-  "boards": [
-    {
-      "id": "docs-nextjs",
-      "name": "Docs · Next.js",
-      "workspace": "docs-workspace",
-      "issues": {
-        "type": "jira",
-        "site": "kentico.atlassian.net",
-        "emailEnv": "JIRA_EMAIL_KENTICO_JIRA",
-        "tokenEnv": "JIRA_PAT_KENTICO_JIRA",
-        "epic": "DOC-3807",
-        "reviewStatuses": ["Ready for review"],
-        "pollSeconds": 120
-      }
-    }
-  ]
+  }
 }
