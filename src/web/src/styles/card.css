@@ -1,5 +1,8 @@
 .card {
   position: relative;
+  /* The column body is a flex column; without this a long backlog shrinks
+     every card to a sliver instead of scrolling. */
+  flex: none;
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
