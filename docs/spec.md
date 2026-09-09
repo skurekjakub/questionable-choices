@@ -82,7 +82,7 @@ docs/                   spec.md, plan.md, connectors.md
 config.example.json     the owner's real shape, minus secrets
 ```
 
-Dependency direction: `web → core/api.ts` only; `server → core, connectors`;
+Dependency direction: `web → core/api.ts` and `core/cache-clock.ts` (both dependency-free) only; `server → core, connectors`;
 `connectors → core`. `core` imports nothing from the other three.
 
 ## 4. Configuration
