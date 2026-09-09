@@ -140,11 +140,14 @@ Fable 5.1 · ⚡high · ⎇ DOC-3871-indentation-of-codelinks · DOC-3871 · 54k
 
 Three of those six are the same shape: a failure that arrives outside the
 request that caused it — an async `spawn` error, an unhandled `error` event, a
-throw from a socket handler — and the server has no last-resort guard, so any
-one of them ends every session's state tracking at once. There is no
-`uncaughtException` handler, deliberately: swallowing these would have hidden
-all three rather than fixing them. But the reconciler cannot recover a record
-whose events were never received, so a crash is not merely an outage.
+throw from a socket handler — and any one of them ended every session's state
+tracking at once. Each was fixed at its source first: a last-resort guard put
+in earlier would have hidden all three instead. `main.ts` now carries one
+anyway, logging `uncaughtException` and `unhandledRejection` and staying up,
+because the reconciler cannot recover a record whose events were never
+received — one session's failure must not cost every other session its
+history. A port already in use is the one boot failure that still exits: one
+line naming the port, status 1.
 
 ## What still does not work
 
@@ -174,7 +177,9 @@ distinguish "interrupted" from "finished".
 **A killed session's run never gets an exit code.** `tmux kill-session` takes
 the whole shell down, so the `claude-exit` POST at the end of `run.sh` never
 happens and `runs[n].exitCode` stays `null`. Only a `/exit` inside the session
-records one.
+records one. This is now documented on `SessionRun.exitCode` as deliberate
+rather than treated as a gap: a code invented for a killed run would be a
+worse answer than none.
 
 **`permission mode: default` does not mean "ask me".** Passing no
 `--permission-mode` flag leaves the CLI in whatever the owner's settings

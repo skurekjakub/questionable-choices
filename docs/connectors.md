@@ -40,11 +40,17 @@ By hand, add an entry to `workspaces`:
 ```
 
 `connector` and `repo` are ids from the other two maps; naming one that does
-not exist fails validation. `epic` is required. `jql` replaces the default
-`parent = <epic> AND statusCategory != Done ORDER BY Rank ASC` query for
+not exist fails validation. `epic` is required, and must be an issue key such
+as `DOC-3807` or a numeric issue id; it is quoted into the query, so it can
+neither break the JQL nor replace its ordering. `jql` replaces the default
+`parent = "<epic>" AND statusCategory != Done ORDER BY Rank ASC` query for
 workspaces whose issues are not plain epic children — the epic key is still
 what the header shows. `reviewStatuses` defaults to `["Ready for review"]`
 and `pollSeconds` to 120.
+
+The schema is strict: a key it does not know is a validation error rather
+than a silently applied default, so `pollSecs` is caught instead of reverting
+the interval to 120.
 
 Removing a workspace (the switcher's remove action, or `DELETE
 /api/workspaces/:id`) deletes nothing else: its sessions, worktrees and issue
@@ -98,7 +104,9 @@ A playbook is a named kickoff recipe on a repo. Add an entry to that repo's
   checkout, no branch).
 - `primaryFor` lists the board columns whose cards offer this playbook as
   their primary button: `backlog`, `working`, `needs-you`, `review`, `done`.
-  The first playbook of the repo is the fallback for a column nothing claims.
+  The first playbook of the repo is the fallback for a column nothing claims,
+  and two playbooks of one repo may not claim the same column: the second
+  claimant could never be reached, so it is a validation error.
 - `defaults` overrides the runner's model, effort and permission mode for
   this playbook only; the start dialog prefills from it and stays editable.
 - `promptTemplate` may use `{{key}} {{summary}} {{type}} {{status}}
@@ -143,9 +151,18 @@ type is `claude-tmux`.
    `bootstrap-start`, `bootstrap-failed`, `claude-start` (with
    `{"mode":"resume"}` when the launch continues an existing transcript) and
    `claude-exit`, and `POST /api/hooks/:sessionId/<event>` for the CLI's own
-   hooks. Everything the dashboard shows is derived from those.
+   hooks. The names and body shapes are declared in `src/core/api.ts`, which
+   both sides read. Post `bootstrap-start` only for a launch that really
+   bootstraps: the state it opens is also what the reconciler reads as "died
+   before it ever launched". Everything the dashboard shows is derived from
+   those signals.
 3. Add a variant to `RunnerConfig` and `runnerSchema`, then register the type
-   in `createRunner` in `src/connectors/runners/index.ts`.
+   in `createRunner` in `src/connectors/runners/index.ts`. `createRunner` is
+   handed a `sessionDir` resolver; write the session's generated files there
+   so the store's event log and the runner's scripts share one directory.
+   Probe the executables the launch needs before reporting success — a start
+   the owner was told succeeded, that then exits 127 inside the window, is
+   invisible.
 4. `attach` returns a `RunnerTerminal`; the WebSocket bridge pipes bytes both
    ways and calls `dispose()` when a viewer leaves, which must detach that
    viewer only and leave the session running.
