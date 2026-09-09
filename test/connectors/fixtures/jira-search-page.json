@@ -1,0 +1,98 @@
+{
+  "nextPageToken": "CAEaAggB",
+  "isLast": false,
+  "issues": [
+    {
+      "id": "100001",
+      "key": "DOC-3847",
+      "fields": {
+        "summary": "Consolidate content-validation reporting",
+        "issuetype": { "name": "Story" },
+        "status": {
+          "name": "In Progress",
+          "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" }
+        },
+        "labels": ["docs", "pipeline"],
+        "assignee": { "displayName": "Jakub Skurek" },
+        "priority": { "name": "Medium" },
+        "updated": "2026-09-08T14:22:11.000+0200",
+        "description": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                { "type": "text", "text": "The validator prints " },
+                { "type": "text", "text": "two", "marks": [{ "type": "strong" }] },
+                { "type": "text", "text": " different report shapes." }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "content": [
+                { "type": "text", "text": "See " },
+                {
+                  "type": "text",
+                  "text": "the convention",
+                  "marks": [
+                    {
+                      "type": "link",
+                      "attrs": { "href": "https://example.com/conventions" }
+                    }
+                  ]
+                },
+                { "type": "text", "text": " first." }
+              ]
+            },
+            {
+              "type": "bulletList",
+              "content": [
+                {
+                  "type": "listItem",
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [{ "type": "text", "text": "one stdout format" }]
+                    }
+                  ]
+                },
+                {
+                  "type": "listItem",
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [{ "type": "text", "text": "one annotation format" }]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "codeBlock",
+              "attrs": { "language": "bash" },
+              "content": [{ "type": "text", "text": "npm run content:validate" }]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "100002",
+      "key": "DOC-3848",
+      "fields": {
+        "summary": "Fix the 404 migration-skills link",
+        "issuetype": { "name": "Bug" },
+        "status": {
+          "name": "Ready for review",
+          "statusCategory": { "id": 2, "key": "new", "name": "To Do" }
+        },
+        "labels": [],
+        "assignee": null,
+        "priority": null,
+        "updated": "2026-09-09T08:01:00.000+0200",
+        "description": null
+      }
+    }
+  ]
+}
