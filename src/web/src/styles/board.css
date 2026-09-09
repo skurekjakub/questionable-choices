@@ -43,19 +43,17 @@
   background: var(--ink-600);
 }
 
-.workspace-switcher {
-  padding: 4px 8px;
-  background: var(--ink-800);
-  border: var(--hairline);
-  border-radius: var(--r-control);
-  font-size: var(--fs-control);
+/* The live regions are always mounted so a change is announced; an empty one
+   must not spend a flex gap in the header. */
+.header-meta > [role='status']:empty {
+  display: none;
 }
 
 .needs-you-badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 8px 3px 6px;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
   border: 1px solid #5a4318;
   border-radius: var(--r-chip);
   background: #241c0c;
@@ -70,12 +68,62 @@
 
 .columns {
   display: grid;
-  grid-template-columns: repeat(5, minmax(248px, 1fr));
+  grid-template-columns: repeat(5, minmax(200px, 1fr));
   flex: 1;
   min-height: 0;
   overflow-x: auto;
   background: var(--ink-600);
   gap: 1px;
+}
+
+.columns-indicator {
+  display: none;
+}
+
+/* Five 200 px tracks plus their hairlines stop fitting here. Rather than let
+   Done drift off-screen unannounced, the lanes become a snapping strip. */
+@media (max-width: 1040px) {
+  .columns {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+    grid-auto-columns: 86%;
+    scroll-snap-type: x mandatory;
+    overscroll-behavior-x: contain;
+  }
+
+  .column {
+    scroll-snap-align: start;
+  }
+
+  .columns-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-2);
+    margin: 0;
+    padding: var(--sp-2) var(--sp-4);
+    border-top: var(--hairline);
+    background: var(--ink-850);
+    color: var(--paper-dim);
+    font-size: var(--fs-row);
+    flex: none;
+  }
+
+  .columns-dots {
+    display: flex;
+    gap: var(--sp-1);
+  }
+
+  .columns-dots > span {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--ink-600);
+  }
+
+  .columns-dots > span[data-current='true'] {
+    background: var(--lamp-cyan);
+  }
 }
 
 .column {
@@ -133,7 +181,7 @@
   display: flex;
   align-items: baseline;
   gap: var(--sp-2);
-  padding: 4px 10px;
+  padding: var(--sp-1) var(--sp-3);
   background: var(--ink-800);
   border: var(--hairline);
   border-radius: var(--r-control);
@@ -151,7 +199,7 @@
 .switcher-panel {
   position: absolute;
   left: 0;
-  top: calc(100% + 6px);
+  top: calc(100% + var(--sp-1));
   z-index: 45;
   min-width: 280px;
   padding: var(--sp-1);
@@ -179,7 +227,7 @@
   background: var(--ink-600);
 }
 
-.switcher-panel button[aria-current='true'] .workspace-name {
+.switcher-panel button[aria-checked='true'] .workspace-name {
   color: var(--lamp-cyan);
 }
 

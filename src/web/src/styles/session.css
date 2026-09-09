@@ -133,7 +133,15 @@
   max-width: none;
 }
 
+.side-panel .chip-row,
+.side-panel .link {
+  margin-top: var(--sp-2);
+}
+
 .link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
   color: var(--lamp-cyan);
   text-decoration: none;
   font-size: var(--fs-control);

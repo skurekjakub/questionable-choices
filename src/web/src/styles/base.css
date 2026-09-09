@@ -38,16 +38,12 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 
-.editorial {
-  font-family: var(--font-editorial);
-}
-
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--sp-2);
-  padding: 5px 10px;
+  padding: var(--sp-1) var(--sp-3);
   border: var(--hairline);
   border-radius: var(--r-control);
   background: var(--ink-700);
@@ -104,6 +100,15 @@ textarea {
   color: var(--paper-dim);
 }
 
+.field-note {
+  font-size: var(--fs-row);
+  color: #f0b8a8;
+}
+
+.field [aria-invalid='true'] {
+  border-color: #7a4034;
+}
+
 .field select,
 .field input,
 .field textarea {
@@ -132,6 +137,10 @@ textarea {
   padding: var(--sp-4) var(--sp-3);
   color: var(--paper-faint);
   font-size: var(--fs-row);
+}
+
+.empty-inline {
+  padding: 0;
 }
 
 .sr-only {

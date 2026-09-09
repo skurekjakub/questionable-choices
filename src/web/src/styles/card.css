@@ -124,11 +124,11 @@
 
 .session-row {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   width: 100%;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: 6px 0 4px;
+  align-items: stretch;
+  gap: var(--sp-1);
+  padding: var(--sp-1) 0;
   font-size: var(--fs-row);
   color: var(--paper-dim);
   min-height: 28px;
@@ -138,18 +138,40 @@
   border-top: 1px solid rgba(43, 58, 66, 0.55);
 }
 
+.session-line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
 .session-playbook {
+  flex: 0 1 auto;
+  min-width: 0;
   color: var(--paper);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* The state word gives its width up first: it is one of eight known phrases,
+   while a clipped playbook label stops saying which playbook ran. */
 .session-state {
+  flex: 0 4 auto;
+  min-width: 0;
+  overflow: hidden;
   white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.session-pending {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .session-time {
+  flex: none;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   color: var(--paper-faint);
@@ -284,7 +306,7 @@
 }
 
 .card-actions .btn {
-  padding: 4px 9px;
+  padding: var(--sp-1) var(--sp-2);
   font-size: var(--fs-row);
 }
 

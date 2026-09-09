@@ -112,9 +112,17 @@
   gap: var(--sp-1);
 }
 
+.section > .session-block-actions {
+  margin-top: var(--sp-2);
+}
+
 .session-block-actions .btn {
-  padding: 4px 9px;
+  padding: var(--sp-1) var(--sp-2);
   font-size: var(--fs-row);
+}
+
+.session-block .description {
+  font-size: var(--fs-control);
 }
 
 .dialog-scrim {
@@ -131,6 +139,10 @@
   border-radius: var(--r-panel);
   display: flex;
   flex-direction: column;
+}
+
+.dialog-narrow {
+  width: min(440px, 100%);
 }
 
 .dialog-head {
@@ -174,6 +186,12 @@
 
 .dialog-foot .action-spacer {
   flex: 1;
+}
+
+.discard-note {
+  margin: 0;
+  color: var(--lamp-amber);
+  font-size: var(--fs-control);
 }
 
 .warnings {

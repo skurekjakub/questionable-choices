@@ -23,7 +23,11 @@ divided into channels by hairlines, engraved labels, small signal lamps, and
 one real gauge. Not a page of floating cards. Concretely:
 
 - The board fills the viewport and never scrolls as a page; the five columns
-  scroll independently inside a fixed frame.
+  scroll independently inside a fixed frame. Below 1040 px five readable
+  tracks stop fitting, so the frame becomes a horizontal scroll-snap strip of
+  the same five lanes with an "n of 5" indicator under it. The lane count
+  never changes: a hidden lane the owner cannot see they have is worse than a
+  swipe.
 - Columns are separated by 1 px hairlines, not gutters. The board reads as
   one divided surface.
 - Elevation comes from surface lightness only. No drop shadows anywhere.
@@ -46,7 +50,12 @@ near-black terminal theme.
 | `--ink-600`     | `#2b3a42` | Hairlines, borders                |
 | `--paper`       | `#e8e3d7` | Primary text (warm, never `#fff`) |
 | `--paper-dim`   | `#93a1a6` | Secondary text                    |
-| `--paper-faint` | `#66757c` | Tertiary text, disabled           |
+| `--paper-faint` | `#7d8d94` | Tertiary text, disabled           |
+
+`--paper-faint` carries real readings — the cache countdown, time in state,
+column counts — so it is held at 4.5:1 against the card and column surfaces
+rather than tuned by eye. Anything quieter than this belongs to a shape or a
+lamp, not to text.
 
 Three signal colours, borrowed from indicator lamps rather than from a brand
 palette. They appear only on indicators, never as surfaces:
