@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { errorMessage, getPublicConfig } from '../api.js';
 import type { PublicConfigResponse } from '../../../core/api.js';
-import { connectEvents } from '../ws.js';
+import { subscribeEvents } from '../ws.js';
 
 /**
  * What {@link useConfig} exposes to the header and the dialogs.
@@ -17,7 +17,8 @@ export interface ConfigStream {
 
 /**
  * Loads the public configuration and keeps it current: the server pushes a
- * config frame whenever a workspace is added or removed.
+ * config frame on the shared event stream whenever a workspace is added or
+ * removed.
  *
  * @returns The configuration and a manual reload.
  */
@@ -37,7 +38,7 @@ export function useConfig(): ConfigStream {
   useEffect(reload, [reload]);
 
   useEffect(() => {
-    return connectEvents({
+    return subscribeEvents({
       onFrame: (frame) => {
         if (frame.type !== 'config') return;
         setConfig(frame.config);

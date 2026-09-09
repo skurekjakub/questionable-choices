@@ -17,6 +17,36 @@ const WORKSPACE_KEY = 'qc.workspace';
 const NAVIGATE_EVENT = 'qc:navigate';
 
 /**
+ * Reads the workspace the owner last looked at.
+ *
+ * @returns The remembered id, or null when nothing is remembered or storage is
+ * unreadable.
+ */
+function readRememberedWorkspace(): string | null {
+  try {
+    return window.localStorage.getItem(WORKSPACE_KEY);
+  } catch {
+    // Storage throws outright when the browser blocks site data; remembering
+    // the workspace is a convenience and must never take the app down with it.
+    return null;
+  }
+}
+
+/**
+ * Remembers the workspace the owner is looking at.
+ *
+ * @param workspaceId - Id to remember.
+ * @returns Nothing.
+ */
+function rememberWorkspace(workspaceId: string): void {
+  try {
+    window.localStorage.setItem(WORKSPACE_KEY, workspaceId);
+  } catch {
+    return;
+  }
+}
+
+/**
  * Navigates to a path without a full page load.
  *
  * @param to - Path to navigate to, starting with a slash.
@@ -72,7 +102,7 @@ export function App(): JSX.Element {
 
   const selectWorkspace = useCallback((id: string) => {
     setWorkspaceId(id);
-    window.localStorage.setItem(WORKSPACE_KEY, id);
+    rememberWorkspace(id);
   }, []);
 
   // The remembered workspace can vanish when it is removed elsewhere, so the
@@ -81,7 +111,7 @@ export function App(): JSX.Element {
     if (config === null) return;
     setWorkspaceId((current) => {
       if (config.workspaces.some((workspace) => workspace.id === current)) return current;
-      const remembered = window.localStorage.getItem(WORKSPACE_KEY);
+      const remembered = readRememberedWorkspace();
       const known = config.workspaces.some((workspace) => workspace.id === remembered);
       return known && remembered !== null ? remembered : (config.workspaces[0]?.id ?? null);
     });

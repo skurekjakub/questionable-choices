@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { BoardView } from '../../../core/api.js';
 import { errorMessage, getBoard, refreshBoard } from '../api.js';
-import { connectEvents } from '../ws.js';
+import { subscribeEvents } from '../ws.js';
 
 /**
  * What {@link useBoard} exposes to the board and session views.
@@ -22,10 +22,10 @@ export interface BoardStream {
 }
 
 /**
- * Loads a workspace's board and keeps it current from the event stream.
- *
- * The socket is opened once and left open across workspace switches; frames for
- * other workspaces are dropped rather than reconnecting on every switch.
+ * Loads a workspace's board and keeps it current from the shared event stream,
+ * which every hook multiplexes over one socket. Switching workspaces re-enters
+ * the stream rather than reconnecting, and the newest cached frame for the new
+ * workspace is replayed straight away.
  *
  * @param workspaceId - Id of the workspace to show, or null before the config loads.
  * @returns The board view, its load state, and a manual refresh.
@@ -36,8 +36,6 @@ export function useBoard(workspaceId: string | null): BoardStream {
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const currentWorkspace = useRef(workspaceId);
-  currentWorkspace.current = workspaceId;
 
   useEffect(() => {
     if (workspaceId === null) {
@@ -66,15 +64,15 @@ export function useBoard(workspaceId: string | null): BoardStream {
   }, [workspaceId]);
 
   useEffect(() => {
-    return connectEvents({
+    return subscribeEvents({
       onConnected: setConnected,
       onFrame: (frame) => {
         if (frame.type !== 'board') return;
-        if (frame.workspaceId !== currentWorkspace.current) return;
+        if (frame.workspaceId !== workspaceId) return;
         setBoard(frame.view);
       },
     });
-  }, []);
+  }, [workspaceId]);
 
   const refresh = useCallback(() => {
     if (workspaceId === null) return;

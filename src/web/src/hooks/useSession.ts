@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { BoardView } from '../../../core/api.js';
 import { errorMessage, getIssue } from '../api.js';
 import type { Issue, SessionRecord } from '../model.js';
-import { connectEvents } from '../ws.js';
+import { subscribeEvents } from '../ws.js';
 
 /**
  * Where a session sits: which workspace and issue own it, and where it runs.
@@ -18,7 +18,7 @@ export interface SessionContext {
   worktreePath: string | null;
   /** Message from the last failed load, or null. */
   error: string | null;
-  /** Whether the first load is still in flight. */
+  /** Whether the first load is still in flight; false once the board rules the session out. */
   loading: boolean;
   /** Re-reads the issue and its sessions from the server. */
   reload: () => void;
@@ -50,7 +50,8 @@ function findOnBoard(
  * Follows one session: its record, its issue, and its checkout.
  *
  * The board supplies the issue key, so a session opened by URL resolves only
- * once the board it belongs to has loaded.
+ * once the board it belongs to has loaded. A loaded board that lists no such
+ * session settles as not found rather than loading forever.
  *
  * @param sessionId - Id of the session to follow.
  * @param board - Latest board view, used to locate the session's card.
@@ -62,10 +63,14 @@ export function useSession(sessionId: string, board: BoardView | null): SessionC
   const workspaceId = board?.workspaceId ?? null;
   const [record, setRecord] = useState<SessionRecord | null>(null);
   const [issue, setIssue] = useState<Issue | null>(null);
-  const [detailWorktree, setDetailWorktree] = useState<string | null>(null);
+  const [detailWorktree, setDetailWorktree] = useState<{ path: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
+
+  // A board that has loaded and does not list the session is the answer, not a
+  // step towards one: no later frame will introduce it.
+  const missing = board !== null && located === null;
 
   useEffect(() => {
     if (workspaceId === null || issueKey === null) return;
@@ -75,7 +80,7 @@ export function useSession(sessionId: string, board: BoardView | null): SessionC
       .then((detail) => {
         if (!live) return;
         setIssue(detail.issue);
-        setDetailWorktree(detail.worktreePath);
+        setDetailWorktree({ path: detail.worktreePath });
         setRecord(detail.sessions.find((entry) => entry.id === sessionId) ?? null);
         setError(null);
       })
@@ -91,7 +96,7 @@ export function useSession(sessionId: string, board: BoardView | null): SessionC
   }, [workspaceId, issueKey, sessionId, reloadKey]);
 
   useEffect(() => {
-    return connectEvents({
+    return subscribeEvents({
       onFrame: (frame) => {
         if (frame.type !== 'session') return;
         if (frame.record.id !== sessionId) return;
@@ -106,9 +111,11 @@ export function useSession(sessionId: string, board: BoardView | null): SessionC
     record,
     issue,
     workspaceId,
-    worktreePath: detailWorktree ?? located?.worktreePath ?? null,
+    // Once the detail has loaded its worktree is the truth, including the null
+    // a removal leaves behind; the board's copy only fills the gap before that.
+    worktreePath: detailWorktree === null ? (located?.worktreePath ?? null) : detailWorktree.path,
     error,
-    loading: loading && record === null,
+    loading: !missing && loading && record === null,
     reload,
   };
 }
