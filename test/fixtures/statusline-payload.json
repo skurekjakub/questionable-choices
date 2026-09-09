@@ -1,0 +1,75 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "transcript_path": "/home/user/.claude/projects/-tmp-claude-1000--home-user-repositories-docs-workspace-87d54eaa-cb67-441d-8f42-04708725b1a7-scratchpad-hookprobe/00000000-0000-0000-0000-000000000000.jsonl",
+  "cwd": "/tmp/claude-1000/-home-user-repositories-docs-workspace/87d54eaa-cb67-441d-8f42-04708725b1a7/scratchpad/hookprobe",
+  "scratchpad_dir": "/tmp/claude-1000/-tmp-claude-1000--home-user-repositories-docs-workspace-87d54eaa-cb67-441d-8f42-04708725b1a7-scratchpad-hookprobe/00000000-0000-0000-0000-000000000000/scratchpad",
+  "prompt_id": "fe776419-da7c-4541-bbed-c1eff9cb8cee",
+  "effort": {
+    "level": "high"
+  },
+  "session_name": "Shell command execution workflow",
+  "model": {
+    "id": "claude-fable-5-1",
+    "display_name": "Fable 5.1"
+  },
+  "workspace": {
+    "current_dir": "/tmp/claude-1000/-home-user-repositories-docs-workspace/87d54eaa-cb67-441d-8f42-04708725b1a7/scratchpad/hookprobe",
+    "project_dir": "/tmp/claude-1000/-home-user-repositories-docs-workspace/87d54eaa-cb67-441d-8f42-04708725b1a7/scratchpad/hookprobe",
+    "added_dirs": []
+  },
+  "version": "2.1.266",
+  "output_style": {
+    "name": "default"
+  },
+  "cost": {
+    "total_cost_usd": 0.3891409999999999,
+    "total_duration_ms": 331933,
+    "total_api_duration_ms": 21751,
+    "total_lines_added": 0,
+    "total_lines_removed": 0
+  },
+  "context_window": {
+    "total_input_tokens": 40464,
+    "total_output_tokens": 91,
+    "context_window_size": 1000000,
+    "current_usage": {
+      "input_tokens": 2,
+      "output_tokens": 91,
+      "cache_creation_input_tokens": 400,
+      "cache_read_input_tokens": 40062
+    },
+    "used_percentage": 4,
+    "remaining_percentage": 96
+  },
+  "exceeds_200k_tokens": false,
+  "prompt_cache": {
+    "warm": true,
+    "caching_observed": true,
+    "ttl": "1h",
+    "expires_at": 1788980554,
+    "requests": 7,
+    "misses": 0,
+    "expected_rebuilds": 0,
+    "hit_ratio": 0.9507590725878879,
+    "cache_write_tokens": 13603,
+    "miss_recache_tokens": 0,
+    "last_miss_at": null,
+    "last_miss_cause": null,
+    "miss_causes": {},
+    "recache_tokens_if_cold": 40464
+  },
+  "fast_mode": false,
+  "thinking": {
+    "enabled": true
+  },
+  "rate_limits": {
+    "five_hour": {
+      "used_percentage": 30,
+      "resets_at": 1788986400
+    },
+    "seven_day": {
+      "used_percentage": 20,
+      "resets_at": 1789556400
+    }
+  }
+}

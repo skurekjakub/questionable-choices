@@ -193,42 +193,65 @@ failed          bootstrap or launch failed; tmux window holds the failed shell
 
 Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 
-| Event                                          | From                            | To                 | Side data                                                                        |
-| ---------------------------------------------- | ------------------------------- | ------------------ | -------------------------------------------------------------------------------- |
-| launcher `bootstrap-start`                     | any                             | bootstrapping      |                                                                                  |
-| launcher `bootstrap-failed`                    | bootstrapping                   | failed             |                                                                                  |
-| launcher `claude-start`                        | bootstrapping, starting, exited | starting           | new run appended                                                                 |
-| hook SessionStart                              | starting                        | starting           | record `claudeSessionId`                                                         |
-| hook UserPromptSubmit                          | any live                        | working            | clear pending                                                                    |
-| hook PreToolUse (tool ≠ AskUserQuestion)       | any live                        | working            | clear pending                                                                    |
-| hook PreToolUse (AskUserQuestion)              | any live                        | waiting-question   | pending.summary = question text from tool_input                                  |
-| hook PostToolUse / PostToolUseFailure (any)    | any live                        | working            | clear pending                                                                    |
-| hook PermissionRequest (tool_name, tool_input) | any live                        | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                    |
-| hook Notification (permission_prompt)          | any live                        | waiting-permission | pending.summary = notification message, unless PermissionRequest already set one |
-| hook Notification (elicitation_dialog)         | any live                        | waiting-question   | pending.summary = notification message                                           |
-| hook PermissionDenied                          | any live                        | working            | clear pending                                                                    |
-| hook Stop                                      | any live                        | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl      |
-| action interrupt                               | working, waiting-*              | idle               | the runner sent Escape; no hook reports an interrupt                             |
-| hook SessionEnd                                | any                             | exited             | endedAt                                                                          |
-| launcher `claude-exit`                         | any                             | exited             | exit code on the last run                                                        |
-| statusline payload                             | any                             | unchanged          | cache from `prompt_cache` (§9)                                                   |
+| Event                                           | From                            | To                 | Side data                                                                   |
+| ----------------------------------------------- | ------------------------------- | ------------------ | --------------------------------------------------------------------------- |
+| launcher `bootstrap-start`                      | any                             | bootstrapping      |                                                                             |
+| launcher `bootstrap-failed`                     | bootstrapping                   | failed             |                                                                             |
+| launcher `claude-start`                         | bootstrapping, starting, exited | starting           | new run appended                                                            |
+| hook SessionStart                               | starting                        | starting           | record `claudeSessionId`                                                    |
+| hook UserPromptSubmit                           | any live                        | working            | clear pending                                                               |
+| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                        | working            | clear pending                                                               |
+| hook PreToolUse (AskUserQuestion)               | any live                        | waiting-question   | pending.summary = question text from tool_input                             |
+| hook PostToolUse / PostToolUseFailure (any)     | any live                        | working            | clear pending                                                               |
+| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                        | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`               |
+| hook PermissionRequest (AskUserQuestion)        | any live                        | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict     |
+| hook Notification (permission_prompt)           | any live                        | waiting-permission | pending.summary = notification message, only when no pending is set         |
+| hook Notification (elicitation_dialog)          | any live                        | waiting-question   | pending.summary = notification message                                      |
+| hook PermissionDenied                           | any live                        | working            | clear pending                                                               |
+| hook Stop                                       | any live                        | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl |
+| action interrupt                                | working, waiting-*              | idle               | the runner sent Escape; no hook reports an interrupt                        |
+| hook SessionEnd                                 | any                             | exited             | endedAt                                                                     |
+| launcher `claude-exit`                          | any                             | exited             | exit code on the last run                                                   |
+| statusline payload                              | any                             | unchanged          | cache from `prompt_cache` (§9)                                              |
 
 Unknown events are ignored and logged. Every accepted event is appended to
 `<dataDir>/sessions/<id>/events.jsonl` (raw payload + resulting state).
 
-Hook facts the design relies on (checked against the hooks reference on
-2026-09-09, https://code.claude.com/docs/en/hooks): every payload carries
-`session_id`, `transcript_path`, `cwd`, `hook_event_name`, `permission_mode`;
-tool events carry `tool_name` and `tool_input`; `AskUserQuestion` is a named
-tool visible to PreToolUse/PostToolUse; Notification hooks match on
-`notification_type` (`permission_prompt`, `idle_prompt`, `auth_success`,
-`elicitation_dialog`, …); `PermissionRequest` and `PermissionDenied` are
-events; no hook reports a permission being _granted_, which is why every tool
-event clears `pending`. Stop fires when Claude finishes responding — the
-owner's own `notify-done` hook in docs-workspace is built on exactly that —
-and does not fire on an Escape interrupt. Plan task 0 confirms all of this
-empirically with one real session and keeps the raw `events.jsonl` as the
-fixture for the state-machine tests.
+Hook facts the design relies on, measured on 2026-09-09 against Claude Code
+2.1.266 with the §8.1 settings file and kept as
+`test/fixtures/hook-events.jsonl`:
+
+- Every payload carries `session_id`, `transcript_path`, `cwd`,
+  `scratchpad_dir`, `hook_event_name`. `permission_mode` is on
+  UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest and Stop — not
+  on SessionStart, Notification or SessionEnd, so the record's own mode is the
+  only reliable source. SessionStart adds `source` and `model`; SessionEnd
+  adds `reason` (`prompt_input_exit` on `/exit`).
+- Tool events carry `tool_name`, `tool_input` and `tool_use_id`; PostToolUse
+  adds `tool_response` and `duration_ms`. `AskUserQuestion` is a named tool
+  and its `tool_input.questions[].question` is the summary to show.
+- `AskUserQuestion` also raises **PermissionRequest**, and its Notification
+  arrives as `notification_type: "permission_prompt"`, not
+  `elicitation_dialog` — `tool_name`, never the notification type, decides
+  question versus permission. `elicitation_dialog` was not observed at all.
+- Notification lags the dialog by ~6 s and carries only
+  `notification_type` and a generic `message` ("Claude needs your
+  permission"), so it is a fallback, never the primary signal. `idle_prompt`
+  did not fire after 90 s idle at the prompt.
+- **PermissionDenied did not fire** when the owner chose "No", and no
+  PostToolUse followed either: nothing at all reports a refusal. The runner
+  must clear `pending` on the next UserPromptSubmit and on the `interrupt`
+  action, or a denied session stays stuck in waiting-permission.
+- No hook reports a permission being _granted_, which is why every tool event
+  clears `pending`.
+- Stop fires after **each** assistant turn, not at exit, and its
+  `last_assistant_message` carries the full final text.
+  `stop_hook_active` is `false`.
+- Escape mid-response emits nothing — no Stop, no PostToolUse. The
+  `interrupt` action is the only thing that moves that session out of
+  `working`.
+- PostToolUseFailure was never emitted in the probe run; the row stays because
+  it costs nothing, but no state may depend on it.
 
 ### 5.4 Actions
 
@@ -376,12 +399,27 @@ survive tmux, bash and the hook runner. Hooks exit 0 always; a dashboard
 that is down must never block the session (`|| true`).
 
 `--settings` merges by key with the other levels and sits above project and
-user settings (https://code.claude.com/docs/en/settings); hook arrays
-concatenate across levels, so the owner's hooks keep running. A
-PermissionRequest hook that prints nothing and exits 0 leaves the normal
-dialog in place — the hook only observes. Plan task 0 confirms that on this
-machine, plus whether the Stop payload carries `last_assistant_message`
-(optional in the design; absent means the card shows no snippet).
+user settings (https://code.claude.com/docs/en/settings). Measured on
+2026-09-09 with Claude Code 2.1.266:
+
+- Hook arrays concatenate across levels: the owner's user-level `rtk hook
+claude` PreToolUse hook still rewrote `ls -la` into `rtk ls -la` while the
+  probe's own PreToolUse hook logged the same call. Two `Notification`
+  entries in one file both fire, so a matcher never suppresses a sibling.
+- `tool_input` is **not** stable across a tool's events. PreToolUse sees the
+  model's `ls -la`; PermissionRequest and PostToolUse see the rewritten
+  `rtk ls -la`. Card summaries must say which event they came from rather
+  than assume one command.
+- A PermissionRequest hook that prints nothing and exits 0 leaves the normal
+  dialog in place — confirmed, the hook only observes. PermissionRequest also
+  carries `permission_suggestions`, the "don't ask again" options the dialog
+  offers.
+- Stop carries `last_assistant_message` in full — the snippet on the card is a
+  truncation, not a fallback.
+- `statusLine` is a scalar setting, so it is **replaced**, not merged: the
+  probe's command ran and the owner's `~/.claude/statusline.sh` did not. That
+  is why the generated `statusline.sh` has to re-invoke the owner's command
+  itself (§9).
 
 ### 8.2 Hook ingress
 
