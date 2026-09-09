@@ -1,0 +1,62 @@
+{
+  "$schema": "./config.schema.json",
+  "port": 4400,
+  "dataDir": "~/.local/share/questionable-choices",
+  "runner": {
+    "type": "claude-tmux",
+    "claudeBin": "claude",
+    "tmuxPrefix": "qc",
+    "models": [
+      { "id": "claude-fable-5-1", "label": "Fable 5.1" },
+      { "id": "claude-opus-5", "label": "Opus 5" },
+      { "id": "claude-sonnet-5", "label": "Sonnet 5" }
+    ],
+    "defaultModel": "claude-fable-5-1",
+    "defaultEffort": "high",
+    "defaultPermissionMode": "acceptEdits"
+  },
+  "workspaces": {
+    "docs-workspace": {
+      "repo": "/home/jakubs/repositories/docs-workspace",
+      "worktreeDir": "/home/jakubs/repositories/worktrees",
+      "baseRef": "origin/main",
+      "branchPattern": "{{key}}-{{slug}}",
+      "bootstrap": "npm ci",
+      "playbooks": [
+        {
+          "id": "implement",
+          "label": "Implement",
+          "description": "Start the repo's own feature / refactor / bugfix workflow on a fresh worktree.",
+          "isolation": "worktree",
+          "primaryFor": ["backlog", "needs-you", "working"],
+          "promptTemplate": "Work on Jira issue {{key}} — {{summary}}\nType: {{type}} · Status: {{status}} · Labels: {{labels}}\n{{url}}\n\nDescription:\n{{description}}\n\nInstructions:\n- Fetch the issue live with the jira MCP before starting; the text above may be stale.\n- Pick the workflow per AGENTS.md (feature-development, codebase-refactoring or project-bugfixing). Ask me before designing.\n- You are on branch {{branch}} in worktree {{worktree}}. Commit there and open the PR from it.\n- When the PR is open, post a comment on {{key}} through the jira MCP titled \"How to test\": preconditions, numbered steps, expected result, pages and URLs touched. A later test session reads that comment as its test plan.\n\nReminder: the run is not finished until the \"How to test\" comment is on {{key}}."
+        },
+        {
+          "id": "test",
+          "label": "Test",
+          "description": "QA-verify the issue's branch with the repo's test-issue skill.",
+          "isolation": "issue-worktree",
+          "primaryFor": ["review"],
+          "defaults": { "permissionMode": "acceptEdits" },
+          "promptTemplate": "Use the test-issue skill to verify {{key}} — {{summary}}\n{{url}}\n\nVerify on the current branch {{branch}} in this worktree ({{worktree}}), not on main: the change is not merged yet. Use the \"How to test\" comment on {{key}} as the test plan when one exists, and post the result comment on the issue as the skill prescribes."
+        }
+      ]
+    }
+  },
+  "boards": [
+    {
+      "id": "docs-nextjs",
+      "name": "Docs · Next.js",
+      "workspace": "docs-workspace",
+      "issues": {
+        "type": "jira",
+        "site": "kentico.atlassian.net",
+        "emailEnv": "JIRA_EMAIL_KENTICO_JIRA",
+        "tokenEnv": "JIRA_PAT_KENTICO_JIRA",
+        "epic": "DOC-3807",
+        "reviewStatuses": ["Ready for review"],
+        "pollSeconds": 120
+      }
+    }
+  ]
+}
