@@ -2,6 +2,10 @@
   "$schema": "./config.schema.json",
   "port": 4400,
   "dataDir": "~/.local/share/questionable-choices",
+  "editor": {
+    "command": "cmd.exe",
+    "args": ["/c", "code", "--remote", "wsl+Ubuntu", "{{path}}"]
+  },
   "runner": {
     "type": "claude-tmux",
     "claudeBin": "claude",

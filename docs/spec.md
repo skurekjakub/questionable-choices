@@ -98,6 +98,11 @@ Shape (see `config.example.json` for the live values):
 ```
 port                       number, default 4400
 dataDir                    default ~/.local/share/questionable-choices
+editor
+  command                  default 'code'
+  args[]                   default ['{{path}}']; `{{path}}` is replaced by the worktree path.
+                           Under WSL the Windows CLI is the one that reaches the desktop:
+                           command 'cmd.exe', args ['/c','code','--remote','wsl+<distro>','{{path}}']
 runner
   type                     'claude-tmux'
   claudeBin                default 'claude'
@@ -255,16 +260,17 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
 
 ### 5.4 Actions
 
-| Action                 | Effect                                                                                                                                                                       |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| start                  | §5.5                                                                                                                                                                         |
-| resume                 | kills any tmux session with the record's id, regenerates the launcher with `--resume <claudeSessionId>`, same cwd; state → starting. Refused when `claudeSessionId` is null. |
-| interrupt              | `tmux send-keys -t <id> Escape`                                                                                                                                              |
-| kill                   | `tmux kill-session -t <id>`; state → exited                                                                                                                                  |
-| mark-done / unmark     | toggles `done`                                                                                                                                                               |
-| archive                | hides the record; refused while live                                                                                                                                         |
-| remove-worktree        | `git worktree remove <path>` (plus `--force` when the caller confirms a dirty tree); refused while any live session uses that cwd                                            |
-| send-to-review / clear | per-issue flag (§6)                                                                                                                                                          |
+| Action                 | Effect                                                                                                                                                                           |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| start                  | §5.5                                                                                                                                                                             |
+| resume                 | kills any tmux session with the record's id, regenerates the launcher with `--resume <claudeSessionId>`, same cwd; state → starting. Refused when `claudeSessionId` is null.     |
+| interrupt              | `tmux send-keys -t <id> Escape`                                                                                                                                                  |
+| kill                   | `tmux kill-session -t <id>`; state → exited                                                                                                                                      |
+| mark-done / unmark     | toggles `done`                                                                                                                                                                   |
+| archive                | hides the record; refused while live                                                                                                                                             |
+| remove-worktree        | `git worktree remove <path>` (plus `--force` when the caller confirms a dirty tree); refused while any live session uses that cwd                                                |
+| send-to-review / clear | per-issue flag (§6)                                                                                                                                                              |
+| open-editor            | spawns `editor.command` with `editor.args` (`{{path}}` → the issue's worktree, or the repo for `shared`), detached, stdio ignored; refused when no worktree exists for the issue |
 
 ### 5.5 Start sequence
 
@@ -505,6 +511,7 @@ POST /api/boards/:id/issues/:key/sessions           { playbookId, prompt, model,
 POST /api/boards/:id/issues/:key/flags              { review?: boolean, done?: boolean } → IssueFlags
 POST /api/sessions/:id/resume | interrupt | kill | mark-done | unmark-done | archive
 POST /api/sessions/:id/remove-worktree { force?: boolean }
+POST /api/boards/:id/issues/:key/open-editor        → 204, or 409 when the issue has no worktree
 GET  /api/sessions/:id/events          → raw event log (debug)
 POST /api/hooks/:sessionId/:event      → 204 (hook ingress, loopback only)
 ```
@@ -542,18 +549,20 @@ Board:
 - Card: key (mono) + type glyph, summary (two lines max), Jira status chip,
   labels (max 3 + "+n"), then one row per live/latest session: playbook,
   state indicator, `time in state`, cache countdown. Primary action button
-  for the column's playbook; overflow menu with the other playbooks,
+  for the column's playbook; an "Open in VS Code" icon button whenever the
+  issue has a worktree; overflow menu with the other playbooks,
   Send to review / Clear, Mark done, Open in Jira.
 - Clicking the card body opens the issue drawer: description, all sessions
-  with actions, worktree path, tmux attach command (copy button).
+  with actions, worktree path, Open in VS Code, tmux attach command (copy
+  button).
 
 Session view:
 
 - Terminal fills ~75 %; header with key, playbook, state pill, branch,
   cache countdown; buttons Interrupt · Kill · Resume (when exited) · Back.
 - Right panel: issue summary/description, status chip, labels, Jira link,
-  worktree path, `tmux attach -t <id>` copy, Remove worktree (with force
-  confirm when refused as dirty).
+  worktree path, Open in VS Code, `tmux attach -t <id>` copy, Remove
+  worktree (with force confirm when refused as dirty).
 - When the session needs you the header pill pulses and shows the pending
   summary.
 
