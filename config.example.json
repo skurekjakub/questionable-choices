@@ -19,19 +19,17 @@
     "defaultEffort": "high",
     "defaultPermissionMode": "acceptEdits"
   },
-  "workspaces": {
+  "connectors": {
+    "kentico-jira": {
+      "type": "jira",
+      "site": "kentico.atlassian.net",
+      "emailEnv": "JIRA_EMAIL_KENTICO_JIRA",
+      "tokenEnv": "JIRA_PAT_KENTICO_JIRA"
+    }
+  },
+  "repos": {
     "docs-workspace": {
-      "name": "Docs · Next.js",
-      "issues": {
-        "type": "jira",
-        "site": "kentico.atlassian.net",
-        "emailEnv": "JIRA_EMAIL_KENTICO_JIRA",
-        "tokenEnv": "JIRA_PAT_KENTICO_JIRA",
-        "epic": "DOC-3807",
-        "reviewStatuses": ["Ready for review"],
-        "pollSeconds": 120
-      },
-      "repo": "/home/jakubs/repositories/docs-workspace",
+      "path": "/home/jakubs/repositories/docs-workspace",
       "worktreeDir": "/home/jakubs/repositories/worktrees",
       "baseRef": "origin/main",
       "branchPattern": "{{key}}-{{slug}}",
@@ -55,6 +53,22 @@
           "promptTemplate": "Use the test-issue skill to verify {{key}} — {{summary}}\n{{url}}\n\nVerify on the current branch {{branch}} in this worktree ({{worktree}}), not on main: the change is not merged yet. Use the \"How to test\" comment on {{key}} as the test plan when one exists, and post the result comment on the issue as the skill prescribes."
         }
       ]
+    }
+  },
+  "workspaces": {
+    "docs-nextjs": {
+      "name": "Docs · Next.js",
+      "epic": "DOC-3807",
+      "connector": "kentico-jira",
+      "repo": "docs-workspace",
+      "reviewStatuses": ["Ready for review"],
+      "pollSeconds": 120
+    },
+    "docs-nextjs-migration": {
+      "name": "Docs · Next.js migration",
+      "epic": "DOC-2778",
+      "connector": "kentico-jira",
+      "repo": "docs-workspace"
     }
   }
 }

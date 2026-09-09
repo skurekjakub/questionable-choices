@@ -63,7 +63,7 @@ Files: `src/connectors/**`, `test/connectors/**`.
 
 - `issues/jira/` — `JiraIssueSource` per spec §10, `map.ts` (REST → Issue,
   ADF → text) tested on fixtures; `client.ts` with fetch, basic auth, paging.
-- `workspaces/git/` — `GitWorkspace` per spec §5.5 step 2: `prepare()`,
+- `repos/git/` — `GitRepo` per spec §5.5 step 2: `prepare()`,
   `removeWorktree()`, `listWorktrees()`, `findIssueBranch()`; shell out with
   `execFile`, never `exec` with string interpolation. Pure parsing helpers
   tested.
@@ -115,7 +115,7 @@ Files: `src/web/**`.
   `docs/verification.md` with timestamps and the events.jsonl excerpt.
 - README: what it is, prerequisites (tmux, claude, node ≥ 22, env vars),
   `cp config.example.json ~/.config/questionable-choices/config.json`,
-  `npm run dev`, `npm run build && npm start`, how to add a workspace.
+  `npm run dev`, `npm run build && npm start`, how to add a workspace (UI) and a repo (config).
 - `docs/connectors.md` per spec §16.
 
 ## Package 4 — review

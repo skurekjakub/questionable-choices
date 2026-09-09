@@ -40,16 +40,18 @@ Non-goals (MVP)
 
 ## 2. Vocabulary
 
-| Term          | Meaning                                                                                                                            |
-| ------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Board         | The dashboard view of one workspace: its issue source projected onto columns. A board's id is its workspace's id.                  |
-| Issue source  | Connector that lists issues for a board (Jira epic today).                                                                         |
-| Workspace     | A git repository plus its worktree policy, bootstrap command and playbooks.                                                        |
-| Runner        | Connector that launches, attaches, interrupts and kills sessions (`claude` in tmux today).                                         |
-| Playbook      | Named kickoff recipe on a workspace: prompt template, isolation mode, defaults, which board columns show it as the primary action. |
-| Session       | One tmux session running one `claude` process for one issue and one playbook. Has a persistent record.                             |
-| Session state | Where the session is in its lifecycle — see §5.                                                                                    |
-| Column        | Board lane derived from session state and issue status — see §6.                                                                   |
+| Term          | Meaning                                                                                                                           |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Workspace     | One Jira epic, read through one connector and worked in one repo. The header dropdown switches workspaces; a board is its view.   |
+| Board         | The dashboard view of one workspace: its epic projected onto columns. Same id as the workspace.                                   |
+| Connector     | An issue-tracker account (Jira site + credential env vars). Workspaces reference it by id; several may share one.                 |
+| Repo          | A git repository plus its worktree policy, bootstrap command and playbooks. Workspaces reference it by id; several may share one. |
+| Issue source  | The connector-backed reader that lists a workspace's issues (Jira epic today).                                                    |
+| Runner        | Connector that launches, attaches, interrupts and kills sessions (`claude` in tmux today).                                        |
+| Playbook      | Named kickoff recipe on a repo: prompt template, isolation mode, defaults, which board columns show it as the primary action.     |
+| Session       | One tmux session running one `claude` process for one issue and one playbook. Has a persistent record.                            |
+| Session state | Where the session is in its lifecycle — see §5.                                                                                   |
+| Column        | Board lane derived from session state and issue status — see §6.                                                                  |
 
 ## 3. Repository layout
 
@@ -67,7 +69,7 @@ src/
     api.ts              wire types shared with src/web (REST + WS payloads)
   connectors/
     issues/jira/        IssueSource over Jira Cloud REST v3
-    workspaces/git/     Workspace over git worktrees (worktree | issue-worktree | shared)
+    repos/git/          Repo over git worktrees (worktree | issue-worktree | shared)
     runners/claude-tmux/Runner: tmux + claude + generated hook settings + node-pty attach
   server/
     main.ts             boot: load config, build connectors, start Hono + WS
@@ -109,17 +111,20 @@ runner
   tmuxPrefix               default 'qc' → tmux session names qc-<KEY>-<playbook>
   models[]                 {id,label} shown in the picker
   defaultModel / defaultEffort / defaultPermissionMode
-workspaces{id}
-  name                     shown in the workspace switcher
-  issues                   the workspace's issue source (one epic per workspace)
-    type                   'jira'
-    site, emailEnv, tokenEnv
-    epic                   parent key; default JQL is
+connectors{id}
+  type                     'jira'
+  site, emailEnv, tokenEnv
+workspaces{id}             what the header dropdown switches between
+  name                     shown in the switcher
+  epic                     parent key; default JQL is
                            parent = <epic> AND statusCategory != Done ORDER BY Rank ASC
-    jql?                   raw override of the whole query
-    reviewStatuses[]       Jira status names that land in the Review column
-    pollSeconds            default 120
-  repo                     absolute path of the main checkout
+  jql?                     raw override of the whole query
+  connector                connector id
+  repo                     repo id
+  reviewStatuses[]         Jira status names that land in the Review column; default ['Ready for review']
+  pollSeconds              default 120
+repos{id}
+  path                     absolute path of the main checkout
   worktreeDir              where worktrees go; worktree path = <worktreeDir>/<KEY>
   baseRef                  'origin/main'; fetched before every worktree add
   branchPattern            '{{key}}-{{slug}}'
@@ -131,6 +136,12 @@ workspaces{id}
     defaults?              {model?, effort?, permissionMode?}
     promptTemplate         see §7
 ```
+
+Workspaces are added and removed from the UI (§12); the server validates the
+request with the same zod schema, writes the whole config back to the file
+(tmp + rename; the file is JSON, so no comments to preserve) and applies it
+live. A connector may be created inline from the same dialog. Repos stay
+file-only: a playbook set is not a form.
 
 Valid `effort`: low, medium, high, xhigh, max. Valid `permissionMode`:
 acceptEdits, auto, bypassPermissions, manual, dontAsk, plan, plus `default`
@@ -146,7 +157,7 @@ interface SessionRecord {
   id: string; // tmux session name, e.g. qc-DOC-3847-implement
   issueKey: string;
   playbookId: string;
-  workspaceId: string;
+  repoId: string; // sessions belong to a repo and an issue, not to a workspace
   cwd: string;
   branch: string | null; // null for isolation 'shared'
   model: string;
@@ -322,8 +333,10 @@ Working — by `stateSince` ascending; Review/Done/Backlog — source order
 (Jira rank).
 
 Issue set: the source's list ∪ every issue that has a non-archived session
-record (fetched individually when it dropped out of the list, e.g. after
-moving to Done in Jira).
+record in the workspace's repo (fetched individually when it dropped out of
+the list, e.g. after moving to Done in Jira). Sessions belong to a repo and
+an issue key: two workspaces over the same repo that both list an issue show
+the same sessions.
 
 Card payload: issue (key, summary, type, status, statusCategory, labels, url),
 column, sessions (each: id, playbookId, state, stateSince, pending,
@@ -500,7 +513,9 @@ interface IssueSource {
 REST (JSON):
 
 ```
-GET  /api/config/public                → { workspaces: [{id,name}], runner: {models, defaults, efforts, permissionModes} }
+GET  /api/config/public                → { workspaces: [{id,name,epic,repo,connector}], repos: [{id,path}], connectors: [{id,site}], runner: {models, defaults, efforts, permissionModes} }
+POST /api/workspaces                   { id?, name, epic, repo, connector | newConnector: {id, site, emailEnv, tokenEnv}, reviewStatuses?, jql? } → 201 workspace summary; 400 with zod issues, 409 on duplicate id
+DELETE /api/workspaces/:id             → 204; sessions and worktrees are untouched (they belong to the repo)
 GET  /api/workspaces/:id/board         → BoardView { workspaceId, columns[], sourceError, fetchedAt }
 POST /api/workspaces/:id/refresh       → BoardView
 GET  /api/workspaces/:id/issues/:key   → IssueDetail { issue (with description), sessions[], worktree }
@@ -518,6 +533,7 @@ WebSocket:
 
 ```
 WS /ws/events     server → client: { type: 'board', workspaceId, view }   (debounced 250 ms)
+                                    { type: 'config', config: PublicConfigResponse }  after a workspace is added or removed
                                     { type: 'session', record }
 WS /ws/terminal/:sessionId           see §8.3
 ```
@@ -541,8 +557,11 @@ the implementer commits to one direction and records it in
 
 Board:
 
-- Header: workspace switcher (always shown; the active one is remembered in
-  localStorage), synced-ago, refresh, count of
+- Header: workspace switcher — a dropdown of epics (workspace name, with the
+  epic key and repo as secondary text), always shown, active one remembered
+  in localStorage, "Add workspace…" as its last entry, and a remove action on
+  the active workspace (confirm; nothing else is deleted). Then synced-ago,
+  refresh, count of
   needs-you as a badge that also goes into `document.title` and the favicon.
 - Five columns, each scrollable, counts in the heading.
 - Card: key (mono) + type glyph, summary (two lines max), Jira status chip,
@@ -554,6 +573,11 @@ Board:
 - Clicking the card body opens the issue drawer: description, all sessions
   with actions, worktree path, Open in VS Code, tmux attach command (copy
   button).
+- Add workspace dialog (from the switcher): name, epic key, repo (select
+  from config), connector (select from config, or "new" revealing id, site,
+  email env var, token env var), review statuses (comma-separated, default
+  "Ready for review"). Submit → `POST /api/workspaces`; zod issues shown next
+  to the fields; on 201 the switcher selects the new workspace.
 
 Session view:
 
@@ -576,7 +600,7 @@ the header; one notification per transition into the needs-you set, titled
 ```
 sessions.json           SessionRecord[] (write-through, atomic rename)
 flags.json              { [workspaceId]: { [issueKey]: { review?, done? } } }
-worktrees.json          { [workspaceId]: { [issueKey]: { path, branch, bootstrapped } } }
+worktrees.json          { [repoId]: { [issueKey]: { path, branch, bootstrapped } } }
 sessions/<id>/          prompt.txt settings.json statusline.sh run.sh events.jsonl
 ```
 
@@ -617,5 +641,6 @@ a permission prompt from the browser, kill, resume, remove the worktree.
 
 `docs/connectors.md` documents: adding an issue source (implement
 `IssueSource`, register its `type` in `connectors/issues/index.ts`, add the
-zod variant), adding a workspace (config only), adding a playbook (config
+zod variant), adding a workspace (UI or config), adding a repo (config
+only), adding a playbook (config
 only), adding a runner (implement `Runner`, register).
