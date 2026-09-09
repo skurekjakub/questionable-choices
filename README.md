@@ -1,12 +1,122 @@
 # questionable-choices
 
-Local dashboard that turns an issue-tracker epic into a board of Claude Code
-sessions. Click an issue, a real `claude` session starts in tmux inside a git
-worktree of the target repo; the browser shows the terminal and tracks what
-the session is doing (working, waiting for permission, asked you a question,
-your turn) through Claude Code hooks.
+A local dashboard that turns a Jira epic into a board of Claude Code
+sessions. Pick an issue, and a real `claude` session starts in tmux inside a
+git worktree of your repo. The browser shows the terminal and tracks what
+the session is doing — working, waiting for permission, asking you a
+question, your turn — through Claude Code hooks rather than screen scraping.
 
-Design: [`docs/spec.md`](./docs/spec.md). Build order:
-[`docs/plan.md`](./docs/plan.md).
+```
+┌ Backlog (68) ─┐ ┌ Working (2) ─┐ ┌ Needs you (1) ─┐ ┌ Review (3) ─┐ ┌ Done ─┐
+│ DOC-3885      │ │ DOC-3868 ●   │ │ DOC-3847  ⚠    │ │ DOC-3809    │ │       │
+│  changelog…   │ │  prod restarts│ │  Bash(npm ci)  │ │  [Test]     │ │       │
+└───────────────┘ └──────────────┘ └────────────────┘ └─────────────┘ └───────┘
+```
 
-Under construction.
+One person, one machine, bound to `127.0.0.1`. Built for WSL, works on any
+Linux or macOS with the same tools.
+
+## What it does
+
+- **Board per epic.** Columns are what you need to do next, not Jira
+  statuses: Backlog · Working · Needs you · Review · Done. The header
+  dropdown switches between epics.
+- **Real sessions.** `claude` runs in a tmux session with your plugins,
+  skills and statusline; xterm.js attaches to it in the browser and you can
+  `tmux attach` from any terminal too.
+- **Worktree per issue.** Each session gets `<worktreeDir>/<KEY>` on a branch
+  named after the issue, bootstrapped by whatever your repo needs.
+- **Playbooks.** `implement` on a fresh worktree; `test` on the issue's
+  branch with the repo's own QA skill. Model, effort and permission mode are
+  picked per session; the kickoff prompt is editable before launch.
+- **State from hooks.** A per-session `--settings` file adds hooks that
+  POST to the dashboard; your own hooks keep running. The prompt-cache
+  countdown on each card comes from the same statusline payload your status
+  bar reads.
+- **Connectors.** Issue source, repo and runner sit behind small interfaces;
+  another epic, repo or tracker is a config entry.
+
+Design: [`docs/spec.md`](./docs/spec.md). Build plan:
+[`docs/plan.md`](./docs/plan.md). Extending:
+[`docs/connectors.md`](./docs/connectors.md).
+
+## Prerequisites
+
+| Tool                        | Why                                                                           |
+| --------------------------- | ----------------------------------------------------------------------------- |
+| Node ≥ 22, npm ≥ 10         | server + SPA; npm 12 needs the `allowScripts` block already in `package.json` |
+| tmux ≥ 3.2                  | sessions live here                                                            |
+| `claude` on PATH, logged in | the runner execs it                                                           |
+| git, curl                   | worktrees; hook and statusline POSTs                                          |
+| python3, make, g++          | only if node-pty has no prebuild for your platform                            |
+| A Jira API token            | in an env var the config names — never in the file                            |
+
+Run `bash .claude/skills/bootstrap-environment/scripts/preflight.sh` to
+check all of them, or open the repo in Claude Code and ask it to set the
+environment up: the `bootstrap-environment` skill walks through it.
+
+## Setup
+
+```bash
+npm install
+mkdir -p ~/.config/questionable-choices
+cp config.example.json ~/.config/questionable-choices/config.json
+```
+
+Edit the config (or set `QC_CONFIG` to another path). Four blocks:
+
+- `connectors` — Jira site plus the names of the env vars holding email and
+  API token.
+- `repos` — checkout path, where worktrees go, base ref, bootstrap command,
+  playbooks.
+- `workspaces` — one per epic: name, epic key, which connector, which repo.
+- `editor` — the command behind the "Open in VS Code" button. On WSL that is
+  `cmd.exe /c code --remote wsl+<distro> {{path}}`.
+
+Then:
+
+```bash
+npm run config:check   # loads the config, lists workspaces, flags unresolved env vars
+npm run verify         # typecheck, format, tests, build
+npm run dev            # server on 4400, UI on 5173, both with reload
+```
+
+Production-style: `npm run build` then `npm start` serves the SPA and API
+from 4400.
+
+## Using it
+
+1. Open the board, pick an epic in the header.
+2. Click a card's primary action (`Implement` on backlog cards, `Test` on
+   review cards). Edit the prompt, pick model / effort / permission mode,
+   Start.
+3. The card moves to Working, then to Needs you when the session asks for
+   permission, asks a question, or finishes a turn. Click through to the
+   terminal and answer there.
+4. When the PR is up, move the issue to review in Jira (or "Send to
+   review" on the card) and dispatch a `Test` session on the same branch.
+5. Remove the worktree from the session panel when the branch is merged.
+
+Sessions survive dashboard restarts: tmux keeps them, and the server
+reconciles on boot. A session whose `claude` exited can be resumed with the
+same conversation.
+
+## Data
+
+Everything lives under `~/.local/share/questionable-choices/`: session
+records, per-issue flags, the worktree registry, and one directory per
+session with its prompt, generated settings, launcher and hook event log.
+
+## Development
+
+Single TypeScript package. `src/core` is pure domain (types, config schema,
+state machine, projection) with the connector interfaces; `src/connectors`
+implements them (Jira, git worktrees, claude in tmux); `src/server` is Hono
+plus WebSockets; `src/web` is Vite + React. Tests are Vitest, unit only.
+
+`npm run verify` is the gate. Start from `docs/spec.md` before changing
+behaviour; the spec is kept current with the code.
+
+## License
+
+MIT.
