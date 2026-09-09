@@ -38,7 +38,8 @@ Linux or macOS with the same tools.
 
 Design: [`docs/spec.md`](./docs/spec.md). Build plan:
 [`docs/plan.md`](./docs/plan.md). Extending:
-[`docs/connectors.md`](./docs/connectors.md).
+[`docs/connectors.md`](./docs/connectors.md). What a real run looks like, and
+what it still gets wrong: [`docs/verification.md`](./docs/verification.md).
 
 ## Prerequisites
 
@@ -95,7 +96,13 @@ from 4400.
    terminal and answer there.
 4. When the PR is up, move the issue to review in Jira (or "Send to
    review" on the card) and dispatch a `Test` session on the same branch.
-5. Remove the worktree from the session panel when the branch is merged.
+5. Kill the session, then remove its worktree from the session panel, when the
+   branch is merged. A worktree in use by a live session is refused.
+
+`permission mode` picks what `claude` is launched with, and `default` means "no
+flag" — the session then runs in whatever your own Claude Code settings default
+to, which may well be a mode that never prompts. Pick `manual` if you want to
+answer every tool call from the board.
 
 Sessions survive dashboard restarts: tmux keeps them, and the server
 reconciles on boot. A session whose `claude` exited can be resumed with the
