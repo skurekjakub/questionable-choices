@@ -9,6 +9,7 @@ import {
   BOARD_DEBOUNCE_MS,
   SessionManager,
   readDerivedCacheTtlSeconds,
+  spawnDetached,
 } from '../../src/server/session-manager.js';
 import { Store } from '../../src/server/store.js';
 import { makeIssue } from '../core/helpers.js';
@@ -50,7 +51,7 @@ interface Harness {
   /** Diagnostics the manager wrote. */
   logger: RecordingLogger;
   /** Every editor launch the manager asked for. */
-  editorCalls: Array<{ command: string; args: string[] }>;
+  editorCalls: Array<{ command: string; args: string[]; onError: (error: Error) => void }>;
   /** Current time in epoch milliseconds; assignable to advance the clock. */
   clock: { ms: number };
 }
@@ -73,7 +74,7 @@ async function harness(): Promise<Harness> {
   });
   const runner = new FakeRunner();
   const logger = new RecordingLogger();
-  const editorCalls: Array<{ command: string; args: string[] }> = [];
+  const editorCalls: Harness['editorCalls'] = [];
   const clock = { ms: Date.parse('2026-09-09T12:00:00.000Z') };
   const manager = new SessionManager({
     config,
@@ -84,7 +85,7 @@ async function harness(): Promise<Harness> {
     createRuntime: (next, workspaceId) => makeRuntime(next, workspaceId, source, repo),
     derivedCacheTtlSeconds: 300,
     now: () => clock.ms,
-    spawnEditor: (command, args) => editorCalls.push({ command, args }),
+    spawnEditor: (command, args, onError) => editorCalls.push({ command, args, onError }),
     logger,
   });
   await manager.refresh('ws');
@@ -345,7 +346,25 @@ describe('SessionManager', () => {
     it('spawns the configured editor on the checkout', async () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       await h.manager.openEditor('ws', 'DOC-1');
-      expect(h.editorCalls).toEqual([{ command: 'code', args: ['/repos/worktrees/DOC-1'] }]);
+      expect(h.editorCalls).toMatchObject([{ command: 'code', args: ['/repos/worktrees/DOC-1'] }]);
+    });
+
+    it('logs a launch that fails after the call has answered', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.openEditor('ws', 'DOC-1');
+      expect(() => h.editorCalls[0]?.onError(new Error('spawn code ENOENT'))).not.toThrow();
+      expect(h.logger.lines).toContainEqual(
+        'error: cannot open /repos/worktrees/DOC-1 in code: spawn code ENOENT',
+      );
+    });
+  });
+
+  describe('spawnDetached', () => {
+    it('reports a missing executable instead of crashing the process', async () => {
+      const error = await new Promise<Error>((resolve) => {
+        spawnDetached('qc-no-such-editor', ['/tmp'], resolve);
+      });
+      expect(error.message).toContain('qc-no-such-editor');
     });
   });
 

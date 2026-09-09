@@ -124,8 +124,16 @@ export type WorkspaceRuntimeFactory = (config: Config, workspaceId: string) => W
 
 /**
  * Spawns the owner's editor on a checkout.
+ *
+ * @param command - Executable to spawn.
+ * @param args - Arguments, with `{{path}}` already substituted.
+ * @param onError - Called when the launch fails, synchronously or later.
  */
-export type EditorSpawner = (command: string, args: string[]) => void;
+export type EditorSpawner = (
+  command: string,
+  args: string[],
+  onError: (error: Error) => void,
+) => void;
 
 /**
  * Everything the session manager needs to run.
@@ -199,11 +207,15 @@ export function readDerivedCacheTtlSeconds(settingsPath: string): number {
  *
  * @param command - Executable to spawn.
  * @param args - Arguments, with `{{path}}` already substituted.
+ * @param onError - Called with the spawn failure, which arrives asynchronously.
  * @returns Nothing.
- * @throws {Error} When the executable cannot be spawned synchronously.
  */
-export const spawnDetached: EditorSpawner = (command, args) => {
+export const spawnDetached: EditorSpawner = (command, args, onError) => {
   const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+  // A missing executable reaches the child as an asynchronous 'error' event,
+  // never as a throw from spawn; unhandled, that event takes the whole server
+  // down and every session's state tracking with it.
+  child.on('error', onError);
   // Without unref the editor keeps the event loop — and therefore the
   // dashboard — alive for as long as the owner leaves the window open.
   child.unref();
@@ -857,14 +869,15 @@ export class SessionManager {
       throw new ActionError(409, `${issueKey} has no checkout to open`);
     }
     const invocation = editorCommand(this.config.editor, worktree.path);
+    const failure = `cannot open ${worktree.path} in ${invocation.command}`;
     try {
-      this.spawnEditor(invocation.command, invocation.args);
+      // The launch is detached and its failure arrives after this call has
+      // answered, so a bad editor command can only be reported in the log.
+      this.spawnEditor(invocation.command, invocation.args, (error) => {
+        this.logger.error(`${failure}: ${error.message}`);
+      });
     } catch (cause) {
-      throw new ActionError(
-        409,
-        `cannot open ${worktree.path} in ${invocation.command}`,
-        messageOf(cause),
-      );
+      throw new ActionError(409, failure, messageOf(cause));
     }
   }
 
