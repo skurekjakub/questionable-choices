@@ -7,6 +7,7 @@ import type { CreateSessionRequest, SessionEventsResponse } from '../../src/core
 import { createApp } from '../../src/server/app.js';
 import { SessionManager } from '../../src/server/session-manager.js';
 import { Store } from '../../src/server/store.js';
+import { MAX_JSON_BODY_BYTES } from '../../src/server/util.js';
 import { makeIssue } from '../core/helpers.js';
 import {
   FakeIssueSource,
@@ -149,6 +150,28 @@ describe('hook ingress', () => {
     const response = await post(app, '/api/hooks/qc-nope/Stop', {});
     expect(response.status).toBe(404);
     expect(logger.lines.some((line) => line.includes('qc-nope'))).toBe(true);
+  });
+
+  it('refuses a body that is not a JSON object instead of reducing an empty one', async () => {
+    const response = await app.request(`/api/hooks/${SESSION_ID}/Stop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: 'not json',
+    });
+
+    expect(response.status).toBe(400);
+    expect(store.session(SESSION_ID)?.state).toBe('starting');
+  });
+
+  it('refuses a body larger than the cap', async () => {
+    const response = await app.request(`/api/hooks/${SESSION_ID}/Stop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ last_assistant_message: 'x'.repeat(MAX_JSON_BODY_BYTES) }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(store.session(SESSION_ID)?.state).toBe('starting');
   });
 
   it('ignores an unsubscribed hook name with a 204 and a log line', async () => {

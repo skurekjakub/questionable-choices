@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import type { ConfigIssue, CreateWorkspaceRequest } from './api.js';
 import { slug } from './prompt.js';
@@ -100,12 +99,12 @@ export function resolveConfigPath(env: Record<string, string | undefined>, home:
 
 const nonEmpty = (label: string): z.ZodString => z.string().min(1, `${label} must not be empty`);
 
-const modelChoiceSchema = z.object({
+const modelChoiceSchema = z.strictObject({
   id: nonEmpty('model id'),
   label: nonEmpty('model label'),
 });
 
-const runnerSchema = z.object({
+const runnerSchema = z.strictObject({
   type: z.literal('claude-tmux'),
   claudeBin: nonEmpty('claudeBin').default('claude'),
   tmuxPrefix: z
@@ -118,12 +117,12 @@ const runnerSchema = z.object({
   defaultPermissionMode: z.enum(PERMISSION_MODE_SETTINGS).default('default'),
 });
 
-const editorSchema = z.object({
+const editorSchema = z.strictObject({
   command: nonEmpty('editor.command').default('code'),
   args: z.array(z.string()).default(['{{path}}']),
 });
 
-const playbookSchema = z.object({
+const playbookSchema = z.strictObject({
   id: z
     .string()
     .regex(/^[a-z0-9][a-z0-9-]*$/, 'playbook id must be lowercase letters, digits and dashes'),
@@ -132,7 +131,7 @@ const playbookSchema = z.object({
   isolation: z.enum(['worktree', 'issue-worktree', 'shared']),
   primaryFor: z.array(z.enum(COLUMN_IDS)).default([]),
   defaults: z
-    .object({
+    .strictObject({
       model: nonEmpty('defaults.model').optional(),
       effort: z.enum(EFFORTS).optional(),
       permissionMode: z.enum(PERMISSION_MODE_SETTINGS).optional(),
@@ -141,14 +140,14 @@ const playbookSchema = z.object({
   promptTemplate: nonEmpty('promptTemplate'),
 });
 
-const connectorSchema = z.object({
+const connectorSchema = z.strictObject({
   type: z.literal('jira'),
   site: nonEmpty('site'),
   emailEnv: nonEmpty('emailEnv'),
   tokenEnv: nonEmpty('tokenEnv'),
 });
 
-const workspaceSchema = z.object({
+const workspaceSchema = z.strictObject({
   name: nonEmpty('workspace name'),
   epic: z
     .string()
@@ -189,7 +188,7 @@ function pathSchema(label: string, home: string): z.ZodType<string, unknown> {
  */
 function buildRepoSchema(home: string) {
   return z
-    .object({
+    .strictObject({
       path: pathSchema('path', home),
       worktreeDir: pathSchema('worktreeDir', home),
       baseRef: nonEmpty('baseRef').default('origin/main'),
@@ -199,6 +198,7 @@ function buildRepoSchema(home: string) {
     })
     .check((ctx) => {
       const seen = new Set<string>();
+      const claimed = new Map<string, string>();
       ctx.value.playbooks.forEach((playbook, index) => {
         if (seen.has(playbook.id)) {
           ctx.issues.push({
@@ -209,6 +209,21 @@ function buildRepoSchema(home: string) {
           });
         }
         seen.add(playbook.id);
+        playbook.primaryFor.forEach((column, position) => {
+          const owner = claimed.get(column);
+          if (owner === undefined) {
+            claimed.set(column, playbook.id);
+            return;
+          }
+          // The projection takes the first claimant, so a second one would be
+          // silently unreachable as a card's primary action.
+          ctx.issues.push({
+            code: 'custom',
+            message: `column '${column}' is already the primary action of playbook '${owner}'`,
+            path: ['playbooks', index, 'primaryFor', position],
+            input: column,
+          });
+        });
       });
     });
 }
@@ -224,7 +239,7 @@ function buildRepoSchema(home: string) {
  */
 function buildConfigSchema(home: string) {
   return z
-    .object({
+    .strictObject({
       $schema: z.string().optional(),
       port: z.number().int().min(1).max(65535).default(4400),
       // prefault, not default: a default is handed back untouched, so the
@@ -326,36 +341,6 @@ export function parseConfig(input: unknown, options: ParseConfigOptions = {}): C
     throw new ConfigError('Invalid configuration', issues);
   }
   return result.data;
-}
-
-/**
- * Reads and validates a configuration file.
- *
- * @param path - Absolute path of the JSON configuration file.
- * @param options - Parsing options; `home` controls `~` expansion.
- * @returns The validated configuration.
- * @throws {ConfigError} When the file is unreadable, is not JSON, or fails validation.
- */
-export function loadConfig(path: string, options: ParseConfigOptions = {}): Config {
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch (cause) {
-    throw new ConfigError(`Cannot read config at ${path}`, [
-      { path: '', message: cause instanceof Error ? cause.message : String(cause) },
-    ]);
-  }
-
-  let document: unknown;
-  try {
-    document = JSON.parse(text) as unknown;
-  } catch (cause) {
-    throw new ConfigError(`Config at ${path} is not valid JSON`, [
-      { path: '', message: cause instanceof Error ? cause.message : String(cause) },
-    ]);
-  }
-
-  return parseConfig(document, options);
 }
 
 /**
@@ -463,12 +448,53 @@ export function applyWorkspaceChange(config: Config, request: CreateWorkspaceReq
     ...(request.jql === undefined ? {} : { jql: request.jql }),
     connector: connectorId,
     repo: request.repo,
-    reviewStatuses: request.reviewStatuses ?? [...DEFAULT_REVIEW_STATUSES],
+    // An empty list is what the dialog sends for a cleared field, and `??`
+    // would keep it: the workspace would then have no Review lane at all.
+    reviewStatuses:
+      request.reviewStatuses !== undefined && request.reviewStatuses.length > 0
+        ? request.reviewStatuses
+        : [...DEFAULT_REVIEW_STATUSES],
     pollSeconds: DEFAULT_POLL_SECONDS,
   };
-  // Paths in the document are already absolute, so no home is needed to
-  // re-expand them; passing one would only re-expand a literal '~' twice.
-  return parseConfig(document, { home: '' });
+  try {
+    // Paths in the document are already absolute, so no home is needed to
+    // re-expand them; passing one would only re-expand a literal '~' twice.
+    return parseConfig(document, { home: '' });
+  } catch (cause) {
+    if (!(cause instanceof ConfigError)) throw cause;
+    throw new ConfigError(
+      'Invalid workspace request',
+      cause.issues.map((issue) => ({
+        path: requestPathOf(issue.path, id, inline?.id),
+        message: issue.message,
+      })),
+      cause.duplicate,
+    );
+  }
+}
+
+/**
+ * Rewrites a document locator as the field of the request that produced it.
+ *
+ * The caller validates a whole configuration to check one workspace, so its
+ * issues point into `workspaces.<id>`; a dialog can only show an issue it can
+ * match to one of its own inputs.
+ *
+ * @param path - Locator from the revalidated document.
+ * @param workspaceId - Id the workspace was written under.
+ * @param connectorId - Id of the inline connector, when the request carried one.
+ * @returns The locator relative to the request.
+ */
+function requestPathOf(path: string, workspaceId: string, connectorId: string | undefined): string {
+  const workspacePrefix = `workspaces.${workspaceId}.`;
+  if (path.startsWith(workspacePrefix)) return path.slice(workspacePrefix.length);
+  if (connectorId !== undefined) {
+    const connectorPrefix = `connectors.${connectorId}.`;
+    if (path.startsWith(connectorPrefix)) {
+      return `newConnector.${path.slice(connectorPrefix.length)}`;
+    }
+  }
+  return path;
 }
 
 /**

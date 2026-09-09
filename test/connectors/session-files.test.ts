@@ -221,18 +221,29 @@ describe('buildRunScript', () => {
     );
   });
 
-  it('skips the bootstrap block when the checkout is reused', () => {
+  it('announces no bootstrap when the checkout is reused', () => {
     const script = buildRunScript({ ...RUN_CONTEXT, needsBootstrap: false });
 
-    expect(script).toContain("post bootstrap-start '{}'");
+    expect(script).not.toContain('bootstrap-start');
     expect(script).not.toContain('npm ci');
     expect(script).not.toContain('bootstrap-failed');
   });
 
-  it('skips the bootstrap block when the workspace configures none', () => {
+  it('announces no bootstrap when the repo configures none', () => {
     const script = buildRunScript({ ...RUN_CONTEXT, bootstrap: null });
 
+    expect(script).not.toContain('bootstrap-start');
     expect(script).not.toContain('bootstrap-failed');
+  });
+
+  it('announces no bootstrap on a resume', () => {
+    const script = buildRunScript({
+      ...RUN_CONTEXT,
+      needsBootstrap: false,
+      resumeSessionId: 'abc-123',
+    });
+
+    expect(script).not.toContain('bootstrap-start');
   });
 
   it('keeps the window open after claude exits', () => {

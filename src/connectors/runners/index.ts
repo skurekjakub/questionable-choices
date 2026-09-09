@@ -20,8 +20,10 @@ export function createRunner(options: CreateRunnerOptions): Runner {
 
 export {
   ClaudeTmuxRunner,
+  MissingExecutableError,
   ResumeUnavailableError,
   TmuxError,
   readOwnerStatuslineCommand,
+  resolveExecutable,
 } from './claude-tmux/index.js';
 export type { ClaudeTmuxRunnerOptions } from './claude-tmux/index.js';

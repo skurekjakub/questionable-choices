@@ -8,14 +8,15 @@ import {
   ConfigError,
   checkEnvironment,
   formatConfigIssues,
-  loadConfig,
   resolveConfigPath,
 } from '../core/config.js';
 import type { Config } from '../core/types.js';
 import { createApp } from './app.js';
+import { loadConfig } from './config-file.js';
 import { buildConnectors, buildWorkspaceRuntime } from './connectors.js';
 import { SessionManager, consoleLogger, readDerivedCacheTtlSeconds } from './session-manager.js';
 import { Store } from './store.js';
+import { messageOf } from './util.js';
 
 /**
  * Loads the configuration, printing the issue list and exiting on failure.
@@ -37,12 +38,34 @@ function loadOrExit(path: string, home: string): Config {
 }
 
 /**
+ * Installs the process-wide handler of last resort.
+ *
+ * A failure that arrives outside the request that caused it — an async spawn
+ * error, a socket handler's throw — would otherwise end every session's state
+ * tracking at once, and no reconciler can recover a record whose events were
+ * never received. Keeping the process up is worth more than the stack trace an
+ * unhandled rejection would print on the way out.
+ *
+ * @returns Nothing.
+ */
+function guardTheProcess(): void {
+  process.on('uncaughtException', (cause) => {
+    console.error(`uncaught exception, still serving: ${messageOf(cause)}`);
+    if (cause instanceof Error && cause.stack !== undefined) console.error(cause.stack);
+  });
+  process.on('unhandledRejection', (cause) => {
+    console.error(`unhandled rejection, still serving: ${messageOf(cause)}`);
+  });
+}
+
+/**
  * Boots the dashboard: configuration, store, connectors, manager and server.
  *
  * @returns Nothing, once the server is listening.
  * @throws {Error} When the store or a connector cannot be built.
  */
 async function main(): Promise<void> {
+  guardTheProcess();
   const home = homedir();
   const configPath = resolveConfigPath(process.env, home);
   const config = loadOrExit(configPath, home);
@@ -64,8 +87,6 @@ async function main(): Promise<void> {
     derivedCacheTtlSeconds: readDerivedCacheTtlSeconds(join(home, '.claude', 'settings.json')),
     logger: consoleLogger,
   });
-  await manager.start();
-
   const app = createApp({
     manager,
     logger: consoleLogger,
@@ -87,6 +108,17 @@ async function main(): Promise<void> {
       console.log(`questionable-choices listening on http://127.0.0.1:${info.port}`);
     },
   );
+  server.on('error', (cause: NodeJS.ErrnoException) => {
+    if (cause.code !== 'EADDRINUSE') throw cause;
+    console.error(`port ${config.port} is already in use; stop the other server or change 'port'`);
+    process.exit(1);
+  });
+
+  // The first refresh talks to the tracker, so it runs behind the listening
+  // socket: an unreachable tracker must delay a banner, never the dashboard.
+  void manager.start().catch((cause: unknown) => {
+    console.error(`the first refresh failed: ${messageOf(cause)}`);
+  });
 
   const shutdown = (): void => {
     manager.stop();

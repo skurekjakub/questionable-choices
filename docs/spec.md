@@ -76,16 +76,22 @@ src/
     app.ts              routes
     session-manager.ts  orchestration, persistence, event fan-out
     store.ts            JSON persistence under dataDir
+    config-file.ts      reads config.json off disk and hands it to the schema
     hooks.ts            hook ingress → state machine → broadcast
     terminal-ws.ts      WS ↔ node-pty bridge
+    mutex.ts            per-key serialisation of read-modify-write sequences
+    util.ts             shared JSON-body reader and error-message helper
   web/                  Vite + React SPA (vite.config.ts, index.html, src/)
 test/                   vitest, mirrors src/core and pure parts of connectors
 docs/                   spec.md, plan.md, connectors.md
 config.example.json     the owner's real shape, minus secrets
 ```
 
-Dependency direction: `web → core/api.ts` and `core/cache-clock.ts` (both dependency-free) only; `server → core, connectors`;
-`connectors → core`. `core` imports nothing from the other three.
+Dependency direction: `web → core/api.ts` and `core/cache-clock.ts` (both of
+which import only types from `core/types.ts`) only; `server → core, connectors`;
+`connectors → core`. `core` imports nothing from the other three, and reads no
+files: `loadConfig` lives in `server/config-file.ts` so `core/config.ts` stays
+a pure schema.
 
 ## 4. Configuration
 
@@ -332,9 +338,10 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
    `tmux new-session -d -s <id> -c <cwd> -x 220 -y 50 bash <dir>/run.sh` and
    `tmux set-option -t <id> window-size latest`.
 4. `run.sh` (generated, bash):
-   - POST launcher `bootstrap-start`; run bootstrap when `needsBootstrap`;
-     on non-zero exit POST `bootstrap-failed` and `exec bash` (window stays
-     open for inspection).
+   - When `needsBootstrap`: POST launcher `bootstrap-start`, run the bootstrap,
+     and on a non-zero exit POST `bootstrap-failed` and `exec bash` (window
+     stays open for inspection). A run with no bootstrap — a reused worktree, a
+     resume — announces none and stays in `starting`.
    - POST `claude-start` with `{}` on a fresh start and `{"mode":"resume"}` on
      a resume, so the record's run list says which it was; `exec`-less call of
      `claude --settings <dir>/settings.json --name <KEY> [--model] [--effort] [--permission-mode | --dangerously-skip-permissions] "$(cat prompt.txt)"`
@@ -550,18 +557,23 @@ REST (JSON):
 GET  /api/config/public                → { workspaces: [{id,name,epic,repo,connector}], repos: [{id,path}], connectors: [{id,site}], runner: {models, defaults, efforts, permissionModes} }
 POST /api/workspaces                   { id?, name, epic, repo, connector | newConnector: {id, site, emailEnv, tokenEnv}, reviewStatuses?, jql? } → 201 workspace summary; 400 with zod issues, 409 on duplicate id
 DELETE /api/workspaces/:id             → 204; sessions and worktrees are untouched (they belong to the repo)
-GET  /api/workspaces/:id/board         → BoardView { workspaceId, columns[], sourceError, fetchedAt }
+GET  /api/workspaces/:id/board         → BoardView { workspaceId, name, playbooks[], columns[], sourceError, fetchedAt, needsYouCount }
 POST /api/workspaces/:id/refresh       → BoardView
-GET  /api/workspaces/:id/issues/:key   → IssueDetail { issue (with description), sessions[], worktree }
-GET  /api/workspaces/:id/issues/:key/prefill?playbook=  → { prompt, model, effort, permissionMode, isolation, warnings[] }
-POST /api/workspaces/:id/issues/:key/sessions           { playbookId, prompt, model, effort, permissionMode } → SessionRecord
+GET  /api/workspaces/:id/issues/:key   → IssueDetail { issue (with description), sessions[], worktreePath, flags }
+GET  /api/workspaces/:id/issues/:key/prefill?playbook=  → { prompt, model, effort, permissionMode, isolation, warnings[] }; `playbook` is required, 400 without it
+POST /api/workspaces/:id/issues/:key/sessions           { playbookId, prompt, model, effort, permissionMode } → 201 SessionRecord
 POST /api/workspaces/:id/issues/:key/flags              { review?: boolean, done?: boolean } → IssueFlags
 POST /api/workspaces/:id/issues/:key/open-editor        → 204, or 409 when the issue has no worktree
 POST /api/sessions/:id/resume | interrupt | kill | mark-done | unmark-done | archive
 POST /api/sessions/:id/remove-worktree { force?: boolean }
 GET  /api/sessions/:id/events          → raw event log (debug)
-POST /api/hooks/:sessionId/:event      → 204 (hook ingress, loopback only)
+POST /api/hooks/:sessionId/:event            → 204 (hook ingress, loopback only)
+POST /api/hooks/:sessionId/statusline        → 204 (status-line ingress)
+POST /api/hooks/:sessionId/launcher/:event   → 204 (launcher ingress, §5.5)
 ```
+
+The three ingress routes answer 404 for an unknown session id (§8.2) and 400
+for a body that is not a JSON object.
 
 WebSocket:
 
@@ -573,8 +585,8 @@ WS /ws/terminal/:sessionId           see §8.3
 ```
 
 Errors: JSON `{ error: string, detail?: string, issues?: [{path, message}] }`
-with 4xx for refusals (no live session, no branch found, dirty worktree) so the
-UI can show them verbatim. `issues` carries the zod problems of a rejected
+with 4xx for refusals (no live session, no branch found, dirty worktree, an
+issue the tracker would not hand over) so the UI can show them verbatim. `issues` carries the zod problems of a rejected
 workspace request, each path pointing at the field that caused it.
 
 ## 12. Web UI

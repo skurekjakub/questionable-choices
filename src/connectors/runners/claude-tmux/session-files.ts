@@ -1,3 +1,5 @@
+import { LAUNCHER_INGRESS, STATUSLINE_INGRESS } from '../../../core/api.js';
+import type { LauncherStartBody } from '../../../core/api.js';
 import { HOOK_EVENT_NAMES } from '../../../core/state-machine.js';
 import type { Effort, PermissionModeSetting } from '../../../core/types.js';
 
@@ -14,7 +16,7 @@ export const NOTIFICATION_MATCHER = 'permission_prompt|elicitation_dialog';
 /**
  * Ingress path segment the status-line payload is posted to.
  */
-export const STATUSLINE_EVENT = 'statusline';
+export const STATUSLINE_EVENT = STATUSLINE_INGRESS;
 
 /**
  * Wraps a value so a shell reads it as one literal argument.
@@ -47,7 +49,7 @@ export function hookUrl(port: number, sessionId: string, event: string): string 
  * @returns The loopback URL.
  */
 export function launcherUrl(port: number, sessionId: string, event: string): string {
-  return `${hookUrl(port, sessionId, 'launcher')}/${event}`;
+  return `${hookUrl(port, sessionId, LAUNCHER_INGRESS)}/${event}`;
 }
 
 /**
@@ -291,12 +293,14 @@ export function buildRunScript(context: RunScriptContext): string {
     'post() {',
     `  curl -s -m 2 -X POST -H 'content-type: application/json' --data-binary "$2" "${url}" >/dev/null 2>&1 || true`,
     '}',
-    '',
-    "post bootstrap-start '{}'",
   ];
 
   if (context.needsBootstrap && context.bootstrap !== null && context.bootstrap !== '') {
+    // Only a run that really bootstraps announces it: the state it opens is
+    // also what the reconciler reads as "died before it ever launched".
     lines.push(
+      '',
+      "post bootstrap-start '{}'",
       '',
       context.bootstrap,
       'status=$?',
@@ -309,10 +313,10 @@ export function buildRunScript(context: RunScriptContext): string {
 
   // The server counts a run per launch and needs to know whether this one
   // continues the previous transcript; no hook reports that.
-  const startBody = context.resumeSessionId === null ? '{}' : '{"mode":"resume"}';
+  const startBody: LauncherStartBody = context.resumeSessionId === null ? {} : { mode: 'resume' };
   lines.push(
     '',
-    `post claude-start '${startBody}'`,
+    `post claude-start '${JSON.stringify(startBody)}'`,
     '',
     claudeCommandLine(context),
     'status=$?',

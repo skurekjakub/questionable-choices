@@ -164,7 +164,7 @@ describe('HTTP API', () => {
     });
     expect(invalid.status).toBe(400);
     const body = (await invalid.json()) as ErrorResponse;
-    expect(body.issues?.map((issue) => issue.path)).toContain('workspaces.ghost-repo.repo');
+    expect(body.issues?.map((issue) => issue.path)).toContain('repo');
   });
 
   it('removes a workspace with 204 and 404s an unknown one', async () => {

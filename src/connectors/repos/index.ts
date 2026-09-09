@@ -16,9 +16,11 @@ export function createRepo(id: string, config: RepoConfig): Repo {
 }
 
 export {
+  DetachedWorktreeError,
   DirtyWorktreeError,
   GitError,
   GitRepo,
+  InvalidIssueKeyError,
   NoBranchError,
   WorktreeNotFoundError,
 } from './git/index.js';

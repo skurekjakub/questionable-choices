@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  DetachedWorktreeError,
   DirtyWorktreeError,
   GitRepo,
+  InvalidIssueKeyError,
   NoBranchError,
   WorktreeNotFoundError,
 } from '../../src/connectors/repos/git/index.js';
@@ -136,6 +138,27 @@ describe('GitRepo.prepare', () => {
     await expect(subject.prepare(issue, playbooks.issueWorktree)).rejects.toThrow(
       /origin\/DOC-404-\*/,
     );
+  });
+
+  it('refuses a key that would escape the worktree directory', async () => {
+    const issue = makeIssue({ key: '../../etc' });
+
+    await expect(subject.prepare(issue, playbooks.worktree)).rejects.toBeInstanceOf(
+      InvalidIssueKeyError,
+    );
+    expect(() => subject.worktreePath('DOC 1')).toThrow(InvalidIssueKeyError);
+  });
+
+  it('refuses to reuse a worktree whose HEAD is detached', async () => {
+    const issue = makeIssue({ key: 'DOC-7', summary: 'Detached' });
+    const path = join(worktreeDir, 'DOC-7');
+    await run(['worktree', 'add', '--detach', path, 'main'], repo);
+
+    await expect(subject.prepare(issue, playbooks.worktree)).rejects.toBeInstanceOf(
+      DetachedWorktreeError,
+    );
+
+    await run(['worktree', 'remove', '--force', path], repo);
   });
 });
 

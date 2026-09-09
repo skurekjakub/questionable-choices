@@ -8,7 +8,6 @@ import {
   checkEnvironment,
   expandHome,
   formatConfigIssues,
-  loadConfig,
   parseConfig,
   removeWorkspace,
   resolveConfigPath,
@@ -138,9 +137,31 @@ describe('the shipped example', () => {
     });
   });
 
-  it('loads from disk', () => {
-    const config = loadConfig(EXAMPLE_PATH.pathname, { home: HOME });
-    expect(config.runner.defaultModel).toBe('claude-fable-5-1');
+  it('refuses a key the schema does not know', () => {
+    const document = exampleDocument();
+    document['typoKey'] = true;
+    expect(() => parseConfig(document, { home: HOME })).toThrow(ConfigError);
+  });
+
+  it('refuses a misspelled workspace field instead of silently defaulting it', () => {
+    const document = exampleDocument();
+    const workspaces = document['workspaces'] as Record<string, Record<string, unknown>>;
+    const workspace = workspaces['docs-nextjs'] as Record<string, unknown>;
+    delete workspace['pollSeconds'];
+    workspace['pollSecs'] = 30;
+    expect(issuesOf(document).join('\n')).toContain('pollSecs');
+  });
+
+  it('refuses two playbooks claiming the same column as their primary action', () => {
+    const document = exampleDocument();
+    const repos = document['repos'] as Record<string, Record<string, unknown>>;
+    const playbooks = (repos['docs-workspace'] as Record<string, unknown>)['playbooks'] as Array<
+      Record<string, unknown>
+    >;
+    (playbooks[1] as Record<string, unknown>)['primaryFor'] = ['backlog'];
+    expect(issuesOf(document)).toContain(
+      "repos.docs-workspace.playbooks[1].primaryFor[0]: column 'backlog' is already the primary action of playbook 'implement'",
+    );
   });
 });
 
@@ -404,20 +425,6 @@ describe('rejections', () => {
   });
 });
 
-describe('loadConfig failures', () => {
-  const directory = mkdtempSync(join(tmpdir(), 'qc-config-'));
-
-  it('rejects a missing file', () => {
-    expect(() => loadConfig(join(directory, 'absent.json'), { home: HOME })).toThrow(ConfigError);
-  });
-
-  it('rejects a file that is not JSON', () => {
-    const path = join(directory, 'broken.json');
-    writeFileSync(path, '{ not json');
-    expect(() => loadConfig(path, { home: HOME })).toThrow(/not valid JSON/);
-  });
-});
-
 describe('resolveConfigPath', () => {
   it.each([
     ['falls back to the default location', {}, `${HOME}/.config/questionable-choices/config.json`],
@@ -538,12 +545,12 @@ describe('applyWorkspaceChange', () => {
     [
       'a repo that is not configured',
       { name: 'Ghost repo', epic: 'DOC-2', repo: 'ghost', connector: 'tracker' },
-      'workspaces.ghost-repo.repo',
+      'repo',
     ],
     [
       'an epic that is missing',
       { name: 'No epic', epic: '', repo: 'app', connector: 'tracker' },
-      'workspaces.no-epic.epic',
+      'epic',
     ],
   ])('refuses %s at %s', (_name, request, locator) => {
     try {

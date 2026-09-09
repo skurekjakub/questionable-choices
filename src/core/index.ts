@@ -50,7 +50,6 @@ export {
   checkEnvironment,
   expandHome,
   formatConfigIssues,
-  loadConfig,
   parseConfig,
   removeWorkspace,
   resolveConfigPath,

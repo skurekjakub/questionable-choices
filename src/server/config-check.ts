@@ -6,9 +6,9 @@ import {
   ConfigError,
   checkEnvironment,
   formatConfigIssues,
-  loadConfig,
   resolveConfigPath,
 } from '../core/config.js';
+import { loadConfig } from './config-file.js';
 
 /**
  * Everything the check needs, so a test can point it at a temporary file.

@@ -91,6 +91,49 @@ export class WorktreeNotFoundError extends Error {
 }
 
 /**
+ * Thrown when an issue key cannot be used as a path or a session-name segment.
+ */
+export class InvalidIssueKeyError extends Error {
+  /** The key that was refused. */
+  readonly issueKey: string;
+
+  /**
+   * Builds an invalid-key error.
+   *
+   * @param issueKey - The key that was refused.
+   */
+  constructor(issueKey: string) {
+    super(`'${issueKey}' is not a usable issue key; expected letters, digits, '-' and '_'`);
+    this.name = 'InvalidIssueKeyError';
+    this.issueKey = issueKey;
+  }
+}
+
+/**
+ * Thrown when the worktree registered for an issue has no branch to work on.
+ */
+export class DetachedWorktreeError extends Error {
+  /** Absolute path of the detached worktree. */
+  readonly path: string;
+
+  /**
+   * Builds a detached-worktree error.
+   *
+   * @param issueKey - Key of the issue the worktree belongs to.
+   * @param path - Absolute path of the detached worktree.
+   */
+  constructor(issueKey: string, path: string) {
+    super(
+      `the worktree for ${issueKey} at ${path} has a detached HEAD; check a branch out there or remove it`,
+    );
+    this.name = 'DetachedWorktreeError';
+    this.path = path;
+  }
+}
+
+const ISSUE_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+/**
  * Provides checkouts for sessions out of one git repository and its worktrees.
  */
 export class GitRepo implements Repo {
@@ -117,8 +160,12 @@ export class GitRepo implements Repo {
    *
    * @param issueKey - Key of the issue.
    * @returns The absolute worktree path, `<worktreeDir>/<KEY>`.
+   * @throws {InvalidIssueKeyError} When the key is not a single safe segment.
    */
   worktreePath(issueKey: string): string {
+    // A key is a path segment here and a tmux target elsewhere, and it arrives
+    // from a URL: `../` would escape worktreeDir, `/` would collide two keys.
+    if (!ISSUE_KEY_PATTERN.test(issueKey)) throw new InvalidIssueKeyError(issueKey);
     return join(this.config.worktreeDir, issueKey);
   }
 
@@ -192,6 +239,8 @@ export class GitRepo implements Repo {
    * @param playbook - Playbook whose `isolation` decides the policy.
    * @param hints - What the caller already knows about the issue's checkout.
    * @returns The checkout to launch in.
+   * @throws {InvalidIssueKeyError} When the issue key is not a safe segment.
+   * @throws {DetachedWorktreeError} When the registered worktree has no branch.
    * @throws {GitError} When git refuses to create the worktree.
    * @throws {NoBranchError} When `issue-worktree` finds no branch.
    */
@@ -204,12 +253,17 @@ export class GitRepo implements Repo {
       return { cwd: this.config.path, branch: null, needsBootstrap: false };
     }
 
+    const path = this.worktreePath(issue.key);
+    // The base ref is fetched before the reuse check, so a long-lived worktree
+    // is not worked against whatever the last fetch happened to leave behind.
+    if (playbook.isolation === 'worktree') await git(['fetch', this.remote], this.config.path);
+
     const existing = await this.worktreeFor(issue.key);
     if (existing !== null) {
+      if (existing.branch === null) throw new DetachedWorktreeError(issue.key, existing.path);
       return { cwd: existing.path, branch: existing.branch, needsBootstrap: false };
     }
 
-    const path = this.worktreePath(issue.key);
     if (playbook.isolation === 'issue-worktree') {
       const branch = await this.findIssueBranch(issue.key, hints.knownBranch);
       if (branch === null) {
@@ -223,7 +277,6 @@ export class GitRepo implements Repo {
       return { cwd: path, branch, needsBootstrap: true };
     }
 
-    await git(['fetch', this.remote], this.config.path);
     const branch = branchName(this.config.branchPattern, issue);
     await this.addWorktree(path, branch);
     return { cwd: path, branch, needsBootstrap: true };

@@ -1,11 +1,13 @@
 import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createRunner } from '../../src/connectors/runners/index.js';
 import {
   ClaudeTmuxRunner,
+  MissingExecutableError,
   ResumeUnavailableError,
+  resolveExecutable,
   readOwnerStatuslineCommand,
 } from '../../src/connectors/runners/claude-tmux/index.js';
 import {
@@ -186,6 +188,44 @@ describe('ClaudeTmuxRunner.resume', () => {
     await expect(runner.resume(makeRecord({ claudeSessionId: null }))).rejects.toBeInstanceOf(
       ResumeUnavailableError,
     );
+  });
+});
+
+describe('resolveExecutable', () => {
+  it('finds a command on the search path', async () => {
+    const bin = join(root, 'bin');
+    await mkdir(bin, { recursive: true });
+    const path = join(bin, 'qc-probe');
+    await writeFile(path, '#!/bin/sh\n', { mode: 0o755 });
+
+    expect(resolveExecutable('qc-probe', `/nowhere${delimiter}${bin}`)).toBe(path);
+  });
+
+  it('answers null for a command nothing on the path provides', () => {
+    expect(resolveExecutable('qc-no-such-binary', '/nowhere')).toBeNull();
+    expect(resolveExecutable('', '/nowhere')).toBeNull();
+  });
+
+  it('answers null for a path that is not executable', async () => {
+    const path = join(root, 'not-executable');
+    await writeFile(path, 'text\n', { mode: 0o644 });
+
+    expect(resolveExecutable(path, '/nowhere')).toBeNull();
+  });
+});
+
+describe('ClaudeTmuxRunner.start', () => {
+  it('refuses to launch when the configured CLI is not on PATH', async () => {
+    const runner = new ClaudeTmuxRunner({
+      config: { ...RUNNER_CONFIG, claudeBin: 'qc-no-such-binary' },
+      port: 4400,
+      dataDir,
+      home,
+    });
+
+    await expect(
+      runner.start({ record: makeRecord(), needsBootstrap: false }),
+    ).rejects.toBeInstanceOf(MissingExecutableError);
   });
 });
 

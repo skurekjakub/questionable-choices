@@ -2,9 +2,10 @@ import type { upgradeWebSocket } from '@hono/node-server';
 import type { WebSocketLike } from '@hono/node-server';
 import type { Hono } from 'hono';
 import type { WSContext } from 'hono/ws';
-import type { EventFrame, TerminalServerFrame } from '../core/api.js';
+import type { EventFrame, TerminalClientFrame, TerminalServerFrame } from '../core/api.js';
 import type { Runner, RunnerTerminal } from '../core/types.js';
 import type { Logger, SessionManager } from './session-manager.js';
+import { messageOf } from './util.js';
 
 /**
  * The node adapter's `upgradeWebSocket`, taken as a dependency so an app can be
@@ -26,6 +27,11 @@ export const DEFAULT_COLS = 220;
  * Rows assumed when a viewer connects without a `rows` query parameter.
  */
 export const DEFAULT_ROWS = 50;
+
+/**
+ * Bytes a viewer's socket may have queued before pty output is dropped.
+ */
+export const TERMINAL_BUFFER_LIMIT_BYTES = 4 * 1024 * 1024;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -70,6 +76,17 @@ function sendJson(ws: Socket, frame: TerminalServerFrame | EventFrame): void {
 }
 
 /**
+ * Bytes a socket has accepted but not yet put on the wire.
+ *
+ * @param ws - The viewer socket.
+ * @returns The queued byte count, or 0 when the adapter does not report one.
+ */
+function bufferedBytes(ws: Socket): number {
+  const buffered = (ws.raw as { bufferedAmount?: unknown } | undefined)?.bufferedAmount;
+  return typeof buffered === 'number' ? buffered : 0;
+}
+
+/**
  * Applies one text frame from a viewer.
  *
  * @param terminal - The attached terminal.
@@ -84,10 +101,10 @@ function applyClientFrame(terminal: RunnerTerminal, text: string): void {
     return;
   }
   if (parsed === null || typeof parsed !== 'object') return;
-  const frame = parsed as Record<string, unknown>;
-  if (frame['type'] !== 'resize') return;
-  const cols = dimension(String(frame['cols']), 0);
-  const rows = dimension(String(frame['rows']), 0);
+  const frame = parsed as Partial<TerminalClientFrame>;
+  if (frame.type !== 'resize') return;
+  const cols = dimension(String(frame.cols), 0);
+  const rows = dimension(String(frame.rows), 0);
   if (cols === 0 || rows === 0) return;
   terminal.resize(cols, rows);
 }
@@ -127,14 +144,29 @@ export function registerWebSocketRoutes(app: Hono, deps: WebSocketRoutesDeps): v
         });
       };
 
+      const teardown = (): void => {
+        closed = true;
+        const attached = terminal;
+        terminal = null;
+        // Disposing detaches this viewer only; tmux keeps the session running.
+        if (attached !== null) attached.dispose();
+      };
+
       return {
         onOpen(_event, ws) {
           queue = (async () => {
+            if (!manager.hasSession(sessionId)) {
+              const message = `unknown session '${sessionId}'`;
+              logger.warn(`terminal socket for ${message}`);
+              sendJson(ws, { type: 'error', message });
+              ws.close(1008, 'unknown session');
+              return;
+            }
             let attached: RunnerTerminal;
             try {
               attached = await runner.attach(sessionId, cols, rows);
             } catch (cause) {
-              const message = cause instanceof Error ? cause.message : String(cause);
+              const message = messageOf(cause);
               logger.error(`cannot attach to ${sessionId}: ${message}`);
               sendJson(ws, { type: 'error', message });
               ws.close(1011, 'attach failed');
@@ -146,13 +178,23 @@ export function registerWebSocketRoutes(app: Hono, deps: WebSocketRoutesDeps): v
             }
             terminal = attached;
             attached.onData((chunk) => {
-              if (ws.readyState === 1) ws.send(encoder.encode(chunk));
+              if (ws.readyState !== 1) return;
+              // A viewer that stops reading must not let the pty's output grow
+              // in the server's heap; a terminal repaints itself anyway.
+              if (bufferedBytes(ws) > TERMINAL_BUFFER_LIMIT_BYTES) return;
+              ws.send(encoder.encode(chunk));
             });
             attached.onExit((exitCode) => {
               sendJson(ws, { type: 'exit', exitCode });
               ws.close(1000, 'terminal exited');
             });
           })();
+        },
+
+        onError(_event, ws) {
+          logger.warn(`terminal socket for ${sessionId} errored`);
+          teardown();
+          ws.close(1011, 'socket error');
         },
 
         onMessage(event) {
@@ -173,11 +215,7 @@ export function registerWebSocketRoutes(app: Hono, deps: WebSocketRoutesDeps): v
         },
 
         onClose() {
-          closed = true;
-          const attached = terminal;
-          terminal = null;
-          // Disposing detaches this viewer only; tmux keeps the session running.
-          if (attached !== null) attached.dispose();
+          teardown();
         },
       };
     }),
@@ -187,6 +225,10 @@ export function registerWebSocketRoutes(app: Hono, deps: WebSocketRoutesDeps): v
     '/ws/events',
     deps.upgradeWebSocket(() => {
       let unsubscribe: (() => void) | null = null;
+      const drop = (): void => {
+        if (unsubscribe !== null) unsubscribe();
+        unsubscribe = null;
+      };
       return {
         onOpen(_event, ws) {
           for (const workspaceId of manager.workspaceIds()) {
@@ -196,9 +238,12 @@ export function registerWebSocketRoutes(app: Hono, deps: WebSocketRoutesDeps): v
             sendJson(ws, frame);
           });
         },
+        onError() {
+          logger.warn('events socket errored');
+          drop();
+        },
         onClose() {
-          if (unsubscribe !== null) unsubscribe();
-          unsubscribe = null;
+          drop();
         },
       };
     }),

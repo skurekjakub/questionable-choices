@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { accessSync, constants, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import type { IPty } from 'node-pty';
 import type {
   Runner,
@@ -45,6 +45,58 @@ export class ResumeUnavailableError extends Error {
     this.name = 'ResumeUnavailableError';
     this.sessionId = sessionId;
   }
+}
+
+/**
+ * Thrown when a command the runner is about to launch is not on the machine.
+ */
+export class MissingExecutableError extends Error {
+  /** The command that could not be resolved. */
+  readonly command: string;
+
+  /**
+   * Builds a missing-executable error naming the command.
+   *
+   * @param command - Executable name or path that did not resolve.
+   */
+  constructor(command: string) {
+    super(`${command} is not an executable on PATH`);
+    this.name = 'MissingExecutableError';
+    this.command = command;
+  }
+}
+
+/**
+ * Reports whether a path names a file this process may execute.
+ *
+ * @param path - Path to probe.
+ * @returns True when the file exists and carries the execute bit.
+ */
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolves a command the way a shell would.
+ *
+ * @param command - Executable name, or a path when it contains a separator.
+ * @param searchPath - `PATH` value the directories are taken from.
+ * @returns The resolved path, or null when nothing on the path matches.
+ */
+export function resolveExecutable(command: string, searchPath: string): string | null {
+  if (command === '') return null;
+  if (command.includes('/')) return isExecutable(command) ? command : null;
+  for (const directory of searchPath.split(delimiter)) {
+    if (directory === '') continue;
+    const candidate = join(directory, command);
+    if (isExecutable(candidate)) return candidate;
+  }
+  return null;
 }
 
 /**
@@ -199,6 +251,11 @@ export class ClaudeTmuxRunner implements Runner {
    * @throws {TmuxError} When tmux is missing or refuses the session.
    */
   private async startWindow(record: SessionRecord, dir: string): Promise<void> {
+    // A missing CLI would otherwise be discovered by bash inside the window,
+    // which exits 127 a second after a start the owner was told succeeded.
+    if (resolveExecutable(this.config.claudeBin, process.env['PATH'] ?? '') === null) {
+      throw new MissingExecutableError(this.config.claudeBin);
+    }
     await tmux(newSessionArgv(record.id, record.cwd, join(dir, 'run.sh')));
     await tmux(windowSizeArgv(record.id));
   }
@@ -208,6 +265,7 @@ export class ClaudeTmuxRunner implements Runner {
    *
    * @param request - Record to launch plus its bootstrap decision.
    * @returns Nothing; progress is reported through launcher events.
+   * @throws {MissingExecutableError} When the configured CLI is not on PATH.
    * @throws {TmuxError} When tmux is missing or refuses the session.
    */
   async start(request: RunnerStartRequest): Promise<void> {

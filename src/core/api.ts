@@ -1,3 +1,39 @@
+/**
+ * The wire contract between the server and the SPA: every REST route, every
+ * WebSocket frame and every ingress the generated session files post to.
+ *
+ * REST, with the statuses the server really answers:
+ *
+ * ```
+ * GET    /api/config/public                              → 200 PublicConfigResponse
+ * POST   /api/workspaces                                 → 201 WorkspaceSummary
+ *                                                          400 ErrorResponse with issues
+ *                                                          409 ErrorResponse on a duplicate id
+ * DELETE /api/workspaces/:id                             → 204; 404 when no workspace has the id
+ * GET    /api/workspaces/:id/board                       → 200 BoardView
+ * POST   /api/workspaces/:id/refresh                     → 200 BoardView
+ * GET    /api/workspaces/:id/issues/:key                 → 200 IssueDetailResponse
+ * GET    /api/workspaces/:id/issues/:key/prefill?playbook= → 200 PrefillResponse
+ *                                                          400 when `playbook` is absent
+ * POST   /api/workspaces/:id/issues/:key/sessions        → 201 SessionRecord
+ * POST   /api/workspaces/:id/issues/:key/flags           → 200 IssueFlags
+ * POST   /api/workspaces/:id/issues/:key/open-editor     → 204; 409 without a checkout
+ * POST   /api/sessions/:id/<SessionAction>               → 200 SessionRecord
+ * POST   /api/sessions/:id/remove-worktree               → 200 RemoveWorktreeResponse
+ * GET    /api/sessions/:id/events                        → 200 SessionEventsResponse (debug)
+ * POST   /api/hooks/:sessionId/:event                    → 204 (hook ingress)
+ * POST   /api/hooks/:sessionId/statusline                → 204 (status-line ingress)
+ * POST   /api/hooks/:sessionId/launcher/:event           → 204 (launcher ingress)
+ * ```
+ *
+ * Every refusal is a 4xx carrying an `ErrorResponse` the UI shows verbatim,
+ * including a tracker that cannot be reached. The three ingress routes answer
+ * 404 for an unknown session id and 400 for a body that is not a JSON object.
+ *
+ * WebSocket: `/ws/events` pushes `EventFrame`; `/ws/terminal/:sessionId`
+ * carries pty bytes as binary frames, `TerminalClientFrame` up and
+ * `TerminalServerFrame` down.
+ */
 import type {
   ColumnId,
   Effort,
@@ -127,7 +163,8 @@ export interface NewConnectorRequest {
 }
 
 /**
- * Body of `POST /api/workspaces`.
+ * Body of `POST /api/workspaces`, which answers 201 with the new
+ * `WorkspaceSummary`, 400 with the zod issues, or 409 when the id is taken.
  *
  * Exactly one of `connector` and `newConnector` must be present.
  */
@@ -247,12 +284,13 @@ export interface BoardColumn {
 }
 
 /**
- * The board as `GET /api/workspaces/:id/board` reports it.
+ * The board as `GET /api/workspaces/:id/board` and
+ * `POST /api/workspaces/:id/refresh` report it.
  */
 export interface BoardView {
   /** Id of the workspace this board is the view of. */
   workspaceId: string;
-  /** Name shown in the switcher and the header. */
+  /** Name of the workspace, repeated here so a board needs no config lookup. */
   name: string;
   /** Playbooks offered on this board's cards. */
   playbooks: PlaybookSummary[];
@@ -281,7 +319,8 @@ export interface IssueDetailResponse {
 }
 
 /**
- * Response of `GET /api/workspaces/:id/issues/:key/prefill`.
+ * Response of `GET /api/workspaces/:id/issues/:key/prefill?playbook=<id>`. The
+ * `playbook` query parameter is required; without it the route answers 400.
  */
 export interface PrefillResponse {
   /** Rendered prompt text, editable in the start dialog. */
@@ -299,7 +338,8 @@ export interface PrefillResponse {
 }
 
 /**
- * Body of `POST /api/workspaces/:id/issues/:key/sessions`.
+ * Body of `POST /api/workspaces/:id/issues/:key/sessions`, which answers 201
+ * with the created `SessionRecord`.
  */
 export interface CreateSessionRequest {
   /** Playbook to start. */
@@ -340,6 +380,50 @@ export interface RemoveWorktreeResponse {
   path: string;
   /** Always true; a refusal comes back as an `ErrorResponse` instead. */
   removed: true;
+}
+
+/**
+ * Path segment the status-line payload is posted to under `/api/hooks/:id/`.
+ */
+export const STATUSLINE_INGRESS = 'statusline';
+
+/**
+ * Path segment the launcher signals are posted under: the ingress is
+ * `/api/hooks/:sessionId/launcher/:event`.
+ */
+export const LAUNCHER_INGRESS = 'launcher';
+
+/**
+ * Launcher signals the generated launcher script posts around the CLI process.
+ */
+export const LAUNCHER_EVENT_NAMES = [
+  'bootstrap-start',
+  'bootstrap-failed',
+  'claude-start',
+  'claude-exit',
+] as const;
+
+/**
+ * One launcher signal name.
+ */
+export type LauncherEventName = (typeof LAUNCHER_EVENT_NAMES)[number];
+
+/**
+ * Body of the `claude-start` launcher signal.
+ */
+export interface LauncherStartBody {
+  /** `resume` when the run continues a transcript; absent on a fresh start. */
+  mode?: 'resume' | undefined;
+}
+
+/**
+ * Body of the `claude-exit` and `bootstrap-failed` launcher signals.
+ */
+export interface LauncherExitBody {
+  /** Exit code of the process that ended, when the launcher observed one. */
+  exitCode?: number | undefined;
+  /** Failure text, when the launcher has one to report. */
+  message?: string | undefined;
 }
 
 /**
