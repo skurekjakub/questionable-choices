@@ -48,6 +48,7 @@ export function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecor
     state: 'starting',
     stateSince: '2026-09-09T10:00:00.000Z',
     pending: null,
+    hint: null,
     lastAssistantMessage: null,
     lastExitCode: null,
     staleSince: null,

@@ -330,6 +330,7 @@ describe('card payload', () => {
       lastAssistantMessage: 'I looked at the loader.',
       lastExitCode: null,
       staleSince: null,
+      hint: null,
       cache: null,
       done: false,
       live: true,
@@ -379,13 +380,24 @@ describe('card payload', () => {
     expect(card.sessions[0]?.staleSince).toBe('2026-09-09T12:00:00.000Z');
   });
 
-  it('reports a null snippet when no Stop payload carried one', () => {
-    const card = projectWith({
-      sessions: [makeRecord({ lastAssistantMessage: null })],
-    })
+  it.each([
+    [
+      'carries the summary of the session hint, so a card can say "may need you"',
+      {
+        hint: { summary: 'Claude needs your permission', at: '2026-09-09T12:00:00.000Z' },
+      },
+      'Claude needs your permission',
+    ],
+    ['reports a null hint when no notification is outstanding', { hint: null }, null],
+  ])('%s', (_name, overrides, expected) => {
+    const card = projectWith({ sessions: [makeRecord(overrides)] })
       .columns.flatMap((column) => column.cards)
       .find((entry) => entry.sessions.length > 0) as Card;
-    expect(card.sessions[0]?.lastAssistantMessage).toBeNull();
+
+    expect(card.sessions[0]?.hint).toBe(expected);
+    // The row carries the message, never the record's `{ summary, at }`: a hint
+    // is something to show, not something a countdown ticks from.
+    expect(typeof card.sessions[0]?.hint).toBe(expected === null ? 'object' : 'string');
   });
 
   it('has no worktree path when the workspace knows none', () => {

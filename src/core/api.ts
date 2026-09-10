@@ -20,7 +20,9 @@
  * POST   /api/workspaces/:id/issues/:key/open-editor     → 204; 409 without a checkout
  * POST   /api/sessions/:id/<SessionAction>               → 200 SessionRecord
  * POST   /api/sessions/:id/remove-worktree               → 200 RemoveWorktreeResponse
- * GET    /api/sessions/:id/events                        → 200 SessionEventsResponse (debug)
+ * GET    /api/sessions/:id/events                        → 200 SessionEventsResponse
+ *                                                          404 when no session has the id
+ *                                                          409 when the log exists and cannot be read
  * POST   /api/hooks/:sessionId/:event                    → 204 (hook ingress)
  * POST   /api/hooks/:sessionId/statusline                → 204 (status-line ingress)
  * POST   /api/hooks/:sessionId/launcher/:event           → 204 (launcher ingress)
@@ -311,6 +313,16 @@ export interface CardSession {
    * should mark such a session rather than present its state as a fact.
    */
   staleSince: string | null;
+  /**
+   * What the session's last `Notification` said, or null when none is
+   * outstanding.
+   *
+   * A notification lags the dialog it describes and cannot be placed in a turn,
+   * so it never moves `state` and never sets `needsYou`. A UI may show it as
+   * "this session may need you"; it must not present it as a fact, and the
+   * next lifecycle event clears it.
+   */
+  hint: string | null;
   /** Prompt-cache state the countdown ticks from, or null when unknown. */
   cache: SessionCache | null;
   /** Owner-set "this session did its job" flag. */

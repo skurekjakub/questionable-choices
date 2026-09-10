@@ -211,11 +211,9 @@ interface SessionRecord {
   state: SessionState;
   stateSince: string; // ISO
   pending: { kind: 'permission' | 'question'; summary: string } | null;
-  // The dialog a tool result closed, and whether a tool call is still
-  // outstanding: together they decide whether a lagging Notification describes
-  // a dialog that is gone or one the server was never told about (§5.3).
-  answeredDialog?: { promptId: string | null; summary: string } | null;
-  toolCallOpen?: boolean;
+  // What the last Notification said. It never moves `state` (§5.3); the next
+  // lifecycle event clears it.
+  hint: { summary: string; at: string } | null;
   lastAssistantMessage: string | null; // snippet, from Stop hook when present
   lastExitCode: number | null; // bootstrap's or the CLI's, whichever ended last
   // Server start that found this live record already older than itself, or
@@ -263,57 +261,48 @@ failed          bootstrap or launch failed; tmux window holds the failed shell
 
 Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 
-| Event                                           | From                                    | To                 | Side data                                                                             |
-| ----------------------------------------------- | --------------------------------------- | ------------------ | ------------------------------------------------------------------------------------- |
-| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                                       |
-| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                                       |
-| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended; `lastAssistantMessage` and `lastExitCode` cleared                   |
-| hook SessionStart (source ≠ resume)             | any                                     | unchanged          | record `claudeSessionId`; an empty id never overwrites a known one                    |
-| hook SessionStart (source = resume)             | starting                                | idle               | the only signal that a resumed session is back at the prompt; never notifies          |
-| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                                         |
-| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                                         |
-| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                                       |
-| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                                         |
-| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                         |
-| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict               |
-| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, under the notification guard                  |
-| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message, under the notification guard                  |
-| hook PermissionDenied                           | any live                                | working            | clear pending                                                                         |
-| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl           |
-| action interrupt                                | working, waiting-*                      | idle               | the runner sent Escape; no hook reports an interrupt; `lastAssistantMessage` cleared  |
-| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                               |
-| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                             |
-| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9); never stamps `lastEventAt`, never clears `staleSince` |
+| Event                                           | From                                    | To                 | Side data                                                                                          |
+| ----------------------------------------------- | --------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------- |
+| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                                                    |
+| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                                                    |
+| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended; `pending`, `endedAt`, `lastAssistantMessage` and `lastExitCode` cleared          |
+| hook SessionStart (source ≠ resume)             | any                                     | unchanged          | record `claudeSessionId`; an empty id never overwrites a known one                                 |
+| hook SessionStart (source = resume)             | starting                                | idle               | the only signal that a resumed session is back at the prompt; never notifies                       |
+| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                                                      |
+| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                                                      |
+| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                                                    |
+| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                                                      |
+| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                                      |
+| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict                            |
+| hook Notification (any type)                    | any live not already needs-you          | unchanged          | `hint` = the message, capped at 280 chars, plus the time it arrived; never notifies                |
+| hook Notification (any type)                    | any needs-you, exited, failed           | unchanged          | nothing at all                                                                                     |
+| hook PermissionDenied                           | any live                                | working            | clear pending                                                                                      |
+| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl                        |
+| action interrupt                                | working, waiting-\*                     | idle               | the runner sent Escape; no hook reports an interrupt; `pending` and `lastAssistantMessage` cleared |
+| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                                            |
+| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                                          |
+| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9); never stamps `lastEventAt`, never clears `staleSince`              |
 
-The notification guard, shared by both Notification rows: a Notification only
-ever opens a pending, never redescribes or reclassifies one, so it is dropped
-when the record already needs the owner or already carries a `pending`.
+**A Notification never changes `state`.** It lags the dialog it describes by
+~6 s, carries only `notification_type` and a generic message, and nothing on it
+places it in a turn or a run: a state derived from one can therefore outlive the
+dialog with no later event guaranteed to clear it, which is a card stuck in
+Needs you on a session that is working. Converged, slightly inaccurate reporting
+beats a state machine that is right most of the time and wrong unrecoverably.
 
-Past that, the guard is keyed on the **dialog**, not on the turn. A
-Notification carries only `notification_type` and a generic message and lags
-the dialog by ~6 s, so it can never identify itself; what decides is the
-record's own memory:
+So the record keeps it as a `hint` instead — the message, capped like an
+assistant snippet, and the time it arrived. `CardSession.hint` carries the
+summary alone, for a UI to render as "this session may need you"; `needsYou`,
+the lane and the desktop notification are all untouched by it. A Notification
+that arrives while the record is already in a needs-you state, or is not live,
+does nothing at all. Every accepted lifecycle event other than a status-line
+payload clears the hint, so a hint never outlives the turn it arrived in by
+more than one event.
 
-- `answeredDialog` holds the `prompt_id` and the summary of the dialog a tool
-  result most recently closed. It is written by PostToolUse /
-  PostToolUseFailure / PermissionDenied **only when the record had a `pending`
-  to close** — a result that closed nothing leaves the previous answer
-  standing, or a second tool of the same turn would forget it. Opening a new
-  dialog clears it, and so does every turn boundary (UserPromptSubmit) and
-  every run boundary (`claude-start`, `claude-exit`, SessionEnd), so the guard
-  never depends on prompt ids being unique across runs.
-- `toolCallOpen` is set by PreToolUse and cleared by the tool's result. A
-  dialog can only be on screen while a tool call is waiting.
-
-A Notification is therefore dropped when the record has an answered dialog and
-either the payload carries no `prompt_id` at all (it cannot be placed, and the
-last resort must fail closed), or it names that dialog's turn and no tool call
-is outstanding — which makes it that dialog's own lagging echo. A Notification
-of the same turn **with** a tool call outstanding is admitted: it may describe
-a second dialog whose PermissionRequest hook never reached the server, which is
-exactly the case the Notification is the fallback for, and the one recorded
-session in `test/fixtures/hook-events.jsonl` opens two dialogs in its first
-turn.
+The consequences are stated rather than hidden: a `PermissionRequest` the hook
+transport drops (`curl … || true`) leaves the session `working` with a hint,
+and no card moves to Needs you for it. The events log still holds the
+Notification, and `docs/verification.md` records the limitation.
 
 Unknown events are ignored and logged. Every hook and launcher signal is
 appended to `<dataDir>/sessions/<id>/events.jsonl` (the payload as it arrived,
@@ -380,9 +369,11 @@ the release is what they are pinned to:
 1. Server validates: playbook exists, no live session for (issue, playbook),
    model/effort/permission values are in the allowed sets, and the prompt is a
    non-empty string (400 otherwise). The whole sequence holds the lock of the
-   session name it would take _and_ a per-(repo, issue) checkout lock, so two
-   simultaneous starts cannot both pass the liveness check and a removal of the
-   checkout cannot land in the middle of preparing it.
+   **base** session name — the name a first run of that playbook takes, which is
+   what makes the liveness check safe — _and_ a per-(repo, issue) checkout lock,
+   so two simultaneous starts cannot both pass the liveness check and a removal
+   of the checkout cannot land in the middle of preparing it. A second run takes
+   a suffixed id, whose own lock is held only around the launch.
 2. `Repo.prepare(issue, playbook, hints)` resolves `cwd` and `branch`; the
    server passes `hints.knownBranch` from the newest non-archived record for
    that issue in that repo:
@@ -419,9 +410,10 @@ the release is what they are pinned to:
 5. Reconciler on server boot and every 10 s: for each live record whose
    `stateSince` is older than one interval — a younger one is still in the
    launcher's hands, and a resume kills and recreates the tmux session —
-   `tmux has-session -t <id>`; missing → `exited` (or `failed` if it never
-   reached `starting`). A probe that throws is logged and the record is left
-   alone; a pass that is already running is skipped rather than overlapped.
+   `tmux has-session -t <id>`; missing → `exited`, or `failed` when the record
+   has no run at all, which means the launcher never posted `claude-start`. A
+   probe that throws is logged and the record is left alone; a pass that is
+   already running is skipped rather than overlapped.
 
    The reconciler answers liveness and nothing else. A live record this server
    has never heard from — `lastEventAt`, falling back to `stateSince` for a
@@ -434,11 +426,17 @@ the release is what they are pinned to:
 
    The judgement is on `lastEventAt`, not on `stateSince`: a session that has
    been `working` since before the restart and is still posting hooks is being
-   told about, and `stateSince` only moves when the state changes. The next
-   lifecycle event the reducer accepts clears the marker — a status-line
-   payload is not one, because it carries no state at all — and so does the
-   reconciler when the same pass closes the record, whose state is then the
-   most certain one available and which will receive no further event.
+   told about, and `stateSince` only moves when the state changes. Every
+   lifecycle event the reducer accepts stamps `lastEventAt` and clears the
+   marker, whether or not it changes anything else — a turn's worth of tool
+   results that each reduce to the state the record is already in is still proof
+   the session is alive. A status-line payload is not a lifecycle event, because
+   it carries no state at all, and an event the reducer refuses outright stamps
+   nothing. The reconciler also clears the marker when the same pass closes the
+   record, whose state is then the most certain one available and which will
+   receive no further event. An owner action that moves the record — Resume,
+   Kill, Interrupt — stamps it too, so a session the owner has just relaunched
+   is never badged as unverified.
 
 ## 6. Board projection (`core/projection.ts`)
 
