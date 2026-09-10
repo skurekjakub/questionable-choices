@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { placeIssue, withoutField } from '../../src/web/src/workspace-fields.js';
+import {
+  NEW_CONNECTOR_FIELDS,
+  placeIssue,
+  withoutFields,
+} from '../../src/web/src/workspace-fields.js';
 
 describe('placeIssue', () => {
   it('places every field the add-workspace request names', () => {
@@ -36,7 +40,7 @@ describe('placeIssue', () => {
   });
 });
 
-describe('withoutField', () => {
+describe('withoutFields', () => {
   const issues = [
     { path: 'epic', message: 'epic must be an issue key' },
     { path: 'name', message: 'name must not be empty' },
@@ -44,7 +48,7 @@ describe('withoutField', () => {
   ];
 
   it('retires the problem of the field being edited and no other', () => {
-    expect(withoutField(issues, 'epic').map((issue) => issue.path)).toEqual([
+    expect(withoutFields(issues, ['epic']).map((issue) => issue.path)).toEqual([
       'name',
       'newConnector.site',
     ]);
@@ -52,21 +56,44 @@ describe('withoutField', () => {
 
   it('retires a problem the field owns under a path of its own', () => {
     const indexed = [{ path: 'reviewStatuses[2]', message: 'review status must not be empty' }];
-    expect(withoutField(indexed, 'reviewStatuses')).toEqual([]);
+    expect(withoutFields(indexed, ['reviewStatuses'])).toEqual([]);
     // The workspace id is shown against the name, so editing the name clears it.
-    expect(withoutField([{ path: 'id', message: 'already exists' }], 'name')).toEqual([]);
+    expect(withoutFields([{ path: 'id', message: 'already exists' }], ['name'])).toEqual([]);
   });
 
   it('keeps a problem that names no field, which no edit can answer', () => {
     const unplaced = [{ path: 'jql', message: 'jql must not be empty' }];
-    expect(withoutField(unplaced, 'epic')).toEqual(unplaced);
-    expect(withoutField(unplaced, 'name')).toEqual(unplaced);
+    expect(withoutFields(unplaced, ['epic'])).toEqual(unplaced);
+    expect(withoutFields(unplaced, ['name'])).toEqual(unplaced);
   });
 
   it('leaves the order of what remains alone', () => {
-    expect(withoutField(issues, 'name').map((issue) => issue.path)).toEqual([
+    expect(withoutFields(issues, ['name']).map((issue) => issue.path)).toEqual([
       'epic',
       'newConnector.site',
     ]);
+  });
+
+  it('retires every field it is given at once, not just the first', () => {
+    expect(withoutFields(issues, ['epic', 'name']).map((issue) => issue.path)).toEqual([
+      'newConnector.site',
+    ]);
+  });
+
+  it('retires nothing when given nothing', () => {
+    expect(withoutFields(issues, [])).toEqual(issues);
+  });
+});
+
+describe('NEW_CONNECTOR_FIELDS', () => {
+  it('names every field that leaves the screen when the picker leaves “add a new issue source”', () => {
+    const hidden = [
+      { path: 'newConnector.id', message: 'id must not be empty' },
+      { path: 'newConnector.site', message: 'site must not be empty' },
+      { path: 'newConnector.emailEnv', message: 'emailEnv must not be empty' },
+      { path: 'newConnector.tokenEnv', message: 'tokenEnv must not be empty' },
+      { path: 'epic', message: 'epic must be an issue key' },
+    ];
+    expect(withoutFields(hidden, NEW_CONNECTOR_FIELDS).map((issue) => issue.path)).toEqual(['epic']);
   });
 });

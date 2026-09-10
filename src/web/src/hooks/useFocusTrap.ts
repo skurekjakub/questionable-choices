@@ -70,6 +70,12 @@ export function useFocusTrap<T extends HTMLElement>(onEscape: () => void): RefOb
 
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
+        // An open menu inside the surface owns Escape: it closes the menu and
+        // the surface stays. Deferring has to happen here, because the menu's
+        // own handler is on `document` too and this one captures, so it runs
+        // first and one press would otherwise close both.
+        const target = event.target;
+        if (target instanceof Element && target.closest('[role="menu"]') !== null) return;
         event.preventDefault();
         escape.current();
         return;

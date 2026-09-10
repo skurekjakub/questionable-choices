@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type JSX } from 'react';
+import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import type {
   Card,
   IssueDetailResponse,
@@ -57,25 +57,34 @@ interface DrawerSession {
  * Merges the board's live sessions over the records the detail load returned,
  * so the rows keep ticking while the drawer stays open.
  *
+ * The board's copy of a session replaces the snapshot's wholesale rather than
+ * field by field. Falling through on a null would mean the two fields a
+ * session clears when it stops needing the owner — `pending` and `cache` — are
+ * the two the row keeps showing from the snapshot, so a killed session goes on
+ * advertising a permission request nobody can answer.
+ *
  * @param card - Card the drawer was opened from, carrying the live sessions.
  * @param detail - Loaded issue detail, or null before it arrives.
  * @returns One row per session, newest first.
  */
-function drawerSessions(card: Card, detail: IssueDetailResponse | null): DrawerSession[] {
+export function drawerSessions(card: Card, detail: IssueDetailResponse | null): DrawerSession[] {
   const live = new Map(card.sessions.map((session) => [session.id, session]));
   const rows: DrawerSession[] = [];
   for (const record of detail?.sessions ?? []) {
     const current = live.get(record.id);
     live.delete(record.id);
+    const shown = current ?? record;
     rows.push({
       id: record.id,
       playbookId: record.playbookId,
-      state: current?.state ?? record.state,
-      stateSince: current?.stateSince ?? record.stateSince,
-      pending: current?.pending ?? record.pending,
-      cache: current?.cache ?? record.cache,
+      state: shown.state,
+      stateSince: shown.stateSince,
+      pending: shown.pending,
+      cache: shown.cache,
       attachCommand: attachCommand(record.id, current?.attachCommand),
-      done: current?.done ?? record.done,
+      done: shown.done,
+      // The board carries no Claude session id, so this is the one field the
+      // snapshot answers even while the board still lists the session.
       claudeSessionId: record.claudeSessionId,
     });
   }
@@ -208,21 +217,34 @@ export function IssueDrawer({
   const [busy, setBusy] = useState(false);
   const [forceTarget, setForceTarget] = useState<string | null>(null);
   const drawer = useFocusTrap<HTMLElement>(onClose);
+  const loadToken = useRef(0);
 
+  // Every action reloads, and the drawer can close mid-flight, so a response is
+  // only applied while it is still the newest one asked for: without the token
+  // a slow first read lands on top of the reload that followed it, and a read
+  // that resolves after the close sets state on an unmounted component.
   const load = useCallback(() => {
+    const token = (loadToken.current += 1);
     setLoadFailed(false);
     getIssue(workspaceId, card.issue.key)
       .then((next) => {
+        if (loadToken.current !== token) return;
         setDetail(next);
         setError(null);
       })
       .catch((cause: unknown) => {
+        if (loadToken.current !== token) return;
         setError(errorMessage(cause));
         setLoadFailed(true);
       });
   }, [workspaceId, card.issue.key]);
 
-  useEffect(load, [load]);
+  useEffect(() => {
+    load();
+    return () => {
+      loadToken.current += 1;
+    };
+  }, [load]);
 
   const worktreePath = detail?.worktreePath ?? card.worktreePath;
   const sessions = drawerSessions(card, detail);
@@ -259,8 +281,17 @@ export function IssueDrawer({
   const labelFor = (playbookId: string): string =>
     playbooks.find((playbook) => playbook.id === playbookId)?.label ?? playbookId;
 
+  // The drawer holds no unsaved text, but it does hold an in-flight action; a
+  // stray click on the backdrop must not close it over a running DELETE and
+  // leave the owner with no report of how it went. Escape and Close stay live,
+  // so the drawer is never a trap.
+  const dismissFromBackdrop = (): void => {
+    if (busy) return;
+    onClose();
+  };
+
   return (
-    <div className="scrim" onMouseDown={onClose}>
+    <div className="scrim" onMouseDown={dismissFromBackdrop}>
       <aside
         className="drawer"
         role="dialog"
