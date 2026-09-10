@@ -113,13 +113,18 @@ export function createApp(deps: AppDeps): Hono {
 
   app.onError((cause, c) => {
     if (cause instanceof ConfigError) {
-      const body: ErrorResponse = { error: cause.message, issues: cause.issues };
+      const body: ErrorResponse = {
+        error: cause.message,
+        issues: cause.issues,
+        ...(cause.duplicate ? { reason: 'duplicate-id' as const } : {}),
+      };
       return c.json(body, cause.duplicate ? 409 : 400);
     }
     if (cause instanceof ActionError) {
       const body: ErrorResponse = {
         error: cause.message,
         ...(cause.detail === undefined ? {} : { detail: cause.detail }),
+        ...(cause.reason === undefined ? {} : { reason: cause.reason }),
       };
       return c.json(body, cause.status as ContentfulStatusCode);
     }

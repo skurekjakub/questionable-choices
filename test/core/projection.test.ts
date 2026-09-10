@@ -271,6 +271,7 @@ describe('card payload', () => {
           issueKey: 'DOC-7',
           state: 'waiting-permission',
           pending: { kind: 'permission', summary: 'Bash: ls' },
+          lastAssistantMessage: 'I looked at the loader.',
           branch: 'DOC-7-x',
         }),
       ],
@@ -296,6 +297,7 @@ describe('card payload', () => {
       state: 'waiting-permission',
       stateSince: '2026-09-09T10:00:00.000Z',
       pending: { kind: 'permission', summary: 'Bash: ls' },
+      lastAssistantMessage: 'I looked at the loader.',
       cache: null,
       done: false,
       live: true,
@@ -303,6 +305,34 @@ describe('card payload', () => {
       branch: 'DOC-7-x',
       attachCommand: 'tmux attach -t qc-DOC-7-implement',
     });
+  });
+
+  it('carries the last assistant snippet of an idle session, which has no pending', () => {
+    const view = projectWith({
+      issues: [makeIssue({ key: 'DOC-8' })],
+      sessions: [
+        makeRecord({
+          id: 'qc-DOC-8-implement',
+          issueKey: 'DOC-8',
+          state: 'idle',
+          pending: null,
+          lastAssistantMessage: 'Done: the loader now reads the front matter.',
+        }),
+      ],
+    });
+    const card = view.columns.find((column) => column.id === 'needs-you')?.cards[0] as Card;
+    expect(card.sessions[0]?.lastAssistantMessage).toBe(
+      'Done: the loader now reads the front matter.',
+    );
+  });
+
+  it('reports a null snippet when no Stop payload carried one', () => {
+    const card = projectWith({
+      sessions: [makeRecord({ lastAssistantMessage: null })],
+    })
+      .columns.flatMap((column) => column.cards)
+      .find((entry) => entry.sessions.length > 0) as Card;
+    expect(card.sessions[0]?.lastAssistantMessage).toBeNull();
   });
 
   it('has no worktree path when the workspace knows none', () => {

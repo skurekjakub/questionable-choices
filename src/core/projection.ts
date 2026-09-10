@@ -128,6 +128,7 @@ function toCardSession(record: SessionRecord): CardSession {
     state: record.state,
     stateSince: record.stateSince,
     pending: record.pending,
+    lastAssistantMessage: record.lastAssistantMessage,
     cache: record.cache,
     done: record.done,
     live: isLive(record.state),

@@ -382,9 +382,10 @@ the same sessions.
 
 Card payload: issue (key, summary, type, status, statusCategory, labels, url),
 column, sessions (each: id, playbookId, state, stateSince, pending,
-cache, done), primary playbook for the column (`primaryFor` match; falls back
-to the first playbook), the tmux attach command, and the worktree path when
-known.
+lastAssistantMessage, cache, done, live, needsYou, branch, attachCommand —
+the attach command is per session, not per card), primary playbook for the
+column (`primaryFor` match; falls back to the first playbook), and the worktree
+path when known.
 
 ## 7. Prompts and playbooks
 
@@ -584,13 +585,18 @@ WebSocket:
 WS /ws/events     server → client: { type: 'board', workspaceId, view }   (debounced 250 ms)
                                     { type: 'config', config: PublicConfigResponse }  after a workspace is added or removed
                                     { type: 'session', record }
-WS /ws/terminal/:sessionId           see §8.3
+WS /ws/terminal/:sessionId?cols=&rows=   see §8.3
 ```
 
-Errors: JSON `{ error: string, detail?: string, issues?: [{path, message}] }`
+Errors: JSON
+`{ error: string, detail?: string, issues?: [{path, message}], reason?: ErrorReason }`
 with 4xx for refusals (no live session, no branch found, dirty worktree, an
 issue the tracker would not hand over) so the UI can show them verbatim. `issues` carries the zod problems of a rejected
-workspace request, each path pointing at the field that caused it.
+workspace request, each path pointing at the field that caused it. `reason` is
+the closed set `dirty-worktree | session-live | main-checkout | duplicate-id |
+no-branch | missing-executable | detached-worktree`; it is the only thing a UI
+may branch on, so `error` and `detail` stay free text. A refusal none of those
+names describes carries no `reason`.
 
 ## 12. Web UI
 
@@ -635,7 +641,8 @@ Session view:
   cache countdown; buttons Interrupt · Kill · Resume (when exited) · Back.
 - Right panel: issue summary/description, status chip, labels, Jira link,
   worktree path, Open in VS Code, `tmux attach -t <id>` copy, Remove
-  worktree (with force confirm when refused as dirty).
+  worktree (with force confirm when the refusal carries
+  `reason: 'dirty-worktree'`; the message text is never parsed).
 - When the session needs you the header pill pulses and shows the pending
   summary.
 

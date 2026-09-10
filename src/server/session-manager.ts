@@ -2,10 +2,17 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  DetachedWorktreeError,
+  DirtyWorktreeError,
+  NoBranchError,
+} from '../connectors/repos/git/index.js';
+import { MissingExecutableError } from '../connectors/runners/claude-tmux/index.js';
 import type {
   BoardView,
   CreateSessionRequest,
   CreateWorkspaceRequest,
+  ErrorReason,
   EventFrame,
   IssueDetailResponse,
   PrefillResponse,
@@ -64,6 +71,20 @@ const CONFIG_LOCK_KEY = 'config';
 export const BOARD_DEBOUNCE_MS = 250;
 
 /**
+ * Classifies a failure of `Repo.prepare` into a machine-readable reason.
+ *
+ * @param cause - Whatever `prepare` threw.
+ * @returns The matching `ErrorReason`, or undefined when none describes it.
+ */
+export function checkoutRefusalReason(cause: unknown): ErrorReason | undefined {
+  if (cause instanceof NoBranchError) return 'no-branch';
+  if (cause instanceof DetachedWorktreeError) return 'detached-worktree';
+  if (cause instanceof MissingExecutableError) return 'missing-executable';
+  if (cause instanceof DirtyWorktreeError) return 'dirty-worktree';
+  return undefined;
+}
+
+/**
  * A refusal the API answers with a 4xx and shows to the owner verbatim.
  */
 export class ActionError extends Error {
@@ -71,6 +92,8 @@ export class ActionError extends Error {
   readonly status: number;
   /** Extra context, e.g. git's stderr or the command that failed. */
   readonly detail: string | undefined;
+  /** Machine-readable cause a UI can branch on, when one applies. */
+  readonly reason: ErrorReason | undefined;
 
   /**
    * Builds a refusal.
@@ -78,12 +101,20 @@ export class ActionError extends Error {
    * @param status - HTTP status to answer with.
    * @param message - Message shown to the owner verbatim.
    * @param detail - Extra context, when there is any.
+   * @param reason - Machine-readable cause, when a member of `ErrorReason`
+   *   describes it.
    */
-  constructor(status: number, message: string, detail?: string | undefined) {
+  constructor(
+    status: number,
+    message: string,
+    detail?: string | undefined,
+    reason?: ErrorReason | undefined,
+  ) {
     super(message);
     this.name = 'ActionError';
     this.status = status;
     this.detail = detail;
+    this.reason = reason;
   }
 }
 
@@ -677,7 +708,12 @@ export class SessionManager {
           knownBranch: history[0]?.branch ?? null,
         });
       } catch (cause) {
-        throw new ActionError(409, `cannot prepare a checkout for ${issueKey}`, messageOf(cause));
+        throw new ActionError(
+          409,
+          `cannot prepare a checkout for ${issueKey}`,
+          messageOf(cause),
+          checkoutRefusalReason(cause),
+        );
       }
 
       const startedAt = new Date(this.now()).toISOString();
@@ -890,7 +926,12 @@ export class SessionManager {
     const runtime = this.requireRepo(record.repoId);
     const path = this.store.worktree(record.repoId, record.issueKey)?.path ?? record.cwd;
     if (path === runtime.repoConfig.path) {
-      throw new ActionError(409, `${path} is the repo's main checkout, not a worktree`);
+      throw new ActionError(
+        409,
+        `${path} is the repo's main checkout, not a worktree`,
+        undefined,
+        'main-checkout',
+      );
     }
     const blocking = this.store
       .sessions()
@@ -900,12 +941,18 @@ export class SessionManager {
         409,
         `${blocking.id} is still ${blocking.state} in ${path}`,
         'kill the session before removing its worktree',
+        'session-live',
       );
     }
     try {
       await runtime.repo.removeWorktree(record.issueKey, force);
     } catch (cause) {
-      throw new ActionError(409, `cannot remove ${path}`, messageOf(cause));
+      throw new ActionError(
+        409,
+        `cannot remove ${path}`,
+        messageOf(cause),
+        cause instanceof DirtyWorktreeError ? 'dirty-worktree' : undefined,
+      );
     }
     await this.store.clearWorktree(record.repoId, record.issueKey);
     this.scheduleRepoBoards(record.repoId);

@@ -12,6 +12,12 @@ import type {
   RemoveWorktreeResponse,
 } from '../../src/core/api.js';
 import type { Config, SessionRecord } from '../../src/core/types.js';
+import {
+  DetachedWorktreeError,
+  DirtyWorktreeError,
+  NoBranchError,
+} from '../../src/connectors/repos/git/index.js';
+import { MissingExecutableError } from '../../src/connectors/runners/claude-tmux/index.js';
 import { createApp } from '../../src/server/app.js';
 import { SessionManager } from '../../src/server/session-manager.js';
 import { Store } from '../../src/server/store.js';
@@ -68,6 +74,7 @@ describe('HTTP API', () => {
   let configPath: string;
   let app: Hono;
   let runner: FakeRunner;
+  let repo: FakeRepo;
   let source: FakeIssueSource;
   let manager: SessionManager;
   let editorCalls: Array<{ command: string; args: string[] }>;
@@ -80,7 +87,7 @@ describe('HTTP API', () => {
     await store.load();
     runner = new FakeRunner();
     source = new FakeIssueSource('ws', [makeIssue({ description: 'the full description' })]);
-    const repo = new FakeRepo('app', {
+    repo = new FakeRepo('app', {
       cwd: '/repos/worktrees/DOC-1',
       branch: 'DOC-1-document-the-thing',
       needsBootstrap: false,
@@ -295,6 +302,93 @@ describe('HTTP API', () => {
     await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
     expect((await post(app, '/api/workspaces/ws/issues/DOC-1/open-editor')).status).toBe(204);
     expect(editorCalls).toEqual([{ command: 'code', args: ['/repos/worktrees/DOC-1'] }]);
+  });
+
+  describe('refusal reasons', () => {
+    it('names a duplicate workspace id', async () => {
+      const response = await post(app, '/api/workspaces', {
+        id: 'ws',
+        name: 'Again',
+        epic: 'DOC-2',
+        repo: 'app',
+        connector: 'tracker',
+      });
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBe('duplicate-id');
+    });
+
+    it('leaves a schema refusal without a reason', async () => {
+      const response = await post(app, '/api/workspaces', {
+        name: 'Ghost repo',
+        epic: 'DOC-2',
+        repo: 'ghost',
+        connector: 'tracker',
+      });
+
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as ErrorResponse).reason).toBeUndefined();
+    });
+
+    it('names a dirty worktree so the UI can offer the force removal', async () => {
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+      await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+      repo.removeError = new DirtyWorktreeError('/repos/worktrees/DOC-1', '?? scratch.txt');
+
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', {});
+
+      expect(response.status).toBe(409);
+      const body = (await response.json()) as ErrorResponse;
+      expect(body.reason).toBe('dirty-worktree');
+      expect(body.detail).toContain('scratch.txt');
+    });
+
+    it('leaves a removal that git refused for another cause without a reason', async () => {
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+      await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+      repo.removeError = new Error('git worktree remove exited 128');
+
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', {});
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBeUndefined();
+    });
+
+    it('names a live session still holding the checkout', async () => {
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', {});
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBe('session-live');
+    });
+
+    it('names the branch a checkout could not be prepared from', async () => {
+      repo.prepareError = new NoBranchError('DOC-1', ['origin/DOC-1-*']);
+
+      const response = await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBe('no-branch');
+    });
+
+    it('names a detached worktree a checkout could not be prepared from', async () => {
+      repo.prepareError = new DetachedWorktreeError('DOC-1', '/repos/worktrees/DOC-1');
+
+      const response = await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBe('detached-worktree');
+    });
+
+    it('names a missing CLI a checkout could not be prepared for', async () => {
+      repo.prepareError = new MissingExecutableError('claude');
+
+      const response = await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBe('missing-executable');
+    });
   });
 
   it('answers a JSON 404 for an unrouted API path', async () => {
