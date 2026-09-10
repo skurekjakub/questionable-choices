@@ -122,6 +122,17 @@ describe('the shipped example', () => {
     expect(workspace?.pollSeconds).toBe(120);
   });
 
+  it('tells the implement playbook to open the "How to test" comment with the PR link', () => {
+    const config = parseConfig(exampleDocument(), { home: HOME });
+    const implement = config.repos['docs-workspace']?.playbooks.find(
+      (playbook) => playbook.id === 'implement',
+    );
+    expect(implement?.promptTemplate).toContain('titled "How to test" that opens with the PR link');
+    expect(implement?.promptTemplate).toContain(
+      'the "How to test" comment, with the PR link, is on {{key}}',
+    );
+  });
+
   it('carries the checklist template of the workspace that names one', () => {
     const config = parseConfig(exampleDocument(), { home: HOME });
     expect(config.workspaces['docs-nextjs']?.checklist).toHaveLength(3);

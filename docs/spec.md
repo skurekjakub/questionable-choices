@@ -648,8 +648,9 @@ effort and permission-mode selects prefilled from playbook defaults, then
 runner defaults. The record stores the final text.
 
 The two shipped playbooks are in `config.example.json`. The implement
-template carries the "How to test" Jira-comment instruction in the body and a
-one-line reminder at the end; the test template names the branch and the
+template carries the "How to test" Jira-comment instruction in the body, the
+comment opening with the PR link, and a one-line reminder at the end; the test
+template names the branch and the
 worktree and tells the `test-issue` skill to verify there, not on main
 (that skill accepts a named branch and skips its main search when given one).
 
