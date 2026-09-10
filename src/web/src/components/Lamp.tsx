@@ -92,3 +92,33 @@ export function StaleMarker(): JSX.Element {
     <span className="session-stale" role="img" aria-label={STALE_SENTENCE} title={STALE_SENTENCE} />
   );
 }
+
+/**
+ * Words the hint marker stands for.
+ *
+ * @param summary - What the notification said.
+ * @returns The sentence carried by the marker's accessible name and tooltip.
+ */
+export function hintSentence(summary: string): string {
+  return `This session may need you: ${summary}`;
+}
+
+/**
+ * Draws the marker for a session whose last notification suggests it is
+ * waiting on the owner.
+ *
+ * A notification lags the dialog it describes and cannot be placed in a turn,
+ * so what it says is a hint and not a state: the marker never moves the session
+ * between columns and never raises a desktop notification. It is a marker
+ * rather than a word for the same reason the unverified marker is — the row it
+ * sits in has no room for the sentence, which the accessible name and the
+ * tooltip carry instead.
+ *
+ * @param props - Component props.
+ * @param props.summary - What the notification said.
+ * @returns The marker element.
+ */
+export function HintMarker({ summary }: { summary: string }): JSX.Element {
+  const sentence = hintSentence(summary);
+  return <span className="session-hint" role="img" aria-label={sentence} title={sentence} />;
+}
