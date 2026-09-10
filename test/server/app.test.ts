@@ -240,7 +240,11 @@ describe('HTTP API', () => {
 
   it('requires the playbook query parameter on prefill', async () => {
     const response = await app.request('/api/workspaces/ws/issues/DOC-1/prefill');
+
     expect(response.status).toBe(400);
+    // A missing playbook 400s further down too, so the message is what says
+    // which refusal answered.
+    expect(((await response.json()) as ErrorResponse).error).toContain("'playbook'");
   });
 
   it('creates a session with 201 and refuses a duplicate with 409', async () => {
@@ -256,40 +260,73 @@ describe('HTTP API', () => {
     expect(body.error).toContain('DOC-1');
   });
 
-  it('runs every session action', async () => {
-    await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
-    await post(app, '/api/hooks/qc-DOC-1-implement/UserPromptSubmit', { prompt: 'go' });
-    expect(await stateOf(app, 'qc-DOC-1-implement')).toBe('working');
+  describe('session actions', () => {
+    beforeEach(async () => {
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+    });
 
-    const interrupted = await post(app, `/api/sessions/qc-DOC-1-implement/interrupt`);
-    expect(interrupted.status).toBe(200);
-    expect(((await interrupted.json()) as SessionRecord).state).toBe('idle');
-    expect(runner.interrupted).toEqual(['qc-DOC-1-implement']);
+    it('interrupts a working session back to idle', async () => {
+      await post(app, '/api/hooks/qc-DOC-1-implement/UserPromptSubmit', { prompt: 'go' });
+      expect(await stateOf(app, 'qc-DOC-1-implement')).toBe('working');
 
-    const marked = (await (
-      await post(app, '/api/sessions/qc-DOC-1-implement/mark-done')
-    ).json()) as SessionRecord;
-    expect(marked.done).toBe(true);
-    const unmarked = (await (
-      await post(app, '/api/sessions/qc-DOC-1-implement/unmark-done')
-    ).json()) as SessionRecord;
-    expect(unmarked.done).toBe(false);
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/interrupt');
 
-    expect((await post(app, '/api/sessions/qc-DOC-1-implement/resume')).status).toBe(409);
-    const killed = (await (
-      await post(app, '/api/sessions/qc-DOC-1-implement/kill')
-    ).json()) as SessionRecord;
-    expect(killed.state).toBe('exited');
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as SessionRecord).state).toBe('idle');
+      expect(runner.interrupted).toEqual(['qc-DOC-1-implement']);
+    });
 
-    const archived = (await (
-      await post(app, '/api/sessions/qc-DOC-1-implement/archive')
-    ).json()) as SessionRecord;
-    expect(archived.archived).toBe(true);
+    it('marks a session done and back', async () => {
+      const marked = (await (
+        await post(app, '/api/sessions/qc-DOC-1-implement/mark-done')
+      ).json()) as SessionRecord;
+      expect(marked.done).toBe(true);
 
-    const removed = (await (
-      await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', { force: true })
-    ).json()) as RemoveWorktreeResponse;
-    expect(removed).toEqual({ path: '/repos/worktrees/DOC-1', removed: true });
+      const unmarked = (await (
+        await post(app, '/api/sessions/qc-DOC-1-implement/unmark-done')
+      ).json()) as SessionRecord;
+      expect(unmarked.done).toBe(false);
+    });
+
+    it('refuses to resume a session that never reported a Claude session id', async () => {
+      expect((await post(app, '/api/sessions/qc-DOC-1-implement/resume')).status).toBe(409);
+    });
+
+    it('kills a session', async () => {
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as SessionRecord).state).toBe('exited');
+    });
+
+    it('archives an exited session', async () => {
+      await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+
+      const archived = (await (
+        await post(app, '/api/sessions/qc-DOC-1-implement/archive')
+      ).json()) as SessionRecord;
+
+      expect(archived.archived).toBe(true);
+    });
+
+    it('removes the worktree, forcing only when the body says so', async () => {
+      await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+
+      const removed = (await (
+        await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', {})
+      ).json()) as RemoveWorktreeResponse;
+
+      expect(removed).toEqual({ path: '/repos/worktrees/DOC-1', removed: true });
+      expect(repo.removed).toEqual([{ issueKey: 'DOC-1', force: false }]);
+    });
+
+    it('passes force through when the body asks for it', async () => {
+      await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+
+      await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', { force: true });
+
+      expect(repo.removed).toEqual([{ issueKey: 'DOC-1', force: true }]);
+    });
   });
 
   it('sets issue flags and reports them back', async () => {
