@@ -473,7 +473,6 @@ function buildBoard(
   });
   return {
     workspaceId,
-    name,
     playbooks: [
       {
         id: 'implement',

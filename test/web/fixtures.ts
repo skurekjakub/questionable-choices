@@ -88,7 +88,6 @@ export function boardView(
 ): BoardView {
   return {
     workspaceId,
-    name: workspaceId,
     playbooks: [
       {
         id: 'implement',
