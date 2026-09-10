@@ -41,7 +41,7 @@
           "description": "Start the repo's own feature / refactor / bugfix workflow on a fresh worktree.",
           "isolation": "worktree",
           "primaryFor": ["backlog", "needs-you", "working"],
-          "promptTemplate": "Work on Jira issue {{key}} — {{summary}}\nType: {{type}} · Status: {{status}} · Labels: {{labels}}\n{{url}}\n\nDescription:\n{{description}}\n\nInstructions:\n- Fetch the issue live with the jira MCP before starting; the text above may be stale.\n- Pick the workflow per AGENTS.md (feature-development, codebase-refactoring or project-bugfixing). Ask me before designing.\n- You are on branch {{branch}} in worktree {{worktree}}. Commit there and open the PR from it.\n- When the PR is open, post a comment on {{key}} through the jira MCP titled \"How to test\": preconditions, numbered steps, expected result, pages and URLs touched. A later test session reads that comment as its test plan.\n\nReminder: the run is not finished until the \"How to test\" comment is on {{key}}."
+          "promptTemplate": "Work on Jira issue {{key}} — {{summary}}\nType: {{type}} · Status: {{status}} · Labels: {{labels}}\n{{url}}\n\nDescription:\n{{description}}\n\nInstructions:\n- Fetch the issue live with the jira MCP before starting; the text above may be stale.\n- Pick the workflow per AGENTS.md (feature-development, codebase-refactoring or project-bugfixing). Ask me before designing.\n- You are on {{branch}}, in the worktree at {{worktree}}. Commit there and open the PR from it.\n- When the PR is open, post a comment on {{key}} through the jira MCP titled \"How to test\": preconditions, numbered steps, expected result, pages and URLs touched. A later test session reads that comment as its test plan.\n\nReminder: the run is not finished until the \"How to test\" comment is on {{key}}."
         },
         {
           "id": "test",
@@ -49,7 +49,7 @@
           "description": "QA-verify the issue's branch with the repo's test-issue skill.",
           "isolation": "issue-worktree",
           "primaryFor": ["review"],
-          "promptTemplate": "Use the test-issue skill to verify {{key}} — {{summary}}\n{{url}}\n\nVerify on the current branch {{branch}} in this worktree ({{worktree}}), not on main: the change is not merged yet. Use the \"How to test\" comment on {{key}} as the test plan when one exists, and post the result comment on the issue as the skill prescribes."
+          "promptTemplate": "Use the test-issue skill to verify {{key}} — {{summary}}\n{{url}}\n\nVerify on {{branch}}, in the worktree at {{worktree}}, not on main: the change is not merged yet. Use the \"How to test\" comment on {{key}} as the test plan when one exists, and post the result comment on the issue as the skill prescribes."
         }
       ]
     }

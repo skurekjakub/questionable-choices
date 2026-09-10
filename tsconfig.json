@@ -16,5 +16,5 @@
     "noEmit": true
   },
   "include": ["src/core", "src/connectors", "src/server", "test"],
-  "exclude": ["src/web"]
+  "exclude": ["src/web", "test/web"]
 }

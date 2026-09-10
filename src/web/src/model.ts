@@ -68,26 +68,9 @@ export type BoardFrame = Extract<EventFrame, { type: 'board' }>;
  */
 export type SessionFrame = Extract<EventFrame, { type: 'session' }>;
 
-/**
- * Lifecycle states in which a session is blocked on the owner.
- */
-export const NEEDS_YOU_STATES: readonly SessionState[] = [
-  'waiting-permission',
-  'waiting-question',
-  'idle',
-];
-
-/**
- * Lifecycle states in which a session still counts as running.
- */
-export const LIVE_STATES: readonly SessionState[] = [
-  'bootstrapping',
-  'starting',
-  'working',
-  'waiting-permission',
-  'waiting-question',
-  'idle',
-];
+// Re-exported rather than restated: a state added to the machine and forgotten
+// here would silently change which sessions the web calls live.
+export { LIVE_STATES, NEEDS_YOU_STATES } from '../../core/api.js';
 
 /**
  * Words shown next to a session's state lamp.

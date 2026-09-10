@@ -12,6 +12,12 @@ import type {
   RemoveWorktreeResponse,
 } from '../../src/core/api.js';
 import type { Config, SessionRecord } from '../../src/core/types.js';
+import {
+  DetachedWorktreeError,
+  DirtyWorktreeError,
+  NoBranchError,
+} from '../../src/connectors/repos/git/index.js';
+import { MissingExecutableError } from '../../src/connectors/runners/claude-tmux/index.js';
 import { createApp } from '../../src/server/app.js';
 import { SessionManager } from '../../src/server/session-manager.js';
 import { Store } from '../../src/server/store.js';
@@ -68,6 +74,7 @@ describe('HTTP API', () => {
   let configPath: string;
   let app: Hono;
   let runner: FakeRunner;
+  let repo: FakeRepo;
   let source: FakeIssueSource;
   let manager: SessionManager;
   let editorCalls: Array<{ command: string; args: string[] }>;
@@ -80,7 +87,7 @@ describe('HTTP API', () => {
     await store.load();
     runner = new FakeRunner();
     source = new FakeIssueSource('ws', [makeIssue({ description: 'the full description' })]);
-    const repo = new FakeRepo('app', {
+    repo = new FakeRepo('app', {
       cwd: '/repos/worktrees/DOC-1',
       branch: 'DOC-1-document-the-thing',
       needsBootstrap: false,
@@ -233,7 +240,11 @@ describe('HTTP API', () => {
 
   it('requires the playbook query parameter on prefill', async () => {
     const response = await app.request('/api/workspaces/ws/issues/DOC-1/prefill');
+
     expect(response.status).toBe(400);
+    // A missing playbook 400s further down too, so the message is what says
+    // which refusal answered.
+    expect(((await response.json()) as ErrorResponse).error).toContain("'playbook'");
   });
 
   it('creates a session with 201 and refuses a duplicate with 409', async () => {
@@ -249,40 +260,73 @@ describe('HTTP API', () => {
     expect(body.error).toContain('DOC-1');
   });
 
-  it('runs every session action', async () => {
-    await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
-    await post(app, '/api/hooks/qc-DOC-1-implement/UserPromptSubmit', { prompt: 'go' });
-    expect(await stateOf(app, 'qc-DOC-1-implement')).toBe('working');
+  describe('session actions', () => {
+    beforeEach(async () => {
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+    });
 
-    const interrupted = await post(app, `/api/sessions/qc-DOC-1-implement/interrupt`);
-    expect(interrupted.status).toBe(200);
-    expect(((await interrupted.json()) as SessionRecord).state).toBe('idle');
-    expect(runner.interrupted).toEqual(['qc-DOC-1-implement']);
+    it('interrupts a working session back to idle', async () => {
+      await post(app, '/api/hooks/qc-DOC-1-implement/UserPromptSubmit', { prompt: 'go' });
+      expect(await stateOf(app, 'qc-DOC-1-implement')).toBe('working');
 
-    const marked = (await (
-      await post(app, '/api/sessions/qc-DOC-1-implement/mark-done')
-    ).json()) as SessionRecord;
-    expect(marked.done).toBe(true);
-    const unmarked = (await (
-      await post(app, '/api/sessions/qc-DOC-1-implement/unmark-done')
-    ).json()) as SessionRecord;
-    expect(unmarked.done).toBe(false);
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/interrupt');
 
-    expect((await post(app, '/api/sessions/qc-DOC-1-implement/resume')).status).toBe(409);
-    const killed = (await (
-      await post(app, '/api/sessions/qc-DOC-1-implement/kill')
-    ).json()) as SessionRecord;
-    expect(killed.state).toBe('exited');
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as SessionRecord).state).toBe('idle');
+      expect(runner.interrupted).toEqual(['qc-DOC-1-implement']);
+    });
 
-    const archived = (await (
-      await post(app, '/api/sessions/qc-DOC-1-implement/archive')
-    ).json()) as SessionRecord;
-    expect(archived.archived).toBe(true);
+    it('marks a session done and back', async () => {
+      const marked = (await (
+        await post(app, '/api/sessions/qc-DOC-1-implement/mark-done')
+      ).json()) as SessionRecord;
+      expect(marked.done).toBe(true);
 
-    const removed = (await (
-      await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', { force: true })
-    ).json()) as RemoveWorktreeResponse;
-    expect(removed).toEqual({ path: '/repos/worktrees/DOC-1', removed: true });
+      const unmarked = (await (
+        await post(app, '/api/sessions/qc-DOC-1-implement/unmark-done')
+      ).json()) as SessionRecord;
+      expect(unmarked.done).toBe(false);
+    });
+
+    it('refuses to resume a session that never reported a Claude session id', async () => {
+      expect((await post(app, '/api/sessions/qc-DOC-1-implement/resume')).status).toBe(409);
+    });
+
+    it('kills a session', async () => {
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as SessionRecord).state).toBe('exited');
+    });
+
+    it('archives an exited session', async () => {
+      await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+
+      const archived = (await (
+        await post(app, '/api/sessions/qc-DOC-1-implement/archive')
+      ).json()) as SessionRecord;
+
+      expect(archived.archived).toBe(true);
+    });
+
+    it('removes the worktree, forcing only when the body says so', async () => {
+      await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+
+      const removed = (await (
+        await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', {})
+      ).json()) as RemoveWorktreeResponse;
+
+      expect(removed).toEqual({ path: '/repos/worktrees/DOC-1', removed: true });
+      expect(repo.removed).toEqual([{ issueKey: 'DOC-1', force: false }]);
+    });
+
+    it('passes force through when the body asks for it', async () => {
+      await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+
+      await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', { force: true });
+
+      expect(repo.removed).toEqual([{ issueKey: 'DOC-1', force: true }]);
+    });
   });
 
   it('sets issue flags and reports them back', async () => {
@@ -297,6 +341,93 @@ describe('HTTP API', () => {
     expect(editorCalls).toEqual([{ command: 'code', args: ['/repos/worktrees/DOC-1'] }]);
   });
 
+  describe('refusal reasons', () => {
+    it('names a duplicate workspace id', async () => {
+      const response = await post(app, '/api/workspaces', {
+        id: 'ws',
+        name: 'Again',
+        epic: 'DOC-2',
+        repo: 'app',
+        connector: 'tracker',
+      });
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBe('duplicate-id');
+    });
+
+    it('leaves a schema refusal without a reason', async () => {
+      const response = await post(app, '/api/workspaces', {
+        name: 'Ghost repo',
+        epic: 'DOC-2',
+        repo: 'ghost',
+        connector: 'tracker',
+      });
+
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as ErrorResponse).reason).toBeUndefined();
+    });
+
+    it('names a dirty worktree so the UI can offer the force removal', async () => {
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+      await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+      repo.removeError = new DirtyWorktreeError('/repos/worktrees/DOC-1', '?? scratch.txt');
+
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', {});
+
+      expect(response.status).toBe(409);
+      const body = (await response.json()) as ErrorResponse;
+      expect(body.reason).toBe('dirty-worktree');
+      expect(body.detail).toContain('scratch.txt');
+    });
+
+    it('leaves a removal that git refused for another cause without a reason', async () => {
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+      await post(app, '/api/sessions/qc-DOC-1-implement/kill');
+      repo.removeError = new Error('git worktree remove exited 128');
+
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', {});
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBeUndefined();
+    });
+
+    it('names a live session still holding the checkout', async () => {
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', {});
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBe('session-live');
+    });
+
+    it('names the branch a checkout could not be prepared from', async () => {
+      repo.prepareError = new NoBranchError('DOC-1', ['origin/DOC-1-*']);
+
+      const response = await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBe('no-branch');
+    });
+
+    it('names a detached worktree a checkout could not be prepared from', async () => {
+      repo.prepareError = new DetachedWorktreeError('DOC-1', '/repos/worktrees/DOC-1');
+
+      const response = await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBe('detached-worktree');
+    });
+
+    it('names a missing CLI a checkout could not be prepared for', async () => {
+      repo.prepareError = new MissingExecutableError('claude');
+
+      const response = await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).reason).toBe('missing-executable');
+    });
+  });
+
   it('answers a JSON 404 for an unrouted API path', async () => {
     const response = await app.request('/api/nothing');
     expect(response.status).toBe(404);
@@ -308,7 +439,9 @@ describe('HTTP API', () => {
 
     beforeEach(async () => {
       const webRoot = join(dir, 'web');
-      await mkdir(webRoot, { recursive: true });
+      // `assets/` is what tells a built SPA from the Vite source tree, which
+      // also has an index.html.
+      await mkdir(join(webRoot, 'assets'), { recursive: true });
       await writeFile(join(webRoot, 'index.html'), '<!doctype html>shell', 'utf8');
       await writeFile(join(webRoot, 'app.js'), 'console.log(1);', 'utf8');
       spa = createApp({ manager, logger: new RecordingLogger(), webRoot });
@@ -335,6 +468,52 @@ describe('HTTP API', () => {
       const deep = await spa.request('/session/qc-DOC-1-implement');
       expect(deep.status).toBe(200);
       expect(await deep.text()).toContain('shell');
+    });
+
+    it.each(['/api', '/ws'])('answers a JSON 404 for the bare %s prefix', async (path) => {
+      const response = await spa.request(path);
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get('content-type')).toContain('application/json');
+      expect(((await response.json()) as ErrorResponse).error).toContain(path);
+    });
+
+    it('answers the JSON 404 even when a real file shadows an API path', async () => {
+      // The asset handler matches every path, so its own guard is the only
+      // thing between a stray file and an API route.
+      await mkdir(join(dir, 'web', 'api'), { recursive: true });
+      await writeFile(join(dir, 'web', 'api', 'nothing'), 'gotcha', 'utf8');
+
+      const response = await spa.request('/api/nothing');
+
+      expect(response.status).toBe(404);
+      expect(((await response.json()) as ErrorResponse).error).toContain('/api/nothing');
+    });
+  });
+
+  describe('with no built SPA', () => {
+    it('says the SPA is not built rather than serving the Vite source tree', async () => {
+      // Under `tsx src/server/main.ts` the web root resolves to `src/web`,
+      // which has an index.html that only a dev server can load.
+      const sourceTree = join(dir, 'src-web');
+      await mkdir(sourceTree, { recursive: true });
+      await writeFile(join(sourceTree, 'index.html'), '<script src="/src/main.tsx">', 'utf8');
+      const dev = createApp({ manager, logger: new RecordingLogger(), webRoot: sourceTree });
+
+      const response = await dev.request('/');
+
+      expect(response.status).toBe(503);
+      expect(await response.text()).toContain('npm run build:web');
+    });
+
+    it('keeps serving the API', async () => {
+      const dev = createApp({
+        manager,
+        logger: new RecordingLogger(),
+        webRoot: join(dir, 'nothing-here'),
+      });
+
+      expect((await dev.request('/api/workspaces/ws/board')).status).toBe(200);
     });
   });
 });

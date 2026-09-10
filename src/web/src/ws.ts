@@ -96,6 +96,14 @@ function announceConnected(next: boolean): void {
  */
 function dispatch(frame: EventFrame): void {
   if (frame.type === 'board') latestBoards.set(frame.workspaceId, frame);
+  if (frame.type === 'config') {
+    // A removed workspace's last board would otherwise be replayed to every
+    // later subscriber for the life of the tab.
+    const known = new Set(frame.config.workspaces.map((workspace) => workspace.id));
+    for (const workspaceId of [...latestBoards.keys()]) {
+      if (!known.has(workspaceId)) latestBoards.delete(workspaceId);
+    }
+  }
   for (const subscriber of [...subscribers]) subscriber.onFrame(frame);
 }
 
@@ -128,6 +136,9 @@ function open(): void {
     socket = null;
     announceConnected(false);
     if (subscribers.size === 0) return;
+    // A close during a pending backoff would otherwise orphan the handle it
+    // overwrites, and the orphan would open a second socket.
+    if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
     reconnectTimer = window.setTimeout(() => {
       reconnectTimer = undefined;
       open();

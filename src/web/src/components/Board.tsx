@@ -162,7 +162,17 @@ export function Board({
         <p className="empty">Loading the board.</p>
       ) : (
         <>
-          <div className="columns" ref={columns} onScroll={onColumnsScroll}>
+          {/* A lane holding only "Nothing here." has nothing focusable in it, so
+              without a tab stop on the strip itself Tab skips the lane — and the
+              strip scrolls, which a keyboard alone could otherwise not do. */}
+          <div
+            className="columns"
+            role="group"
+            aria-label="Board lanes"
+            tabIndex={0}
+            ref={columns}
+            onScroll={onColumnsScroll}
+          >
             {board.columns.map((column) => (
               <Column
                 key={column.id}
@@ -173,7 +183,7 @@ export function Board({
               />
             ))}
           </div>
-          <p className="columns-indicator">
+          <p className="columns-indicator" role="status">
             <span className="columns-dots" aria-hidden="true">
               {board.columns.map((column, index) => (
                 <span key={column.id} data-current={index === visibleColumn} />

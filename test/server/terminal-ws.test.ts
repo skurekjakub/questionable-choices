@@ -9,6 +9,8 @@ import { createApp } from '../../src/server/app.js';
 import { SessionManager } from '../../src/server/session-manager.js';
 import { Store } from '../../src/server/store.js';
 import {
+  DEFAULT_COLS,
+  DEFAULT_ROWS,
   TERMINAL_BUFFER_LIMIT_BYTES,
   type UpgradeWebSocketFn,
 } from '../../src/server/terminal-ws.js';
@@ -224,20 +226,80 @@ describe('WebSocket routes', () => {
       expect(terminal.resizes.at(-1)).toEqual({ cols: 80, rows: 24 });
     });
 
-    it('ignores a text frame that is not a resize', async () => {
+    it.each([
+      ['unparseable text', 'not json'],
+      ['a resize with no usable size', JSON.stringify({ type: 'resize', cols: 0, rows: 0 })],
+      ['a well-formed frame of another type', JSON.stringify({ type: 'data', cols: 10, rows: 10 })],
+    ])('ignores %s', async (_name, data) => {
       const socket = await open(`/ws/terminal/${SESSION_ID}`);
       const terminal = runner.terminals[0] as FakeTerminal;
       const before = terminal.resizes.length;
 
-      handlers.onMessage?.(new MessageEvent('message', { data: 'not json' }), socket.asContext());
-      handlers.onMessage?.(
-        new MessageEvent('message', { data: JSON.stringify({ type: 'resize', cols: 0, rows: 0 }) }),
-        socket.asContext(),
-      );
+      handlers.onMessage?.(new MessageEvent('message', { data }), socket.asContext());
       await flush();
 
       expect(terminal.resizes).toHaveLength(before);
       expect(terminal.writes).toEqual([]);
+    });
+
+    it.each([
+      ['a size that is not a number', 'cols=abc&rows=abc'],
+      ['a size of zero', 'cols=0&rows=0'],
+      ['a size past the ceiling', 'cols=5000&rows=5000'],
+      ['no size at all', ''],
+    ])('falls back to the default pty size for %s', async (_name, query) => {
+      // A NaN column count reaches node-pty, which is not where a bad query
+      // string should be discovered.
+      await open(`/ws/terminal/${SESSION_ID}${query === '' ? '' : `?${query}`}`);
+
+      expect((runner.terminals[0] as FakeTerminal).resizes[0]).toEqual({
+        cols: DEFAULT_COLS,
+        rows: DEFAULT_ROWS,
+      });
+    });
+
+    it('disposes a pty whose viewer left before the attach finished', async () => {
+      // Without this a fast open/close leaks one pty per attempt, and nothing
+      // ever detaches it.
+      await app.request(`/ws/terminal/${SESSION_ID}`);
+      const socket = new FakeSocket();
+      handlers.onOpen?.(new Event('open'), socket.asContext());
+      handlers.onClose?.(new CloseEvent('close'), socket.asContext());
+      await flush();
+
+      expect((runner.terminals[0] as FakeTerminal).disposed).toBe(true);
+    });
+
+    it('writes nothing to a socket that is already closed', async () => {
+      const socket = await open(`/ws/terminal/${SESSION_ID}`);
+      const terminal = runner.terminals[0] as FakeTerminal;
+      socket.readyState = 3;
+
+      terminal.emitExit(0);
+
+      expect(socket.texts).toEqual([]);
+    });
+
+    it('keeps accepting input after one frame failed to be read', async () => {
+      // The queue is one promise chain; a rejected link would make every later
+      // keystroke's continuation skip, deafening the socket for good.
+      const socket = await open(`/ws/terminal/${SESSION_ID}`);
+      const terminal = runner.terminals[0] as FakeTerminal;
+      const detached = {
+        arrayBuffer: () => Promise.reject(new Error('Blob is detached')),
+      } as unknown as Blob;
+      Object.setPrototypeOf(detached, Blob.prototype);
+
+      handlers.onMessage?.(new MessageEvent('message', { data: detached }), socket.asContext());
+      await flush();
+      handlers.onMessage?.(
+        new MessageEvent('message', { data: new TextEncoder().encode('ls\r').buffer }),
+        socket.asContext(),
+      );
+      await flush();
+
+      expect(terminal.writes).toEqual(['ls\r']);
+      expect(logger.lines.join('\n')).toContain('dropped a frame');
     });
 
     it('drops pty output while the viewer is not reading it', async () => {

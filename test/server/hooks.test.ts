@@ -174,6 +174,36 @@ describe('hook ingress', () => {
     expect(store.session(SESSION_ID)?.state).toBe('starting');
   });
 
+  it('refuses a declared length over the cap without reading the body', async () => {
+    // The declared length is the only cap that bites before the body is in the
+    // heap, so it has to be exercised on its own.
+    const response = await app.request(`/api/hooks/${SESSION_ID}/Stop`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(MAX_JSON_BODY_BYTES + 1),
+      },
+      body: '{}',
+    });
+
+    expect(response.status).toBe(400);
+    expect(store.session(SESSION_ID)?.state).toBe('starting');
+  });
+
+  it.each(['[1,2]', '"text"', '42', 'null'])(
+    'refuses the JSON body %s, which is not an object the reducer can read',
+    async (body) => {
+      const response = await app.request(`/api/hooks/${SESSION_ID}/Stop`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+
+      expect(response.status).toBe(400);
+      expect(store.session(SESSION_ID)?.state).toBe('starting');
+    },
+  );
+
   it('ignores an unsubscribed hook name with a 204 and a log line', async () => {
     const response = await post(app, `/api/hooks/${SESSION_ID}/PreCompact`, {});
     expect(response.status).toBe(204);
@@ -195,6 +225,19 @@ describe('hook ingress', () => {
     const record = store.session(SESSION_ID);
     expect(record?.state).toBe('exited');
     expect(record?.runs[0]?.exitCode).toBe(2);
+  });
+
+  it('records a resumed run as a resume, the way the generated launcher posts it', async () => {
+    await post(app, `/api/hooks/${SESSION_ID}/launcher/claude-start`, { mode: 'resume' });
+
+    expect(store.session(SESSION_ID)?.runs.at(-1)?.kind).toBe('resume');
+  });
+
+  it('reads an exit code a shell reported as a string', async () => {
+    await post(app, `/api/hooks/${SESSION_ID}/launcher/claude-start`, {});
+    await post(app, `/api/hooks/${SESSION_ID}/launcher/claude-exit`, { exitCode: '2' });
+
+    expect(store.session(SESSION_ID)?.runs[0]?.exitCode).toBe(2);
   });
 
   it('marks a failed bootstrap as failed', async () => {

@@ -56,6 +56,14 @@ describe('buildJql', () => {
     expect(buildJql({ epic: 'DOC 1', jql: undefined })).toContain('parent = "DOC 1" AND');
   });
 
+  it('leaves a bare numeric epic id unquoted, which JQL resolves as an id', () => {
+    // A quoted operand is matched as an issue key first, and a numeric id has
+    // none, so quoting one changes which issues the board lists.
+    expect(buildJql({ epic: '12345', jql: undefined })).toBe(
+      'parent = 12345 AND statusCategory != Done ORDER BY Rank ASC',
+    );
+  });
+
   it('lets a raw jql replace the whole query', () => {
     expect(buildJql({ epic: 'DOC-3807', jql: 'labels = docs ORDER BY created' })).toBe(
       'labels = docs ORDER BY created',
@@ -79,6 +87,20 @@ describe('JiraIssueSource.list', () => {
     expect(source.id).toBe('docs');
     expect(issues.map((issue) => issue.key)).toEqual(['DOC-3847', 'DOC-3848']);
     expect(issues[0]!.url).toBe('https://example.atlassian.net/browse/DOC-3847');
+  });
+
+  it('drops a resource with no usable key rather than rendering a dead card', async () => {
+    const { fetch } = constantFetch(
+      JSON.stringify({
+        issues: [{ fields: { summary: 'keyless' } }, { key: 'DOC-9', fields: { summary: 'real' } }],
+        isLast: true,
+      }),
+    );
+    const source = createJiraIssueSource('docs', CONNECTOR, QUERY, ENV, { fetch });
+
+    const issues = await source.list();
+
+    expect(issues.map((issue) => issue.key)).toEqual(['DOC-9']);
   });
 
   it('refuses to call Jira when the environment named no credentials', async () => {

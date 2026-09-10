@@ -45,6 +45,12 @@
   scrollbar-color: var(--ink-600) transparent;
 }
 
+/* The live region is always mounted so a change is announced; an empty one must
+   not spend one of the body's flex gaps. */
+.drawer-body > [role='status']:empty {
+  display: none;
+}
+
 .section > h3 {
   margin: 0 0 var(--sp-2);
   font-size: var(--fs-row);

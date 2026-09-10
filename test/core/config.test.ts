@@ -504,6 +504,21 @@ describe('applyWorkspaceChange', () => {
     expect(added?.jql).toBe('project = OPS');
   });
 
+  it('falls back to the default review statuses when the request clears the list', () => {
+    // An empty list would empty the Review lane for good with no way to tell
+    // it apart from "the field was left alone".
+    const next = applyWorkspaceChange(config, {
+      id: 'cleared',
+      name: 'Cleared',
+      epic: 'DOC-9',
+      repo: 'app',
+      connector: 'tracker',
+      reviewStatuses: [],
+    });
+
+    expect(next.workspaces['cleared']?.reviewStatuses).toEqual(['Ready for review']);
+  });
+
   it('slugs the id out of the name when the request names none', () => {
     expect(workspaceIdFor({ name: 'Docs · Next.js', epic: 'DOC-1', repo: 'app' })).toBe(
       'docs-next-js',
@@ -539,6 +554,16 @@ describe('applyWorkspaceChange', () => {
         epic: 'DOC-2',
         repo: 'app',
         newConnector: { id: 'tracker', site: 's', emailEnv: 'E', tokenEnv: 'T' },
+      },
+      'newConnector.id',
+    ],
+    [
+      'an inline connector whose id is not a usable id',
+      {
+        name: 'Shouty',
+        epic: 'DOC-2',
+        repo: 'app',
+        newConnector: { id: 'Kentico-Jira', site: 's', emailEnv: 'E', tokenEnv: 'T' },
       },
       'newConnector.id',
     ],

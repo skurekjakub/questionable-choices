@@ -256,6 +256,12 @@ export function isHookEventName(name: string): name is HookEventName {
 /**
  * Tags a raw hook body with the hook name from the ingress URL.
  *
+ * Only the name is checked; the body is asserted, not parsed. The payload's
+ * shape is the CLI's and moves between its releases, and every field the
+ * reducer reads is narrowed where it is read, so a schema here would be a
+ * second thing to keep in step for no guarantee the use sites do not give.
+ * See spec §8.2.
+ *
  * @param name - Hook name taken from the ingress URL.
  * @param body - The hook's stdin JSON, already parsed.
  * @returns The typed hook event, or null when the name is not subscribed to.
@@ -383,6 +389,8 @@ type SessionPatch = Partial<
     | 'claudeSessionId'
     | 'lastToolResultPromptId'
     | 'lastAssistantMessage'
+    | 'lastExitCode'
+    | 'staleSince'
     | 'cache'
     | 'endedAt'
     | 'runs'
@@ -401,6 +409,28 @@ function closeLastRun(runs: SessionRun[], exitCode: number | null): SessionRun[]
   const last = runs[runs.length - 1] as SessionRun;
   if (last.exitCode !== null) return runs;
   return [...runs.slice(0, -1), { ...last, exitCode }];
+}
+
+/**
+ * Serialises a value with object keys sorted and `undefined` members dropped.
+ *
+ * Two records that differ only in key order or in a field explicitly set to
+ * `undefined` produce the same string, so a comparison of the two is a test of
+ * content rather than of construction order.
+ *
+ * @param value - Value to serialise.
+ * @returns The JSON text.
+ */
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, member: unknown) => {
+    if (member === null || typeof member !== 'object' || Array.isArray(member)) return member;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(member as Record<string, unknown>).sort()) {
+      const entry = (member as Record<string, unknown>)[key];
+      if (entry !== undefined) sorted[key] = entry;
+    }
+    return sorted;
+  });
 }
 
 /**
@@ -425,12 +455,12 @@ export function reduce(
   const unchanged: ReduceResult = { record, changed: false, notify: false };
 
   const apply = (patch: SessionPatch, notifiable = true): ReduceResult => {
-    const next: SessionRecord = { ...record, ...patch };
+    // An accepted event is proof the record is being told about its session
+    // again, which is exactly what the staleness marker waits for.
+    const next: SessionRecord = { ...record, staleSince: null, ...patch };
     const stateChanged = next.state !== record.state;
     if (stateChanged) next.stateSince = now;
-    // Records are small and their key order is preserved by the spread above,
-    // so a stringify comparison is a sound "did anything move" test here.
-    if (JSON.stringify(next) === JSON.stringify(record)) return unchanged;
+    if (stableJson(next) === stableJson(record)) return unchanged;
     const entered =
       stateChanged &&
       needsYou(next.state) &&
@@ -451,11 +481,18 @@ export function reduce(
 
   switch (event.type) {
     case 'bootstrap-start':
-      return apply({ state: 'bootstrapping', pending: null, endedAt: null });
+      return apply({
+        state: 'bootstrapping',
+        pending: null,
+        lastExitCode: null,
+        endedAt: null,
+      });
 
     case 'bootstrap-failed':
       if (record.state !== 'bootstrapping') return unchanged;
-      return apply({ state: 'failed', pending: null });
+      // The exit code is the only reason a failed card can give for its state;
+      // without it the owner has to attach to tmux to learn anything.
+      return apply({ state: 'failed', pending: null, lastExitCode: event.exitCode ?? null });
 
     case 'claude-start':
       if (!['bootstrapping', 'starting', 'exited', 'failed'].includes(record.state)) {
@@ -464,6 +501,8 @@ export function reduce(
       return apply({
         state: 'starting',
         pending: null,
+        lastToolResultPromptId: null,
+        lastExitCode: null,
         endedAt: null,
         runs: [...record.runs, { startedAt: now, kind: event.mode, exitCode: null }],
       });
@@ -472,6 +511,8 @@ export function reduce(
       return apply({
         state: 'exited',
         pending: null,
+        lastToolResultPromptId: null,
+        lastExitCode: event.exitCode,
         endedAt: now,
         runs: closeLastRun(record.runs, event.exitCode),
       });
@@ -512,7 +553,7 @@ export function reduce(
     }
 
     case 'SessionEnd':
-      return apply({ state: 'exited', pending: null, endedAt: now });
+      return apply({ state: 'exited', pending: null, lastToolResultPromptId: null, endedAt: now });
 
     case 'UserPromptSubmit':
       return live ? apply(busy) : unchanged;
@@ -527,7 +568,13 @@ export function reduce(
     case 'PostToolUseFailure':
     case 'PermissionDenied':
       if (!live) return unchanged;
-      return apply({ ...busy, lastToolResultPromptId: hook.prompt_id ?? null });
+      // Only a result that closed a dialog the record knew about can make a
+      // later Notification stale. Remembering the turn of every tool result
+      // would blind the Notification fallback for the rest of that turn.
+      return apply({
+        ...busy,
+        lastToolResultPromptId: record.pending === null ? null : (hook.prompt_id ?? null),
+      });
 
     case 'PermissionRequest': {
       if (!live) return unchanged;

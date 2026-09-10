@@ -138,8 +138,16 @@ export function registerWebSocketRoutes(app: Hono, deps: WebSocketRoutesDeps): v
       // the attach promise: chaining also keeps the writes in arrival order.
       let queue: Promise<void> = Promise.resolve();
 
+      // A rejected link would make every later `.then` skip its work, so the
+      // socket would silently accept no more input for the rest of its life.
+      const chain = (work: () => void | Promise<void>): void => {
+        queue = queue.then(work).catch((cause: unknown) => {
+          logger.warn(`terminal socket for ${sessionId} dropped a frame: ${messageOf(cause)}`);
+        });
+      };
+
       const withTerminal = (action: (attached: RunnerTerminal) => void): void => {
-        queue = queue.then(() => {
+        chain(() => {
           if (terminal !== null && !closed) action(terminal);
         });
       };
@@ -204,7 +212,7 @@ export function registerWebSocketRoutes(app: Hono, deps: WebSocketRoutesDeps): v
             return;
           }
           if (data instanceof Blob) {
-            queue = queue.then(async () => {
+            chain(async () => {
               const buffer = await data.arrayBuffer();
               if (terminal !== null && !closed) terminal.write(decoder.decode(buffer));
             });

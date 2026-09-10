@@ -3,12 +3,14 @@ import type {
   CreateSessionRequest,
   ConfigIssue,
   CreateWorkspaceRequest,
+  ErrorReason,
   ErrorResponse,
   IssueDetailResponse,
   PrefillResponse,
   PublicConfigResponse,
   RemoveWorktreeResponse,
   SessionAction,
+  SessionEventsResponse,
   SetFlagsRequest,
   WorkspaceSummary,
 } from '../../core/api.js';
@@ -24,6 +26,8 @@ export class ApiError extends Error {
   readonly detail: string | null;
   /** Per-field validation problems, empty unless a schema rejected the body. */
   readonly issues: ConfigIssue[];
+  /** Why the request was refused, or null when no closed-set reason described it. */
+  readonly reason: ErrorReason | null;
 
   /**
    * Builds an error from a refusal the server described.
@@ -32,13 +36,21 @@ export class ApiError extends Error {
    * @param message - Message to show the owner verbatim.
    * @param detail - Extra context, or null when the server sent none.
    * @param issues - Per-field validation problems, or an empty list.
+   * @param reason - Closed-set reason for the refusal, or null when it carried none.
    */
-  constructor(status: number, message: string, detail: string | null, issues: ConfigIssue[] = []) {
+  constructor(
+    status: number,
+    message: string,
+    detail: string | null,
+    issues: ConfigIssue[] = [],
+    reason: ErrorReason | null = null,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.detail = detail;
     this.issues = issues;
+    this.reason = reason;
   }
 }
 
@@ -67,6 +79,7 @@ async function readBody(response: Response): Promise<unknown> {
     message.length > 0 ? message : `${response.status} ${response.statusText}`,
     body?.detail ?? null,
     body?.issues ?? [],
+    body?.reason ?? null,
   );
 }
 
@@ -270,19 +283,31 @@ export async function removeWorktree(
 }
 
 /**
+ * Reads a session's raw event log.
+ *
+ * @param sessionId - Id of the session whose log to read.
+ * @returns The accepted events, oldest first.
+ * @throws {ApiError} With status 404 when no session has that id.
+ */
+export async function getSessionEvents(sessionId: string): Promise<SessionEventsResponse> {
+  const path = `/api/sessions/${encodeURIComponent(sessionId)}/events`;
+  return (await request(path)) as SessionEventsResponse;
+}
+
+/**
  * Whether a refused worktree removal is one that forcing would get past.
  *
- * Only git's own refusal of a dirty checkout is forceable, and it is the one
- * refusal whose detail names the flag. A live session still working in the
- * checkout, or a path that is the repo's main checkout, are refused with the
- * same 409 and forcing changes neither.
+ * Only git's refusal of a dirty checkout is forceable. A live session still
+ * working in the checkout, and a path that is the repo's main checkout, are
+ * refused with the same 409 and forcing changes neither, so the reason on the
+ * wire is the discriminator rather than the wording of the message.
  *
  * @param error - Value caught from {@link removeWorktree}.
  * @returns True when offering to remove anyway is honest.
  */
 export function isForceableRemoval(error: unknown): boolean {
   if (!(error instanceof ApiError) || error.status !== 409) return false;
-  return error.detail !== null && error.detail.includes('--force');
+  return error.reason === 'dirty-worktree';
 }
 
 /**

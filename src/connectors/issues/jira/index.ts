@@ -75,6 +75,10 @@ export class JiraIssueSource implements IssueSource {
   /**
    * Lists every issue the workspace should show.
    *
+   * A resource with no usable key is dropped rather than rendered: the key is
+   * what the projection maps sessions by and what the browser URL is built
+   * from, so a keyless card would be a dead link on a lane of its own.
+   *
    * @returns The issues in Jira rank order.
    * @throws {MissingCredentialsError} When either credential is missing.
    * @throws {JiraHttpError} When Jira rejects the query.
@@ -82,7 +86,9 @@ export class JiraIssueSource implements IssueSource {
   async list(): Promise<Issue[]> {
     this.assertCredentials();
     const resources = await this.client.searchJql(buildJql(this.query));
-    return resources.map((resource) => mapIssue(resource, this.connector.site));
+    return resources
+      .filter((resource) => typeof resource.key === 'string' && resource.key !== '')
+      .map((resource) => mapIssue(resource, this.connector.site));
   }
 
   /**

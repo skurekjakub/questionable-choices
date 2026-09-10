@@ -49,6 +49,8 @@ export function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecor
     stateSince: '2026-09-09T10:00:00.000Z',
     pending: null,
     lastAssistantMessage: null,
+    lastExitCode: null,
+    staleSince: null,
     cache: null,
     createdAt: '2026-09-09T10:00:00.000Z',
     endedAt: null,

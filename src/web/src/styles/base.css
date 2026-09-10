@@ -143,6 +143,10 @@ textarea {
   padding: 0;
 }
 
+.boundary-actions {
+  padding: 0 var(--sp-3);
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

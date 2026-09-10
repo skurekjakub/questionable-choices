@@ -65,7 +65,7 @@ export function launcherUrl(port: number, sessionId: string, event: string): str
  */
 export function hookCommand(port: number, sessionId: string, event: string): string {
   const url = hookUrl(port, sessionId, event);
-  return `curl -s -m 2 -X POST -H 'content-type: application/json' --data-binary @- ${url} >/dev/null 2>&1 || true`;
+  return `curl -s -m 2 -X POST -H 'content-type: application/json' --data-binary @- ${shellQuote(url)} >/dev/null 2>&1 || true`;
 }
 
 /**

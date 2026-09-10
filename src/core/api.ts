@@ -30,10 +30,21 @@
  * including a tracker that cannot be reached. The three ingress routes answer
  * 404 for an unknown session id and 400 for a body that is not a JSON object.
  *
- * WebSocket: `/ws/events` pushes `EventFrame`; `/ws/terminal/:sessionId`
- * carries pty bytes as binary frames, `TerminalClientFrame` up and
- * `TerminalServerFrame` down.
+ * WebSocket: `/ws/events` pushes `EventFrame`;
+ * `/ws/terminal/:sessionId?cols=<n>&rows=<n>` carries pty bytes as binary
+ * frames, `TerminalClientFrame` up and `TerminalServerFrame` down. Both query
+ * parameters are optional and name the viewer's initial pty size; a value that
+ * is not an integer between 1 and 1000 falls back to the server's default
+ * (`DEFAULT_COLS` / `DEFAULT_ROWS` in `server/terminal-ws.ts`).
  */
+/**
+ * `NEEDS_YOU_STATES` (a session is blocked on the owner) and `LIVE_STATES` (a
+ * session still counts as running) are part of the wire contract: `CardSession`
+ * reports `needsYou` and `live` derived from them, and a client that filters
+ * records itself must read the sets from here rather than restate them.
+ */
+export { LIVE_STATES, NEEDS_YOU_STATES } from './state-machine.js';
+
 import type {
   ColumnId,
   Effort,
@@ -60,6 +71,21 @@ export interface ConfigIssue {
 }
 
 /**
+ * Why a request was refused, as a closed set a UI can branch on.
+ *
+ * A refusal that no member describes carries no `reason` at all, so a consumer
+ * must treat the field as optional and fall back to showing `error`/`detail`.
+ */
+export type ErrorReason =
+  | 'dirty-worktree'
+  | 'session-live'
+  | 'main-checkout'
+  | 'duplicate-id'
+  | 'no-branch'
+  | 'missing-executable'
+  | 'detached-worktree';
+
+/**
  * Body of every non-2xx JSON response.
  */
 export interface ErrorResponse {
@@ -69,6 +95,12 @@ export interface ErrorResponse {
   detail?: string | undefined;
   /** Per-field validation problems, when the refusal came from a schema. */
   issues?: ConfigIssue[] | undefined;
+  /**
+   * Why the request was refused, for a UI that must branch on it. `error` and
+   * `detail` stay the text shown verbatim; absent when no member of
+   * `ErrorReason` describes the refusal.
+   */
+  reason?: ErrorReason | undefined;
 }
 
 /**
@@ -235,6 +267,26 @@ export interface CardSession {
   stateSince: string;
   /** What the session is waiting for, or null when it is not waiting. */
   pending: Pending | null;
+  /**
+   * Snippet of the session's last assistant message, or null when no `Stop`
+   * payload carried one.
+   */
+  lastAssistantMessage: string | null;
+  /**
+   * Exit code of the process that most recently ended — the bootstrap or the
+   * CLI — or null while one is running or none has ended. It is the only
+   * reason a `failed` card can give for its state.
+   */
+  lastExitCode: number | null;
+  /**
+   * ISO timestamp of the server start that found this live session already
+   * older than itself, or null when the state is current.
+   *
+   * The hooks that would have moved the record while the server was down are
+   * gone, so the state may be out of date until the session's next event. A UI
+   * should mark such a session rather than present its state as a fact.
+   */
+  staleSince: string | null;
   /** Prompt-cache state the countdown ticks from, or null when unknown. */
   cache: SessionCache | null;
   /** Owner-set "this session did its job" flag. */

@@ -2,10 +2,18 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  DetachedWorktreeError,
+  DirtyWorktreeError,
+  NoBranchError,
+} from '../connectors/repos/git/index.js';
+import { JiraTruncatedError } from '../connectors/issues/jira/client.js';
+import { MissingExecutableError } from '../connectors/runners/claude-tmux/index.js';
 import type {
   BoardView,
   CreateSessionRequest,
   CreateWorkspaceRequest,
+  ErrorReason,
   EventFrame,
   IssueDetailResponse,
   PrefillResponse,
@@ -59,9 +67,36 @@ export const RECONCILE_INTERVAL_MS = 10_000;
 const CONFIG_LOCK_KEY = 'config';
 
 /**
+ * Key that everything touching one issue's checkout is serialised on.
+ *
+ * @param repoId - Repo the checkout belongs to.
+ * @param issueKey - Key of the issue the checkout was made for.
+ * @returns The lock key.
+ */
+function checkoutKey(repoId: string, issueKey: string): string {
+  // Neither an id nor an issue key may contain a slash, so it cannot be part of
+  // either half and two different pairs can never collide on one key.
+  return `${repoId}/${issueKey}`;
+}
+
+/**
  * Window over which board recomputations for one workspace are coalesced.
  */
 export const BOARD_DEBOUNCE_MS = 250;
+
+/**
+ * Classifies a failure of `Repo.prepare` into a machine-readable reason.
+ *
+ * @param cause - Whatever `prepare` threw.
+ * @returns The matching `ErrorReason`, or undefined when none describes it.
+ */
+export function checkoutRefusalReason(cause: unknown): ErrorReason | undefined {
+  if (cause instanceof NoBranchError) return 'no-branch';
+  if (cause instanceof DetachedWorktreeError) return 'detached-worktree';
+  if (cause instanceof MissingExecutableError) return 'missing-executable';
+  if (cause instanceof DirtyWorktreeError) return 'dirty-worktree';
+  return undefined;
+}
 
 /**
  * A refusal the API answers with a 4xx and shows to the owner verbatim.
@@ -71,6 +106,8 @@ export class ActionError extends Error {
   readonly status: number;
   /** Extra context, e.g. git's stderr or the command that failed. */
   readonly detail: string | undefined;
+  /** Machine-readable cause a UI can branch on, when one applies. */
+  readonly reason: ErrorReason | undefined;
 
   /**
    * Builds a refusal.
@@ -78,12 +115,20 @@ export class ActionError extends Error {
    * @param status - HTTP status to answer with.
    * @param message - Message shown to the owner verbatim.
    * @param detail - Extra context, when there is any.
+   * @param reason - Machine-readable cause, when a member of `ErrorReason`
+   *   describes it.
    */
-  constructor(status: number, message: string, detail?: string | undefined) {
+  constructor(
+    status: number,
+    message: string,
+    detail?: string | undefined,
+    reason?: ErrorReason | undefined,
+  ) {
     super(message);
     this.name = 'ActionError';
     this.status = status;
     this.detail = detail;
+    this.reason = reason;
   }
 }
 
@@ -165,6 +210,8 @@ export interface SessionManagerOptions {
   now?: (() => number) | undefined;
   /** Editor launcher; replaceable in tests. */
   spawnEditor?: EditorSpawner | undefined;
+  /** Environment the credential variables of a new workspace are checked against. */
+  env?: Record<string, string | undefined> | undefined;
   /** Diagnostics sink. */
   logger?: Logger | undefined;
 }
@@ -184,6 +231,13 @@ interface IssueCache {
   sourceError: string | null;
   /** The refresh currently running, so callers can join it instead of piling on. */
   inFlight: Promise<void> | null;
+  /** Epoch ms at which `inFlight` was issued; 0 when nothing is running. */
+  inFlightStartedAt: number;
+  /**
+   * Whether the last list failed for a reason repeating it cannot fix, which
+   * suspends the poll timer until the owner asks for a refresh.
+   */
+  queryRejected: boolean;
 }
 
 /**
@@ -265,9 +319,13 @@ export class SessionManager {
   private readonly derivedCacheTtlSeconds: number;
   private readonly now: () => number;
   private readonly spawnEditor: EditorSpawner;
+  private readonly env: Record<string, string | undefined>;
   private readonly logger: Logger;
+  private readonly startedAtMs: number;
+  private readonly startedAt: string;
   private readonly sessionLock = new KeyedMutex();
   private readonly configLock = new KeyedMutex();
+  private readonly checkoutLock = new KeyedMutex();
   private reconcileTimer: NodeJS.Timeout | null = null;
   private reconciling = false;
 
@@ -285,7 +343,10 @@ export class SessionManager {
     this.derivedCacheTtlSeconds = options.derivedCacheTtlSeconds;
     this.now = options.now ?? Date.now;
     this.spawnEditor = options.spawnEditor ?? spawnDetached;
+    this.env = options.env ?? process.env;
     this.logger = options.logger ?? consoleLogger;
+    this.startedAtMs = this.now();
+    this.startedAt = new Date(this.startedAtMs).toISOString();
     for (const runtime of options.workspaces) this.adopt(runtime);
     // Every terminal and every board viewer adds two listeners, so the default
     // ceiling of ten would warn as soon as a few tabs are open.
@@ -316,13 +377,16 @@ export class SessionManager {
    * @returns Nothing, once the first refresh of every workspace has finished.
    */
   async start(): Promise<void> {
-    await this.reconcile();
-    await Promise.all([...this.workspaces.keys()].map((id) => this.refresh(id)));
+    // Timers are installed before anything that can reject: a first refresh
+    // that fails must cost a banner, not a server that never polls and never
+    // reconciles for as long as it runs.
     for (const runtime of this.workspaces.values()) this.startPolling(runtime);
     this.reconcileTimer = setInterval(() => {
       void this.reconcile();
     }, RECONCILE_INTERVAL_MS);
     this.reconcileTimer.unref();
+    await this.reconcile();
+    await Promise.all([...this.workspaces.keys()].map((id) => this.refresh(id)));
   }
 
   /**
@@ -353,6 +417,8 @@ export class SessionManager {
       fetchedAt: new Date(this.now()).toISOString(),
       sourceError: null,
       inFlight: null,
+      inFlightStartedAt: 0,
+      queryRejected: false,
     });
   }
 
@@ -366,7 +432,11 @@ export class SessionManager {
     const previous = this.pollTimers.get(runtime.id);
     if (previous !== undefined) clearInterval(previous);
     const timer = setInterval(() => {
-      void this.refresh(runtime.id).catch((cause: unknown) => {
+      // A query the source rejected outright is not retried on a timer: the
+      // poll would re-send the same rejected query for as long as the server
+      // runs, and only the owner can change it.
+      if (this.requireCache(runtime.id).queryRejected) return;
+      void this.refreshNow(runtime.id).catch((cause: unknown) => {
         this.logger.warn(`poll of workspace '${runtime.id}' failed: ${messageOf(cause)}`);
       });
     }, runtime.config.pollSeconds * 1000);
@@ -396,7 +466,7 @@ export class SessionManager {
       this.config = next;
       this.adopt(runtime);
       this.startPolling(runtime);
-      for (const warning of checkEnvironment(next, process.env)) {
+      for (const warning of checkEnvironment(next, this.env)) {
         this.logger.warn(warning);
       }
       this.emitConfig();
@@ -515,18 +585,41 @@ export class SessionManager {
    * @throws {ActionError} When no workspace has that id.
    */
   async refresh(workspaceId: string): Promise<BoardView> {
+    // An explicit refresh is the owner saying "try again", so it lifts the
+    // suspension a rejected query put the poll timer under.
+    this.requireCache(workspaceId).queryRejected = false;
+    return this.refreshNow(workspaceId);
+  }
+
+  /**
+   * Refetches one workspace's issues without lifting a poll suspension.
+   *
+   * A caller that joins a fetch already in flight is only answered by it when
+   * that fetch was issued after the caller's own request; otherwise the join
+   * would report a list read before the change the caller is looking for.
+   *
+   * @param workspaceId - Workspace to refresh.
+   * @returns The board view after the refresh.
+   * @throws {ActionError} When no workspace has that id.
+   */
+  private async refreshNow(workspaceId: string): Promise<BoardView> {
     const runtime = this.requireWorkspace(workspaceId);
     const cache = this.requireCache(workspaceId);
-    if (cache.inFlight !== null) {
-      await cache.inFlight;
-      return this.board(workspaceId);
+    const requestedAt = this.now();
+    while (cache.inFlight !== null) {
+      const joined = cache.inFlight;
+      const startedAt = cache.inFlightStartedAt;
+      await joined;
+      if (startedAt >= requestedAt) return this.board(workspaceId);
     }
+    cache.inFlightStartedAt = this.now();
     const work = this.fetchIssues(runtime, cache);
     cache.inFlight = work;
     try {
       await work;
     } finally {
       cache.inFlight = null;
+      cache.inFlightStartedAt = 0;
     }
     this.scheduleBoard(workspaceId);
     return this.board(workspaceId);
@@ -604,7 +697,18 @@ export class SessionManager {
       branch = known.branch;
       worktree = known.path;
     } else {
-      worktree = join(runtime.repoConfig.worktreeDir, issueKey);
+      // The connector owns the key gate, so the path is asked for rather than
+      // rebuilt here: a key that would escape `worktreeDir` is refused before
+      // it reaches the prompt.
+      try {
+        worktree = runtime.repo.worktreePath(issueKey);
+      } catch (cause) {
+        throw new ActionError(
+          400,
+          `cannot prefill ${playbookId} for ${issueKey}`,
+          messageOf(cause),
+        );
+      }
       branch =
         playbook.isolation === 'worktree'
           ? branchName(runtime.repoConfig.branchPattern, issue)
@@ -613,6 +717,12 @@ export class SessionManager {
         warnings.push(
           `no worktree is registered for ${issueKey}; its branch is resolved when the session starts`,
         );
+      }
+    }
+    if (playbook.isolation !== 'shared') {
+      const fetchError = runtime.repo.lastFetchError?.() ?? null;
+      if (fetchError !== null) {
+        warnings.push(`the repo's refs may be stale: ${fetchError}`);
       }
     }
 
@@ -656,84 +766,108 @@ export class SessionManager {
     }
     const baseId = sessionName(this.config.runner.tmuxPrefix, issueKey, playbook.id);
 
-    return this.sessionLock.run(baseId, async () => {
-      const repoId = runtime.config.repo;
-      const history = this.sessionsFor(repoId, issueKey);
-      const clash = history.find(
-        (record) => record.playbookId === playbook.id && isLive(record.state),
-      );
-      if (clash !== undefined) {
-        throw new ActionError(
-          409,
-          `${issueKey} already has a live '${playbook.id}' session`,
-          `session ${clash.id} is ${clash.state}`,
+    const repoId = runtime.config.repo;
+    // The session lock keeps two starts of the same playbook apart; the
+    // checkout lock keeps this start apart from a removal of the very
+    // directory it is preparing.
+    return this.sessionLock.run(baseId, async () =>
+      this.checkoutLock.run(checkoutKey(repoId, issueKey), async () => {
+        const history = this.sessionsFor(repoId, issueKey);
+        const clash = history.find(
+          (record) => record.playbookId === playbook.id && isLive(record.state),
         );
-      }
+        if (clash !== undefined) {
+          throw new ActionError(
+            409,
+            `${issueKey} already has a live '${playbook.id}' session`,
+            `session ${clash.id} is ${clash.state}`,
+          );
+        }
 
-      const issue = await this.requireIssue(workspaceId, issueKey);
-      let checkout;
-      try {
-        checkout = await runtime.repo.prepare(issue, playbook, {
-          knownBranch: history[0]?.branch ?? null,
-        });
-      } catch (cause) {
-        throw new ActionError(409, `cannot prepare a checkout for ${issueKey}`, messageOf(cause));
-      }
+        const issue = await this.requireIssue(workspaceId, issueKey);
+        let checkout;
+        try {
+          checkout = await runtime.repo.prepare(issue, playbook, {
+            knownBranch: history[0]?.branch ?? null,
+          });
+        } catch (cause) {
+          throw new ActionError(
+            409,
+            `cannot prepare a checkout for ${issueKey}`,
+            messageOf(cause),
+            checkoutRefusalReason(cause),
+          );
+        }
 
-      const startedAt = new Date(this.now()).toISOString();
-      const record: SessionRecord = {
-        id: this.freeSessionId(issueKey, playbook.id),
-        issueKey,
-        playbookId: playbook.id,
-        repoId,
-        cwd: checkout.cwd,
-        branch: checkout.branch,
-        model,
-        effort,
-        permissionMode,
-        prompt: request.prompt,
-        claudeSessionId: null,
-        state: 'starting',
-        stateSince: startedAt,
-        pending: null,
-        lastAssistantMessage: null,
-        cache: null,
-        createdAt: startedAt,
-        endedAt: null,
-        done: false,
-        archived: false,
-        runs: [],
-      };
-      await this.store.saveSession(record);
-      // A `shared` session runs in the main checkout, which is nobody's
-      // worktree: recording it there would make Remove worktree offer to
-      // delete the repo.
-      if (playbook.isolation !== 'shared') {
-        await this.store.setWorktree(repoId, issueKey, {
-          path: checkout.cwd,
+        const startedAt = new Date(this.now()).toISOString();
+        const record: SessionRecord = {
+          id: this.freeSessionId(issueKey, playbook.id),
+          issueKey,
+          playbookId: playbook.id,
+          repoId,
+          cwd: checkout.cwd,
           branch: checkout.branch,
-        });
-      }
+          model,
+          effort,
+          permissionMode,
+          prompt: request.prompt,
+          claudeSessionId: null,
+          state: 'starting',
+          stateSince: startedAt,
+          pending: null,
+          lastToolResultPromptId: null,
+          lastAssistantMessage: null,
+          lastExitCode: null,
+          staleSince: null,
+          cache: null,
+          createdAt: startedAt,
+          endedAt: null,
+          done: false,
+          archived: false,
+          runs: [],
+        };
+        await this.store.saveSession(record);
+        // A `shared` session runs in the main checkout, which is nobody's
+        // worktree: recording it there would make Remove worktree offer to
+        // delete the repo.
+        if (playbook.isolation !== 'shared') {
+          await this.store.setWorktree(repoId, issueKey, {
+            path: checkout.cwd,
+            branch: checkout.branch,
+          });
+        }
 
-      try {
-        await this.runner.start({
-          record,
-          needsBootstrap: checkout.needsBootstrap,
-          ...(runtime.repoConfig.bootstrap === undefined
-            ? {}
-            : { bootstrap: runtime.repoConfig.bootstrap }),
-        });
-      } catch (cause) {
-        const failed = await this.patch(record, { state: 'failed' });
-        this.emitSession(failed);
-        this.scheduleBoard(workspaceId);
-        throw new ActionError(409, `cannot launch ${record.id}`, messageOf(cause));
-      }
+        const launch = async (): Promise<SessionRecord> => {
+          try {
+            await this.runner.start({
+              record,
+              needsBootstrap: checkout.needsBootstrap,
+              ...(runtime.repoConfig.bootstrap === undefined
+                ? {}
+                : { bootstrap: runtime.repoConfig.bootstrap }),
+            });
+          } catch (cause) {
+            // The launcher may already have posted a hook against the record's
+            // own id, so the failure is written over a re-read record: patching
+            // this snapshot would drop whatever that hook saved.
+            const current = this.store.session(record.id) ?? record;
+            const failed = await this.patch(current, { state: 'failed' });
+            this.emitSession(failed);
+            this.scheduleBoard(workspaceId);
+            throw new ActionError(409, `cannot launch ${record.id}`, messageOf(cause));
+          }
+          const launched = this.store.session(record.id) ?? record;
+          this.emitSession(launched);
+          this.scheduleBoard(workspaceId);
+          return launched;
+        };
 
-      this.emitSession(record);
-      this.scheduleBoard(workspaceId);
-      return record;
-    });
+        // A second run of the same playbook gets a suffixed id, which is the key
+        // `applyEvent` locks. Without this the hook path and the two writes below
+        // it would not exclude each other; the base-id case is already held.
+        return record.id === baseId ? launch() : this.sessionLock.run(record.id, launch);
+      }),
+    );
   }
 
   /**
@@ -774,12 +908,15 @@ export class SessionManager {
         `${sessionId} never reported a Claude session id, so it cannot be resumed`,
       );
     }
-    try {
-      await this.runner.resume(record);
-    } catch (cause) {
-      throw new ActionError(409, `cannot resume ${sessionId}`, messageOf(cause));
-    }
+    // The runner is asked inside the lock, so a hook the relaunched script
+    // posts is applied after this patch rather than under it: a session that
+    // dies on startup stays exited instead of being put back to `starting`.
     return this.mutateSession(sessionId, async (current) => {
+      try {
+        await this.runner.resume(current);
+      } catch (cause) {
+        throw new ActionError(409, `cannot resume ${sessionId}`, messageOf(cause));
+      }
       const next = await this.patch(current, { state: 'starting', pending: null, endedAt: null });
       this.emitSession(next);
       this.scheduleRepoBoards(next.repoId);
@@ -888,28 +1025,44 @@ export class SessionManager {
   async removeWorktree(sessionId: string, force: boolean): Promise<RemoveWorktreeResponse> {
     const record = this.requireSession(sessionId);
     const runtime = this.requireRepo(record.repoId);
-    const path = this.store.worktree(record.repoId, record.issueKey)?.path ?? record.cwd;
-    if (path === runtime.repoConfig.path) {
-      throw new ActionError(409, `${path} is the repo's main checkout, not a worktree`);
-    }
-    const blocking = this.store
-      .sessions()
-      .find((other) => other.cwd === path && isLive(other.state));
-    if (blocking !== undefined) {
-      throw new ActionError(
-        409,
-        `${blocking.id} is still ${blocking.state} in ${path}`,
-        'kill the session before removing its worktree',
-      );
-    }
-    try {
-      await runtime.repo.removeWorktree(record.issueKey, force);
-    } catch (cause) {
-      throw new ActionError(409, `cannot remove ${path}`, messageOf(cause));
-    }
-    await this.store.clearWorktree(record.repoId, record.issueKey);
-    this.scheduleRepoBoards(record.repoId);
-    return { path, removed: true };
+    // Held across the liveness scan and the removal, so a start of the same
+    // issue cannot register a checkout between the two and have the directory
+    // pulled out from under it.
+    return this.checkoutLock.run(checkoutKey(record.repoId, record.issueKey), async () => {
+      const path = this.store.worktree(record.repoId, record.issueKey)?.path ?? record.cwd;
+      if (path === runtime.repoConfig.path) {
+        throw new ActionError(
+          409,
+          `${path} is the repo's main checkout, not a worktree`,
+          undefined,
+          'main-checkout',
+        );
+      }
+      const blocking = this.store
+        .sessions()
+        .find((other) => other.cwd === path && isLive(other.state));
+      if (blocking !== undefined) {
+        throw new ActionError(
+          409,
+          `${blocking.id} is still ${blocking.state} in ${path}`,
+          'kill the session before removing its worktree',
+          'session-live',
+        );
+      }
+      try {
+        await runtime.repo.removeWorktree(record.issueKey, force);
+      } catch (cause) {
+        throw new ActionError(
+          409,
+          `cannot remove ${path}`,
+          messageOf(cause),
+          cause instanceof DirtyWorktreeError ? 'dirty-worktree' : undefined,
+        );
+      }
+      await this.store.clearWorktree(record.repoId, record.issueKey);
+      this.scheduleRepoBoards(record.repoId);
+      return { path, removed: true };
+    });
   }
 
   /**
@@ -1019,6 +1172,24 @@ export class SessionManager {
   }
 
   /**
+   * Flags a live record whose last state change predates this server's start.
+   *
+   * @param record - The live record to judge.
+   * @returns Nothing.
+   */
+  private async flagIfStale(record: SessionRecord): Promise<void> {
+    if (record.staleSince !== null) return;
+    if (Date.parse(record.stateSince) >= this.startedAtMs) return;
+    await this.mutateSession(record.id, async (current) => {
+      if (!isLive(current.state) || current.staleSince !== null) return;
+      const next = await this.patch(current, { staleSince: this.startedAt });
+      this.logger.info(`${next.id} predates this server start; its state may be out of date`);
+      this.emitSession(next);
+      this.scheduleRepoBoards(next.repoId);
+    });
+  }
+
+  /**
    * Reports whether a session id is known.
    *
    * @param sessionId - Id to look up.
@@ -1044,6 +1215,11 @@ export class SessionManager {
    * one that did is marked `exited`. A record younger than one pass that has
    * not launched yet is left alone: its tmux session may still be on its way up.
    *
+   * A live record that survived a restart is flagged `staleSince` rather than
+   * corrected. Its hooks were posted while nothing was listening and are gone,
+   * so its state is unknowable until the session's next event, which clears the
+   * flag.
+   *
    * @returns Nothing.
    */
   async reconcile(): Promise<void> {
@@ -1052,12 +1228,12 @@ export class SessionManager {
     try {
       for (const record of this.store.sessions()) {
         if (!isLive(record.state)) continue;
-        if (
-          record.runs.length === 0 &&
-          this.now() - Date.parse(record.createdAt) < RECONCILE_INTERVAL_MS
-        ) {
-          continue;
-        }
+        // A record that entered its current state less than one interval ago is
+        // still in the launcher's hands — a fresh start or a resume, which
+        // kills and recreates the tmux session — so probing it would read the
+        // gap between the two as a death.
+        if (this.now() - Date.parse(record.stateSince) < RECONCILE_INTERVAL_MS) continue;
+        await this.flagIfStale(record);
         let alive: boolean;
         try {
           alive = await this.runner.isAlive(record.id);
@@ -1100,7 +1276,13 @@ export class SessionManager {
     } catch (cause) {
       listed = false;
       cache.sourceError = messageOf(cause);
-      this.logger.warn(`workspace '${runtime.id}' issue list failed: ${cache.sourceError}`);
+      // A truncated walk costs `JIRA_MAX_PAGES` authenticated requests and
+      // repeating it changes nothing, so it suspends the timer rather than
+      // running every poll for as long as the server is up.
+      cache.queryRejected = cause instanceof JiraTruncatedError;
+      const message = `workspace '${runtime.id}' issue list failed: ${cache.sourceError}`;
+      if (cache.queryRejected) this.logger.error(`${message} (polling suspended until a refresh)`);
+      else this.logger.warn(message);
     }
     // While the source is down the previously fetched session-only issues are
     // the only ones there are, so they are kept rather than refetched.
@@ -1348,10 +1530,15 @@ export class SessionManager {
    * @returns Nothing.
    */
   private emit(channel: 'board' | 'session' | 'config', frame: EventFrame): void {
-    try {
-      this.events.emit(channel, frame);
-    } catch (cause) {
-      this.logger.error(`a '${channel}' subscriber threw: ${messageOf(cause)}`);
+    // `EventEmitter.emit` dispatches synchronously and stops at the first
+    // throw, so one viewer's socket tearing down would cost every other viewer
+    // the frame. Each subscriber therefore gets its own guard.
+    for (const listener of this.events.listeners(channel)) {
+      try {
+        (listener as (value: EventFrame) => void)(frame);
+      } catch (cause) {
+        this.logger.error(`a '${channel}' subscriber threw: ${messageOf(cause)}`);
+      }
     }
   }
 

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { BoardView, CreateSessionRequest, EventFrame } from '../../src/core/api.js';
-import type { Config } from '../../src/core/types.js';
+import type { Config, SessionRecord } from '../../src/core/types.js';
 import {
   ActionError,
   BOARD_DEBOUNCE_MS,
@@ -32,6 +32,27 @@ const START: CreateSessionRequest = {
 };
 
 /**
+ * Store that can be told to yield between reading a record and writing it, so a
+ * test can interleave two read-modify-write sequences on purpose.
+ */
+class InterleavingStore extends Store {
+  /** Whether every save should yield to the microtask queue first. */
+  slowSave = false;
+
+  /**
+   * Saves a record, optionally yielding first.
+   *
+   * @param record - The record to store.
+   * @returns Nothing.
+   * @throws {Error} When the file cannot be written.
+   */
+  override async saveSession(record: SessionRecord): Promise<void> {
+    if (this.slowSave) await Promise.resolve();
+    await super.saveSession(record);
+  }
+}
+
+/**
  * Everything one test needs to drive a manager over fakes.
  */
 interface Harness {
@@ -40,7 +61,7 @@ interface Harness {
   /** Validated configuration the manager runs on. */
   config: Config;
   /** Durable state. */
-  store: Store;
+  store: InterleavingStore;
   /** The manager under test. */
   manager: SessionManager;
   /** Runner the manager launches through. */
@@ -65,7 +86,7 @@ interface Harness {
 async function harness(): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), 'qc-manager-'));
   const config = makeConfig(dir);
-  const store = new Store(dir);
+  const store = new InterleavingStore(dir);
   await store.load();
   const source = new FakeIssueSource('ws', [makeIssue()]);
   const repo = new FakeRepo('app', {
@@ -136,7 +157,12 @@ describe('SessionManager', () => {
       expect(record.state).toBe('starting');
       expect(record.runs).toEqual([]);
       expect(record.cwd).toBe('/repos/worktrees/DOC-1');
-      expect(h.store.session('qc-DOC-1-implement')).toBeDefined();
+      expect(h.store.session('qc-DOC-1-implement')).toMatchObject({
+        state: 'starting',
+        issueKey: 'DOC-1',
+        playbookId: 'implement',
+        cwd: '/repos/worktrees/DOC-1',
+      });
       expect(h.store.worktree('app', 'DOC-1')).toEqual({
         path: '/repos/worktrees/DOC-1',
         branch: 'DOC-1-document-the-thing',
@@ -308,8 +334,92 @@ describe('SessionManager', () => {
       expect((await h.manager.setSessionDone('qc-DOC-1-implement', false)).done).toBe(false);
     });
 
-    it('answers 404 for an unknown session id', async () => {
+    it('answers 404 for an unknown session id without asking the runner to kill it', async () => {
       await expect(h.manager.killSession('qc-nope')).rejects.toMatchObject({ status: 404 });
+      expect(h.runner.killed).toEqual([]);
+    });
+
+    it('answers 404 for the event log of an unknown session id', async () => {
+      await expect(h.manager.sessionEvents('qc-nope')).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('leaves a record exited when the runner refuses the resume', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.applyEvent(
+        'qc-DOC-1-implement',
+        { type: 'hook', hook: { hook_event_name: 'SessionStart', session_id: 'abc' } },
+        {},
+      );
+      await h.manager.killSession('qc-DOC-1-implement');
+      h.runner.resumeError = new Error('tmux: no server running');
+
+      await expect(h.manager.resumeSession('qc-DOC-1-implement')).rejects.toMatchObject({
+        status: 409,
+        detail: 'tmux: no server running',
+      });
+
+      // The runner is asked before the record moves, so a refusal costs nothing.
+      expect(h.store.session('qc-DOC-1-implement')?.state).toBe('exited');
+    });
+
+    it('refreshes the board when a session leaves the live set', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const before = h.source.listCalls;
+
+      await h.manager.killSession('qc-DOC-1-implement');
+
+      expect(h.source.listCalls).toBeGreaterThan(before);
+    });
+
+    it('applies two events for one session without either losing the other', async () => {
+      // Both land inside the same read-modify-write window; without the lock the
+      // second write is built on a snapshot that predates the first.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.store.slowSave = true;
+
+      await Promise.all([
+        h.manager.applyEvent(
+          'qc-DOC-1-implement',
+          { type: 'hook', hook: { hook_event_name: 'SessionStart', session_id: 'abc' } },
+          {},
+        ),
+        h.manager.applyEvent(
+          'qc-DOC-1-implement',
+          { type: 'hook', hook: { hook_event_name: 'UserPromptSubmit' } },
+          {},
+        ),
+      ]);
+
+      const record = h.store.session('qc-DOC-1-implement');
+      expect(record?.claudeSessionId).toBe('abc');
+      expect(record?.state).toBe('working');
+    });
+
+    it('does not save or broadcast an event the reducer ignored', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const frames: EventFrame[] = [];
+      h.manager.subscribe((frame) => frames.push(frame));
+
+      // `bootstrap-failed` only applies to a bootstrapping record.
+      await h.manager.applyEvent('qc-DOC-1-implement', { type: 'bootstrap-failed' }, {});
+
+      expect(frames.filter((frame) => frame.type === 'session')).toEqual([]);
+    });
+
+    it('keeps delivering a frame to the other subscribers when one of them throws', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const delivered: EventFrame[] = [];
+      h.manager.subscribe(() => {
+        throw new Error('socket is gone');
+      });
+      h.manager.subscribe((frame) => delivered.push(frame));
+
+      await expect(h.manager.setSessionDone('qc-DOC-1-implement', true)).resolves.toMatchObject({
+        done: true,
+      });
+
+      expect(delivered.some((frame) => frame.type === 'session')).toBe(true);
+      expect(h.logger.lines.join('\n')).toContain('subscriber threw');
     });
   });
 
@@ -338,6 +448,33 @@ describe('SessionManager', () => {
         detail: 'fatal: contains modified or untracked files',
       });
     });
+
+    it('passes the caller’s force choice through rather than always forcing', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.killSession('qc-DOC-1-implement');
+
+      await h.manager.removeWorktree('qc-DOC-1-implement', false);
+
+      expect(h.repo.removed).toEqual([{ issueKey: 'DOC-1', force: false }]);
+    });
+
+    it("refuses to remove the repo's main checkout, which a shared session runs in", async () => {
+      h.repo.result = { cwd: '/repos/app', branch: null, needsBootstrap: false };
+      h.config.repos['app']?.playbooks.push(
+        makePlaybook({ id: 'triage', label: 'Triage', isolation: 'shared', primaryFor: [] }),
+      );
+      const record = await h.manager.startSession('ws', 'DOC-1', {
+        ...START,
+        playbookId: 'triage',
+      });
+      await h.manager.killSession(record.id);
+
+      await expect(h.manager.removeWorktree(record.id, true)).rejects.toMatchObject({
+        status: 409,
+        reason: 'main-checkout',
+      });
+      expect(h.repo.removed).toEqual([]);
+    });
   });
 
   describe('flags and projection', () => {
@@ -364,12 +501,54 @@ describe('SessionManager', () => {
       expect(view.columns.flatMap((column) => column.cards)).toHaveLength(1);
     });
 
+    it('clears the banner once the source answers again', async () => {
+      h.source.listError = new Error('jira: 503');
+      await h.manager.refresh('ws');
+      h.source.listError = null;
+      h.clock.ms += 1000;
+
+      expect((await h.manager.refresh('ws')).sourceError).toBeNull();
+    });
+
+    it('keeps the session-only issues it already has while the source is down', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.source.issues = [];
+      h.clock.ms += 1000;
+      await h.manager.refresh('ws');
+      const before = h.source.getCalls.length;
+      h.source.listError = new Error('jira: 503');
+      h.clock.ms += 1000;
+
+      await h.manager.refresh('ws');
+
+      expect(h.source.getCalls).toHaveLength(before);
+    });
+
     it('warns that the prefilled issue text may be stale after a failed refresh', async () => {
       h.source.listError = new Error('jira: 503');
       await h.manager.refresh('ws');
       const prefill = await h.manager.prefill('ws', 'DOC-1', 'implement');
       expect(prefill.prompt).toBe('Work on DOC-1');
-      expect(prefill.warnings[0]).toContain('jira: 503');
+      expect(prefill.warnings).toEqual([expect.stringContaining('jira: 503')]);
+    });
+
+    it('warns that the repo refs may be stale when the last fetch failed', async () => {
+      h.repo.fetchError = 'git fetch origin exited 128 in /repos/app';
+
+      const prefill = await h.manager.prefill('ws', 'DOC-1', 'implement');
+
+      expect(prefill.warnings).toEqual([
+        expect.stringContaining('git fetch origin exited 128 in /repos/app'),
+      ]);
+    });
+
+    it('refuses to prefill an issue key that is not a usable path segment', async () => {
+      h.source.extra.set('../../etc', makeIssue({ key: '../../etc' }));
+      h.repo.rejectedKeys.add('../../etc');
+
+      await expect(h.manager.prefill('ws', '../../etc', 'implement')).rejects.toMatchObject({
+        status: 400,
+      });
     });
 
     it('answers 404 for an unknown workspace', () => {
@@ -391,7 +570,7 @@ describe('SessionManager', () => {
     it('logs a launch that fails after the call has answered', async () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       await h.manager.openEditor('ws', 'DOC-1');
-      expect(() => h.editorCalls[0]?.onError(new Error('spawn code ENOENT'))).not.toThrow();
+      h.editorCalls[0]?.onError(new Error('spawn code ENOENT'));
       expect(h.logger.lines).toContainEqual(
         'error: cannot open /repos/worktrees/DOC-1 in code: spawn code ENOENT',
       );
@@ -400,9 +579,17 @@ describe('SessionManager', () => {
 
   describe('spawnDetached', () => {
     it('reports a missing executable instead of crashing the process', async () => {
-      const error = await new Promise<Error>((resolve) => {
+      const reported = new Promise<Error>((resolve) => {
         spawnDetached('qc-no-such-editor', ['/tmp'], resolve);
       });
+      // Without the deadline a missing `error` listener shows up as a suite
+      // timeout, which names the runner rather than the missing listener.
+      const deadline = new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error('spawnDetached never reported the failure')), 2000);
+      });
+
+      const error = await Promise.race([reported, deadline]);
+
       expect(error.message).toContain('qc-no-such-editor');
     });
   });
@@ -429,17 +616,99 @@ describe('SessionManager', () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       await h.manager.applyEvent('qc-DOC-1-implement', { type: 'claude-start', mode: 'start' }, {});
       h.runner.alive.clear();
+      h.clock.ms += RECONCILE_INTERVAL_MS;
 
       await h.manager.reconcile();
       const record = h.store.session('qc-DOC-1-implement');
       expect(record?.state).toBe('exited');
       expect(record?.endedAt).not.toBeNull();
+      expect(record?.stateSince).toBe(new Date(h.clock.ms).toISOString());
     });
 
-    it('leaves a live session alone', async () => {
+    it('leaves a session the runner still reports alive alone, having asked', async () => {
       await h.manager.startSession('ws', 'DOC-1', START);
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+      const probed: string[] = [];
+      h.runner.isAlive = async (sessionId: string) => {
+        probed.push(sessionId);
+        return true;
+      };
+
       await h.manager.reconcile();
+
+      expect(probed).toEqual(['qc-DOC-1-implement']);
       expect(h.store.session('qc-DOC-1-implement')?.state).toBe('starting');
+    });
+
+    it('leaves a record whose state changed within one interval alone, mid-resume', async () => {
+      // A resume kills and recreates the tmux session; a pass that lands in
+      // that gap would read it as a death and flicker the card to Exited.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.applyEvent('qc-DOC-1-implement', { type: 'claude-start', mode: 'start' }, {});
+      h.runner.alive.clear();
+
+      await h.manager.reconcile();
+
+      expect(h.store.session('qc-DOC-1-implement')?.state).toBe('starting');
+    });
+
+    it('flags a live record that predates this server start rather than guessing its state', async () => {
+      // Its hooks were posted at a dead port and are gone; the state on the
+      // card is the state it had when the last server died.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const survivor = h.store.session('qc-DOC-1-implement') as SessionRecord;
+      await h.store.saveSession({
+        ...survivor,
+        stateSince: new Date(h.clock.ms - 3_600_000).toISOString(),
+      });
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+
+      await h.manager.reconcile();
+
+      const record = h.store.session('qc-DOC-1-implement');
+      expect(record?.state).toBe('starting');
+      expect(record?.staleSince).not.toBeNull();
+    });
+
+    it('leaves a record started under this server unflagged', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+
+      await h.manager.reconcile();
+
+      expect(h.store.session('qc-DOC-1-implement')?.staleSince).toBeNull();
+    });
+
+    it('lets the session’s next event clear the flag', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const survivor = h.store.session('qc-DOC-1-implement') as SessionRecord;
+      await h.store.saveSession({
+        ...survivor,
+        stateSince: new Date(h.clock.ms - 3_600_000).toISOString(),
+      });
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+      await h.manager.reconcile();
+
+      await h.manager.applyEvent(
+        'qc-DOC-1-implement',
+        { type: 'hook', hook: { hook_event_name: 'UserPromptSubmit' } },
+        {},
+      );
+
+      expect(h.store.session('qc-DOC-1-implement')?.staleSince).toBeNull();
+    });
+
+    it('survives a probe that throws, leaving the record and naming it in the log', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+      h.runner.isAlive = async () => {
+        throw new Error('tmux is not on PATH');
+      };
+
+      await expect(h.manager.reconcile()).resolves.toBeUndefined();
+
+      expect(h.store.session('qc-DOC-1-implement')?.state).toBe('starting');
+      expect(h.logger.lines.join('\n')).toContain('cannot probe qc-DOC-1-implement');
     });
   });
 
@@ -497,6 +766,66 @@ describe('SessionManager', () => {
 
     it('answers 404 when removing an unknown workspace', async () => {
       await expect(h.manager.removeWorkspace('ghost')).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('takes an inline connector with the workspace that was its only user', async () => {
+      // Nothing else can remove a connector: there is no route and no control,
+      // so one left behind is permanent and warns on every boot.
+      await h.manager.addWorkspace({
+        id: 'ops',
+        name: 'Ops',
+        epic: 'OPS-1',
+        repo: 'app',
+        newConnector: {
+          id: 'ops-jira',
+          site: 'ops.atlassian.net',
+          emailEnv: 'OPS_EMAIL',
+          tokenEnv: 'OPS_TOKEN',
+        },
+      });
+      expect(h.manager.publicConfig().connectors.map((entry) => entry.id)).toContain('ops-jira');
+
+      await h.manager.removeWorkspace('ops');
+
+      expect(h.manager.publicConfig().connectors.map((entry) => entry.id)).toEqual(['tracker']);
+      const written = JSON.parse(await readFile(join(h.dir, 'config.json'), 'utf8')) as Config;
+      expect(Object.keys(written.connectors)).toEqual(['tracker']);
+    });
+
+    it('keeps a connector another workspace still uses', async () => {
+      await h.manager.addWorkspace(ADD);
+
+      await h.manager.removeWorkspace('second');
+
+      expect(h.manager.publicConfig().connectors.map((entry) => entry.id)).toEqual(['tracker']);
+    });
+
+    it('keeps both of two simultaneous additions, which rewrite one file', async () => {
+      // Each addition serialises the whole configuration; without the lock the
+      // second write is built on the document the first one had not saved yet.
+      await Promise.all([
+        h.manager.addWorkspace(ADD),
+        h.manager.addWorkspace({ ...ADD, id: 'third', name: 'Third', epic: 'DOC-901' }),
+      ]);
+
+      const written = JSON.parse(await readFile(join(h.dir, 'config.json'), 'utf8')) as Config;
+      expect(Object.keys(written.workspaces).sort()).toEqual(['second', 'third', 'ws']);
+    });
+
+    it('warns about credentials the environment does not supply for a new workspace', async () => {
+      await h.manager.addWorkspace({
+        name: 'Ops',
+        epic: 'OPS-1',
+        repo: 'app',
+        newConnector: {
+          id: 'ops',
+          site: 'ops.atlassian.net',
+          emailEnv: 'QC_TEST_MISSING_EMAIL',
+          tokenEnv: 'QC_TEST_MISSING_TOKEN',
+        },
+      });
+
+      expect(h.logger.lines.join('\n')).toContain('QC_TEST_MISSING_EMAIL');
     });
 
     it('pushes a config frame on both changes', async () => {
@@ -574,6 +903,15 @@ describe('readDerivedCacheTtlSeconds', () => {
     const path = join(dir, 'settings.json');
     const { writeFile } = await import('node:fs/promises');
     await writeFile(path, JSON.stringify({ env: { ENABLE_PROMPT_CACHING_1H: '0' } }), 'utf8');
+    expect(readDerivedCacheTtlSeconds(path)).toBe(300);
+  });
+
+  it('stays at five minutes for an env block that does not name the flag', async () => {
+    // `String(undefined)` is the string 'undefined', which is neither '', '0'
+    // nor 'false': a settings file with any other env entry would buy an hour.
+    const path = join(dir, 'settings.json');
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(path, JSON.stringify({ env: { SOMETHING_ELSE: '1' } }), 'utf8');
     expect(readDerivedCacheTtlSeconds(path)).toBe(300);
   });
 });

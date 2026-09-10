@@ -18,7 +18,7 @@ import {
   remoteOf,
   remoteRefPattern,
 } from './branches.js';
-import { git, gitAttempt } from './git.js';
+import { GitError, git, gitAttempt } from './git.js';
 import { parseWorktreeList } from './worktrees.js';
 
 /**
@@ -60,7 +60,7 @@ export class DirtyWorktreeError extends Error {
    * @param status - Output of `git status --porcelain` in that worktree.
    */
   constructor(path: string, status: string) {
-    super(`${path} has uncommitted changes; removing it needs force\n${status.trim()}`);
+    super(`${path} has uncommitted changes; removing it needs --force\n${status.trim()}`);
     this.name = 'DirtyWorktreeError';
     this.path = path;
     this.status = status;
@@ -113,6 +113,8 @@ export class InvalidIssueKeyError extends Error {
  * Thrown when the worktree registered for an issue has no branch to work on.
  */
 export class DetachedWorktreeError extends Error {
+  /** Key of the issue the worktree belongs to. */
+  readonly issueKey: string;
   /** Absolute path of the detached worktree. */
   readonly path: string;
 
@@ -127,6 +129,7 @@ export class DetachedWorktreeError extends Error {
       `the worktree for ${issueKey} at ${path} has a detached HEAD; check a branch out there or remove it`,
     );
     this.name = 'DetachedWorktreeError';
+    this.issueKey = issueKey;
     this.path = path;
   }
 }
@@ -142,6 +145,7 @@ export class GitRepo implements Repo {
 
   private readonly config: RepoConfig;
   private readonly remote: string;
+  private fetchError: string | null = null;
 
   /**
    * Builds a repo connector over one main checkout.
@@ -249,14 +253,18 @@ export class GitRepo implements Repo {
     playbook: Playbook,
     hints: PrepareHints = {},
   ): Promise<PreparedCheckout> {
+    // Validated for every isolation, not only the ones that build a path: the
+    // key also names the tmux session and the session directory.
+    const path = this.worktreePath(issue.key);
     if (playbook.isolation === 'shared') {
       return { cwd: this.config.path, branch: null, needsBootstrap: false };
     }
 
-    const path = this.worktreePath(issue.key);
-    // The base ref is fetched before the reuse check, so a long-lived worktree
-    // is not worked against whatever the last fetch happened to leave behind.
-    if (playbook.isolation === 'worktree') await git(['fetch', this.remote], this.config.path);
+    // Both non-shared isolations resolve refs from the remote — one to branch
+    // off the base ref, the other to find the issue's branch — so both fetch,
+    // and before the reuse check so a long-lived worktree is not worked
+    // against whatever the last fetch happened to leave behind.
+    await this.fetchBaseRef();
 
     const existing = await this.worktreeFor(issue.key);
     if (existing !== null) {
@@ -280,6 +288,33 @@ export class GitRepo implements Repo {
     const branch = branchName(this.config.branchPattern, issue);
     await this.addWorktree(path, branch);
     return { cwd: path, branch, needsBootstrap: true };
+  }
+
+  /**
+   * Message from the last failed base-ref fetch, or null when the last one
+   * worked or none has been attempted.
+   *
+   * @returns The failure text, or null.
+   */
+  lastFetchError(): string | null {
+    return this.fetchError;
+  }
+
+  /**
+   * Fetches the base ref's remote, remembering a failure instead of raising it.
+   *
+   * A checkout that is already on disk must stay usable without a network, so
+   * an unreachable remote degrades to stale refs plus a warning rather than a
+   * refused start.
+   *
+   * @returns Nothing.
+   */
+  private async fetchBaseRef(): Promise<void> {
+    const attempt = await gitAttempt(['fetch', this.remote], this.config.path);
+    this.fetchError = attempt.ok
+      ? null
+      : new GitError(['fetch', this.remote], this.config.path, attempt.exitCode, attempt.stderr)
+          .message;
   }
 
   /**

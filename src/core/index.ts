@@ -134,6 +134,7 @@ export type {
   ConnectorSummary,
   CreateSessionRequest,
   CreateWorkspaceRequest,
+  ErrorReason,
   ErrorResponse,
   EventFrame,
   IssueDetailResponse,

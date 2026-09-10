@@ -67,6 +67,7 @@ src/
     projection.ts       issues + sessions → columns/cards for the board
     cache-clock.ts      prompt-cache expiry derivation
     api.ts              wire types shared with src/web (REST + WS payloads)
+    index.ts            the package's public surface, re-exported from the above
   connectors/
     issues/jira/        IssueSource over Jira Cloud REST v3
     repos/git/          Repo over git worktrees (worktree | issue-worktree | shared)
@@ -77,13 +78,17 @@ src/
     session-manager.ts  orchestration, persistence, event fan-out
     store.ts            JSON persistence under dataDir
     config-file.ts      reads config.json off disk and hands it to the schema
+    config-check.ts     `npm run config:check`: validates the config and exits
+    connectors.ts       the server's only import of the connector package
     hooks.ts            hook ingress → state machine → broadcast
     terminal-ws.ts      WS ↔ node-pty bridge
     mutex.ts            per-key serialisation of read-modify-write sequences
     util.ts             shared JSON-body reader and error-message helper
-  web/                  Vite + React SPA (vite.config.ts, index.html, src/)
+  web/                  Vite + React SPA (vite.config.ts, index.html, src/,
+                        including dev-mock.ts, which VITE_MOCK=1 installs)
 test/                   vitest, mirrors src/core and pure parts of connectors
-docs/                   spec.md, plan.md, connectors.md
+docs/                   spec.md, plan.md, connectors.md, design-notes.md,
+                        verification.md, screenshots/
 config.example.json     the owner's real shape, minus secrets
 ```
 
@@ -124,7 +129,8 @@ connectors{id}
 workspaces{id}             what the header dropdown switches between
   name                     shown in the switcher
   epic                     parent key (`DOC-3807`) or numeric issue id; the shape is
-                           validated, and the value is quoted into the default JQL
+                           validated, and a key (never a numeric id, which JQL would
+                           then resolve as a key first) is quoted into the default JQL
                            parent = "<epic>" AND statusCategory != Done ORDER BY Rank ASC
   jql?                     raw override of the whole query
   connector                connector id
@@ -134,7 +140,10 @@ workspaces{id}             what the header dropdown switches between
 repos{id}
   path                     absolute path of the main checkout
   worktreeDir              where worktrees go; worktree path = <worktreeDir>/<KEY>
-  baseRef                  'origin/main'; fetched before every worktree add
+  baseRef                  'origin/main'; its remote is fetched at the start of every
+                           non-shared `prepare`, before the reuse check. The fetch is
+                           an attempt: an unreachable remote leaves the refs stale and
+                           the start dialog says so, it never refuses the start
   branchPattern            '{{key}}-{{slug}}'
   bootstrap                shell string run in the tmux session after a NEW worktree
   playbooks[]
@@ -162,7 +171,8 @@ repo path that is not a git checkout.
 
 Valid `effort`: low, medium, high, xhigh, max. Valid `permissionMode`:
 acceptEdits, auto, bypassPermissions, manual, dontAsk, plan, plus `default`
-meaning "pass no flag". These are the values `claude --help` 2.1.266 lists;
+meaning "pass no flag". These are the values `claude --help` listed at 2.1.266,
+which is the release every empirical claim in this document was measured on;
 the picker offers exactly these. `bypassPermissions` is launched as
 `--dangerously-skip-permissions`, not as `--permission-mode
 bypassPermissions`: only the flag skips the prompts an unattended session has
@@ -185,7 +195,7 @@ interface SessionRecord {
   branch: string | null; // null for isolation 'shared'
   model: string;
   effort: Effort;
-  permissionMode: PermissionMode | 'default';
+  permissionMode: PermissionModeSetting; // includes 'default', which passes no flag
   prompt: string; // exactly what was sent
   claudeSessionId: string | null; // from the SessionStart hook
   state: SessionState;
@@ -233,34 +243,44 @@ failed          bootstrap or launch failed; tmux window holds the failed shell
 
 Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 
-| Event                                           | From                                    | To                 | Side data                                                                   |
-| ----------------------------------------------- | --------------------------------------- | ------------------ | --------------------------------------------------------------------------- |
-| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                             |
-| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                             |
-| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended                                                            |
-| hook SessionStart                               | starting                                | starting           | record `claudeSessionId`                                                    |
-| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                               |
-| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                               |
-| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                             |
-| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                               |
-| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`               |
-| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict     |
-| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, under the notification guard        |
-| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message, under the notification guard        |
-| hook PermissionDenied                           | any live                                | working            | clear pending                                                               |
-| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl |
-| action interrupt                                | working, waiting-*                      | idle               | the runner sent Escape; no hook reports an interrupt                        |
-| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                     |
-| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                   |
-| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9)                                              |
+| Event                                           | From                                    | To                 | Side data                                                                    |
+| ----------------------------------------------- | --------------------------------------- | ------------------ | ---------------------------------------------------------------------------- |
+| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                              |
+| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                              |
+| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended                                                             |
+| hook SessionStart (source ≠ resume)             | starting                                | starting           | record `claudeSessionId`; an empty id never overwrites a known one           |
+| hook SessionStart (source = resume)             | starting                                | idle               | the only signal that a resumed session is back at the prompt; never notifies |
+| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                                |
+| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                                |
+| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                              |
+| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                                |
+| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                |
+| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict      |
+| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, under the notification guard         |
+| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message, under the notification guard         |
+| hook PermissionDenied                           | any live                                | working            | clear pending                                                                |
+| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl  |
+| action interrupt                                | working, waiting-*                      | idle               | the runner sent Escape; no hook reports an interrupt                         |
+| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                      |
+| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                    |
+| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9)                                               |
 
 The notification guard, shared by both Notification rows: a Notification only
 ever opens a pending, never redescribes or reclassifies one, so it is dropped
 when the record already needs the owner or already carries a `pending`. It is
-dropped too when its `prompt_id` is the one on `lastToolResultPromptId`, i.e.
-when a tool of that same turn has already returned: the dialog it describes was
-answered while it was in flight (it lags by ~6 s, and a question answered in 3 s
-lands its PostToolUse first).
+dropped too when its `prompt_id` is the one on `lastToolResultPromptId`: the
+dialog it describes was answered while it was in flight (it lags by ~6 s, and a
+question answered in 3 s lands its PostToolUse first).
+
+`lastToolResultPromptId` is written by PostToolUse / PostToolUseFailure /
+PermissionDenied and holds the turn of a tool result **that closed a dialog the
+record knew about** — a result arriving with `pending` already null writes null
+instead. Otherwise the first tool result of a turn would suppress every later
+Notification of that turn, including one describing a dialog whose
+PermissionRequest hook never reached the server, which is exactly the case the
+Notification is the fallback for. Every run boundary (`claude-start`,
+`claude-exit`, SessionEnd) clears it, so the guard never depends on prompt ids
+being unique across runs.
 
 Unknown events are ignored and logged. Every hook and launcher signal is
 appended to `<dataDir>/sessions/<id>/events.jsonl` (raw payload + resulting
@@ -271,7 +291,10 @@ a 19-minute verification session logged 870 of them against 47 real events —
 
 Hook facts the design relies on, measured on 2026-09-09 against Claude Code
 2.1.266 with the §8.1 settings file and kept as
-`test/fixtures/hook-events.jsonl`:
+`test/fixtures/hook-events.jsonl`. The integration run in
+`docs/verification.md` was against 2.1.267 and observed the same shapes, so
+nothing below is known to have moved — but the measurements are 2.1.266's and
+the release is what they are pinned to:
 
 - Every payload carries `session_id`, `transcript_path`, `cwd`,
   `scratchpad_dir`, `hook_event_name`. `permission_mode` is on
@@ -307,26 +330,34 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
 
 ### 5.4 Actions
 
-| Action                 | Effect                                                                                                                                                                           |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| start                  | §5.5                                                                                                                                                                             |
-| resume                 | kills any tmux session with the record's id, regenerates the launcher with `--resume <claudeSessionId>`, same cwd; state → starting. Refused when `claudeSessionId` is null.     |
-| interrupt              | `tmux send-keys -t <id> Escape`                                                                                                                                                  |
-| kill                   | `tmux kill-session -t <id>`; state → exited                                                                                                                                      |
-| mark-done / unmark     | toggles `done`                                                                                                                                                                   |
-| archive                | hides the record; refused while live                                                                                                                                             |
-| remove-worktree        | `git worktree remove <path>` (plus `--force` when the caller confirms a dirty tree); refused while any live session uses that cwd                                                |
-| send-to-review / clear | per-issue flag (§6)                                                                                                                                                              |
-| open-editor            | spawns `editor.command` with `editor.args` (`{{path}}` → the issue's worktree, or the repo for `shared`), detached, stdio ignored; refused when no worktree exists for the issue |
+| Action                 | Effect                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| start                  | §5.5                                                                                                                                                                                                                                                                                                                                                                                      |
+| resume                 | probes the CLI, then kills any tmux session with the record's id, regenerates the launcher with `--resume <claudeSessionId>`, same cwd; state → starting, and the replayed transcript's `SessionStart source: resume` then moves it to idle (§5.3). Refused when `claudeSessionId` is null, and the runner is asked before the record moves, so a refusal leaves the record where it was. |
+| interrupt              | `tmux send-keys -t <id> Escape`                                                                                                                                                                                                                                                                                                                                                           |
+| kill                   | `tmux kill-session -t <id>`; state → exited                                                                                                                                                                                                                                                                                                                                               |
+| mark-done / unmark     | toggles `done`                                                                                                                                                                                                                                                                                                                                                                            |
+| archive                | hides the record; refused while live                                                                                                                                                                                                                                                                                                                                                      |
+| remove-worktree        | `git worktree remove <path>` (plus `--force` when the caller confirms a dirty tree); refused while any live session uses that cwd                                                                                                                                                                                                                                                         |
+| send-to-review / clear | per-issue flag (§6)                                                                                                                                                                                                                                                                                                                                                                       |
+| open-editor            | spawns `editor.command` with `editor.args` (`{{path}}` → the issue's worktree, or the repo for `shared`), detached, stdio ignored; refused when no worktree exists for the issue                                                                                                                                                                                                          |
 
 ### 5.5 Start sequence
 
 1. Server validates: playbook exists, no live session for (issue, playbook),
-   model/effort/permission values are in the allowed sets.
+   model/effort/permission values are in the allowed sets, and the prompt is a
+   non-empty string (400 otherwise). The whole sequence holds the lock of the
+   session name it would take _and_ a per-(repo, issue) checkout lock, so two
+   simultaneous starts cannot both pass the liveness check and a removal of the
+   checkout cannot land in the middle of preparing it.
 2. `Repo.prepare(issue, playbook, hints)` resolves `cwd` and `branch`; the
    server passes `hints.knownBranch` from the newest non-archived record for
    that issue in that repo:
-   - `worktree`: `git fetch <remote of baseRef>`; if `<worktreeDir>/<KEY>` is
+   Both non-shared isolations first attempt `git fetch <remote of baseRef>`; a
+   failed fetch is recorded as staleness, never raised. A registered worktree
+   whose HEAD is detached is refused rather than reused: there is no branch to
+   work on and the owner has to repair it by hand.
+   - `worktree`: if `<worktreeDir>/<KEY>` is
      already a registered worktree, reuse it (no bootstrap); else
      `git worktree add -b <branch> <path> <baseRef>` and mark `needsBootstrap`.
      If the branch already exists, `git worktree add <path> <branch>`.
@@ -352,9 +383,20 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
    - POST `claude-exit` with the exit code; `exec bash`.
      The record is persisted before tmux is invoked so a crash between the two
      leaves a `starting` record the reconciler can mark failed.
-5. Reconciler on server boot and every 10 s: for each live record,
+5. Reconciler on server boot and every 10 s: for each live record whose
+   `stateSince` is older than one interval — a younger one is still in the
+   launcher's hands, and a resume kills and recreates the tmux session —
    `tmux has-session -t <id>`; missing → `exited` (or `failed` if it never
-   reached `starting`).
+   reached `starting`). A probe that throws is logged and the record is left
+   alone; a pass that is already running is skipped rather than overlapped.
+
+   The reconciler answers liveness and nothing else. A record whose `stateSince`
+   predates the server's own start survived a restart: the hooks that would have
+   moved it were POSTed at a dead port and are gone, and nothing can recover
+   them. Such a record gets `staleSince: <this server's start>` on the record
+   and on `CardSession`, which says "this state may be out of date" rather than
+   guessing at a better one. The next event the reducer accepts for that session
+   clears it. The state is never inferred from a transcript.
 
 ## 6. Board projection (`core/projection.ts`)
 
@@ -382,9 +424,11 @@ the same sessions.
 
 Card payload: issue (key, summary, type, status, statusCategory, labels, url),
 column, sessions (each: id, playbookId, state, stateSince, pending,
-cache, done), primary playbook for the column (`primaryFor` match; falls back
-to the first playbook), the tmux attach command, and the worktree path when
-known.
+lastAssistantMessage, lastExitCode, staleSince, cache, done, live, needsYou,
+branch, attachCommand —
+the attach command is per session, not per card), primary playbook for the
+column (`primaryFor` match; falls back to the first playbook), and the worktree
+path when known.
 
 ## 7. Prompts and playbooks
 
@@ -392,6 +436,10 @@ Template variables: `{{key}} {{summary}} {{type}} {{status}} {{labels}}
 {{url}} {{description}} {{branch}} {{worktree}}`. Rendering is a literal
 replace; unknown variables stay as written; `{{description}}` is plain text
 (ADF walked to text, paragraphs joined with blank lines, lists as `- `).
+`{{branch}}` renders "the branch resolved when the session starts" when there
+is no branch yet — `shared` isolation, or `issue-worktree` before the checkout
+exists — because a blank slot in "on branch {{branch}}" reads as naming a
+branch with no name.
 
 The start dialog shows: playbook selector, one editable textarea prefilled
 with the rendered template (whole thing editable, per the owner), model,
@@ -484,17 +532,38 @@ claude` PreToolUse hook still rewrote `ls -la` into `rtk ls -la` while the
 
 `POST /api/hooks/:sessionId/:event` — body is the hook's stdin JSON. The
 server looks the record up, runs the state machine, persists, broadcasts.
-Unknown session ids get 404 and are logged; nothing else. The endpoint is
-unauthenticated and bound to loopback only.
+Unknown session ids get 404 and are logged. A body that is not a readable JSON
+object — unparseable, an array, a scalar, or past the 1 MB cap — gets 400 and a
+log line, because reducing it as `{}` would report a state change that never
+happened. A hook name nothing subscribes to gets 204 and a log line. The
+endpoint is unauthenticated and bound to loopback only.
+
+The boundary is **typed by assertion, not by parse**: `asHookEvent` checks the
+hook name against `HOOK_EVENT_NAMES` and then casts the body. This is
+deliberate. The payload is Claude Code's, its shape moves between releases, and
+every field the reducer reads is already narrowed at the point of use —
+`typeof message === 'string'`, `hook.prompt_id ?? null`, `questionSummary`
+walking an `unknown` `tool_input`. A schema here would add a second place to
+keep in step with the CLI and would reject payloads the reducer copes with, in
+exchange for no guarantee the use sites do not already give.
 
 ### 8.3 Terminal attach
 
-`WS /ws/terminal/:sessionId`. On connect the server spawns
-`node-pty` → `tmux attach-session -t <id>` with the client's cols/rows.
+`WS /ws/terminal/:sessionId?cols=<n>&rows=<n>`. On connect the server spawns
+`node-pty` → `tmux attach-session -t <id>` at the size the query names; a value
+that is not an integer between 1 and 1000 falls back to the server's default.
 Binary frames carry pty bytes both ways; a JSON text frame
-`{"type":"resize","cols":n,"rows":n}` resizes the pty. Close → pty kill
-(detaches that client only; tmux keeps running). Several viewers can attach;
-`window-size latest` makes tmux follow the most recent resize.
+`{"type":"resize","cols":n,"rows":n}` resizes the pty, and any other text frame
+is ignored. Close → pty kill (detaches that client only; tmux keeps running).
+Several viewers can attach; `window-size latest` makes tmux follow the most
+recent resize.
+
+Two behaviours an operator needs: an unknown session id is refused with an
+`{type:'error'}` frame and close 1008 rather than a silent empty terminal, and
+pty output is **dropped** while more than 4 MB is queued on a viewer's socket.
+A stalled viewer therefore loses output instead of back-pressuring the pty and
+growing the server's heap; a terminal repaints itself, so what it loses is
+scrollback.
 
 Both WebSocket endpoints go through `@hono/node-server` 2's own
 `upgradeWebSocket`, with a `ws` `WebSocketServer({ noServer: true })` passed
@@ -518,7 +587,8 @@ The runner's generated `statusline.sh` reads stdin once, POSTs it to
 pipes the same payload into the owner's original statusline command when
 `~/.claude/settings.json` has one, so the TUI keeps its own statusline. The
 server keeps `cache = { expiresAt, ttlSeconds, warm, source: 'statusline' }`
-from the payload and only broadcasts when `expiresAt`/`warm` change.
+from the payload and only broadcasts when `expiresAt`, `ttlSeconds` or `warm`
+change.
 
 Fallback when no statusline payload has arrived yet: on Stop, `cache =
 { expiresAt: now + ttlSeconds, warm: true, source: 'derived' }` with
@@ -536,11 +606,25 @@ vars). Endpoint `POST /rest/api/3/search/jql` with `fields:
 summary,issuetype,status,labels,assignee,priority,description,updated`,
 paginated on `nextPageToken`. Status category from
 `status.statusCategory.key` (`new` → todo, `indeterminate` → inprogress,
-`done` → done). Description ADF → plain text in the connector.
+`done` → done). Description ADF → plain text in the connector; a document that
+is not shaped like ADF degrades to less text, never to a failed fetch, and a
+resource with no usable `key` is dropped from the list.
+
+Limits, both user-visible: every request carries a 15 s abort (`JIRA_TIMEOUT_MS`),
+reported as a `JiraHttpError` naming the site and the URL rather than as a bare
+`TimeoutError`; and a search walks at most 50 pages of 100
+(`JIRA_MAX_PAGES` × `JIRA_PAGE_SIZE`). A query with pages left after the cap
+fails rather than presenting a partial epic as the whole one, and because
+repeating it changes nothing it also suspends that workspace's poll timer until
+the owner asks for a refresh.
 
 Polling: every `pollSeconds`, plus `POST /api/workspaces/:id/refresh`, plus once
 whenever a session leaves the live set. On failure the last good list is
-served with `sourceError` set on the board payload; the UI shows a banner.
+served with `sourceError` set on the board payload; the UI shows a banner. A
+caller that arrives while a fetch is already in flight joins it only when that
+fetch was issued after the caller's own request; otherwise it awaits it and
+then runs its own, so a refresh never answers with a list read before the
+change it was clicked for.
 
 Interface:
 
@@ -559,7 +643,10 @@ REST (JSON):
 ```
 GET  /api/config/public                → { workspaces: [{id,name,epic,repo,connector}], repos: [{id,path}], connectors: [{id,site}], runner: {models, defaults, efforts, permissionModes} }
 POST /api/workspaces                   { id?, name, epic, repo, connector | newConnector: {id, site, emailEnv, tokenEnv}, reviewStatuses?, jql? } → 201 workspace summary; 400 with zod issues, 409 on duplicate id
-DELETE /api/workspaces/:id             → 204; sessions and worktrees are untouched (they belong to the repo)
+DELETE /api/workspaces/:id             → 204; sessions and worktrees are untouched (they belong to the repo).
+                                         A connector no remaining workspace references goes with it: nothing
+                                         else can remove one, so an inline connector created from the dialog
+                                         would otherwise be permanent.
 GET  /api/workspaces/:id/board         → BoardView { workspaceId, name, playbooks[], columns[], sourceError, fetchedAt, needsYouCount }
 POST /api/workspaces/:id/refresh       → BoardView
 GET  /api/workspaces/:id/issues/:key   → IssueDetail { issue (with description), sessions[], worktreePath, flags }
@@ -576,7 +663,8 @@ POST /api/hooks/:sessionId/launcher/:event   → 204 (launcher ingress, §5.5)
 ```
 
 The three ingress routes answer 404 for an unknown session id (§8.2) and 400
-for a body that is not a JSON object.
+for a body that is not a readable JSON object — which includes one past the
+1 MB cap, so an oversized payload is answered 400 rather than 413.
 
 WebSocket:
 
@@ -584,19 +672,33 @@ WebSocket:
 WS /ws/events     server → client: { type: 'board', workspaceId, view }   (debounced 250 ms)
                                     { type: 'config', config: PublicConfigResponse }  after a workspace is added or removed
                                     { type: 'session', record }
-WS /ws/terminal/:sessionId           see §8.3
+WS /ws/terminal/:sessionId?cols=&rows=   see §8.3
 ```
 
-Errors: JSON `{ error: string, detail?: string, issues?: [{path, message}] }`
+Errors: JSON
+`{ error: string, detail?: string, issues?: [{path, message}], reason?: ErrorReason }`
 with 4xx for refusals (no live session, no branch found, dirty worktree, an
 issue the tracker would not hand over) so the UI can show them verbatim. `issues` carries the zod problems of a rejected
-workspace request, each path pointing at the field that caused it.
+workspace request, each path pointing at the field that caused it. `reason` is
+the closed set `dirty-worktree | session-live | main-checkout | duplicate-id |
+no-branch | missing-executable | detached-worktree`; it is the only thing a UI
+may branch on, so `error` and `detail` stay free text. A refusal none of those
+names describes carries no `reason`.
 
 ## 12. Web UI
 
 Vite + React 19, plain CSS with custom properties (no utility framework),
 `@xterm/xterm` + fit addon. Two routes handled by a tiny hash-free history
 switch: `/` board, `/session/:id` terminal.
+
+In dev the SPA is served by Vite on 5173, which proxies `/api` and `/ws` to the
+server on 4400; 4400 itself has no built SPA and says so rather than serving
+the source `index.html`. After `npm run build` the SPA is served from 4400 and
+Vite is not running. `VITE_MOCK=1 npm run dev:web` installs the hand-written
+fixtures in `src/web/src/dev-mock.ts` in place of every request and socket, so
+the UI runs with no server, no Jira and no tmux. The mock certifies nothing —
+it is not derived from the server and can disagree with it in either
+direction — and it is tree-shaken out of a production build.
 
 Aesthetic direction (owner's pick): **dark, editorial instrument panel** —
 proper UI typeface with a mono companion for keys and timers, generous
@@ -635,13 +737,15 @@ Session view:
   cache countdown; buttons Interrupt · Kill · Resume (when exited) · Back.
 - Right panel: issue summary/description, status chip, labels, Jira link,
   worktree path, Open in VS Code, `tmux attach -t <id>` copy, Remove
-  worktree (with force confirm when refused as dirty).
+  worktree (with force confirm when the refusal carries
+  `reason: 'dirty-worktree'`; the message text is never parsed).
 - When the session needs you the header pill pulses and shows the pending
   summary.
 
 Notifications: `Notification` API, permission requested once from a button in
 the header; one notification per transition into the needs-you set, titled
-`<KEY> · <state>`, body = pending summary or last assistant snippet.
+`<KEY> · <state>`, body = `CardSession.pending?.summary` or, for an idle
+session (which by definition has none), `CardSession.lastAssistantMessage`.
 
 ## 13. Persistence
 
@@ -666,10 +770,26 @@ sessions/<id>/          prompt.txt settings.json statusline.sh run.sh events.jso
   with git's stderr.
 - Hook arrives for an unknown session → 404, logged.
 - PTY spawn fails → WS closes with a reason frame; the UI shows it.
+- Bootstrap exits non-zero → `failed`, with the exit code on the record and on
+  `CardSession.lastExitCode`; the failed shell stays open in tmux.
+- The listening socket cannot be opened, for any reason → the cause is logged
+  and the process exits 1. Without a socket it serves nothing, and the signal
+  handlers keep the event loop alive, so it must not stay up.
+- An unhandled _rejection_ is logged and swallowed: it usually arrives outside
+  the request that caused it, and losing every session's state tracking is
+  worse than one lost stack trace. An uncaught _exception_ is logged and the
+  process exits 1 — it may be mid-invariant, and the reconciler picks the live
+  records up on the next boot.
 
 ## 15. Testing
 
-Vitest, unit only, no tmux and no network:
+Vitest. No tmux and no network, with one sanctioned exception:
+`test/connectors/git-repo.test.ts` builds a real repository, a real bare
+`origin` and real worktrees under a temporary directory and drives `GitRepo`
+against them. A seam there would test the seam: every behaviour the file
+covers — reuse, detached HEAD, dirty-tree refusal, fetch-before-reuse, branch
+resolution by commit date — is a fact about git, not about the connector's own
+logic.
 
 - `state-machine`: a table of (state, event) → (state, pending, extras),
   including "unknown event leaves state untouched" and "SessionEnd from
@@ -681,8 +801,12 @@ Vitest, unit only, no tmux and no network:
 - `projection`: column precedence table, ordering, union with session-only
   issues.
 - `cache-clock`: statusline payload → cache, derived fallback, cold rules.
-- `jira/map`: fixture JSON → Issue, ADF → text.
-- `git/branch-lookup`: parsing of `git branch -r` output.
+- `jira/map`: fixture JSON → Issue, ADF → text, and ADF that is not shaped like
+  ADF degrading to less text rather than to a failed fetch.
+- `connectors/git-parsers`: parsing of `git branch -r`, `for-each-ref` and
+  `git worktree list --porcelain` output.
+- `connectors/git-repo`: the integration file above.
+- `server/mutex`: ordering, a rejecting critical section, chain cleanup.
 
 Manual verification (plan task, integration): start an implement session on a
 real DOC-3807 child, watch bootstrapping → starting → working → idle, answer

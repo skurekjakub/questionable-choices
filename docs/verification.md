@@ -24,6 +24,22 @@ server on 4400, Vite on 5173. Browser driven through Playwright.
 | Open in VS Code                                       | spawned; outcome unobservable (see below)               |
 | Remove worktree                                       | first try, no `--force` needed                          |
 
+## Screenshots
+
+Captured during this run and kept in `docs/screenshots/`:
+
+| File                       | What it shows                                   |
+| -------------------------- | ----------------------------------------------- |
+| `board.png`                | The board against the real DOC-3807 epic        |
+| `board-live.png`           | The same board with a session running           |
+| `live-board-needs-you.png` | A card in the Needs you lane                    |
+| `live-bootstrapping.png`   | A session running its repo's bootstrap command  |
+| `live-starting.png`        | `claude` launched, before its first hook        |
+| `live-working.png`         | Mid-turn                                        |
+| `live-needs-you.png`       | Blocked on an `AskUserQuestion` dialog          |
+| `live-idle.png`            | Turn finished, the owner's move                 |
+| `session.png`              | The session view: terminal, header, issue panel |
+
 ## Timeline
 
 All times UTC. One session, `qc-DOC-3871-implement`, playbook `implement`,
@@ -148,6 +164,27 @@ because the reconciler cannot recover a record whose events were never
 received — one session's failure must not cost every other session its
 history. A port already in use is the one boot failure that still exits: one
 line naming the port, status 1.
+
+## Known behaviour, not defects
+
+**Rewriting the configuration is not byte-for-byte round-trip clean.** Adding a
+workspace and removing it again leaves the file semantically identical but
+textually changed, in two ways spec §4 already sanctions ("validated with zod
+at boot", "`~` is expanded while parsing and is not restored"):
+
+1. Every inline array is re-emitted one element per line — `editor.args`,
+   `runner.models`, `primaryFor`, `reviewStatuses` — because the whole document
+   is serialised from the parsed configuration, not patched in place.
+2. Defaults are materialised: a workspace that carried neither gains
+   `"reviewStatuses": ["Ready for review"]` and `"pollSeconds": 120`.
+
+Both are harmless to the running server and to a re-read, but they do rewrite a
+file the owner maintains by hand, so an owner who cares about the formatting
+should expect to re-tidy it after using the dialog. The third finding of the
+same QA run — an inline connector surviving the removal of its only workspace,
+with no route and no control able to remove it — was a real one-way door and is
+fixed: `DELETE /api/workspaces/:id` now drops a connector nothing else
+references (spec §11).
 
 ## What still does not work
 

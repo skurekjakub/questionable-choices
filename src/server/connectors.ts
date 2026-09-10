@@ -79,7 +79,6 @@ export function buildConnectors(
   const runner = createRunner({
     config: config.runner,
     port: config.port,
-    dataDir: config.dataDir,
     home,
     sessionDir,
   });

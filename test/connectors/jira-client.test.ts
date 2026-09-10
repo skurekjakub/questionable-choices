@@ -13,6 +13,27 @@ interface RecordedCall {
   method: string;
   headers: Record<string, string>;
   body: unknown;
+  signal: unknown;
+}
+
+/**
+ * Builds a client for one site over a fetch replacement.
+ *
+ * @param fetch - Transport the client sends through.
+ * @param overrides - Page cap and timeout overrides.
+ * @returns The client.
+ */
+function makeClient(
+  fetch: FetchLike,
+  overrides: { maxPages?: number; timeoutMs?: number } = {},
+): JiraClient {
+  return new JiraClient({
+    site: 'example.atlassian.net',
+    email: 'me@example.com',
+    token: 'secret',
+    fetch,
+    ...overrides,
+  });
 }
 
 /**
@@ -34,10 +55,12 @@ function recordingFetch(responses: Response[]): { fetch: FetchLike; calls: Recor
       method: init?.method ?? 'GET',
       headers,
       body: typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined,
+      signal: init?.signal,
     });
-    const next = queue.shift();
-    if (next === undefined) throw new Error('unexpected extra fetch call');
-    return next;
+    // A call past the queue answers with a distinguishable extra page rather
+    // than throwing, so an over-fetching walk fails on the call-count
+    // assertion instead of on the fake.
+    return queue.shift() ?? json({ issues: [{ key: 'EXTRA-1' }], isLast: true });
   };
   return { fetch, calls };
 }
@@ -152,38 +175,60 @@ describe('JiraClient.searchJql', () => {
         headers: { 'content-type': 'text/html' },
       }),
     ]);
-    const client = new JiraClient({
-      site: 'example.atlassian.net',
-      email: 'me@example.com',
-      token: 'secret',
-      fetch,
-    });
 
-    await expect(client.searchJql('parent = DOC-100')).rejects.toThrow(/login/);
+    const failure = makeClient(fetch).searchJql('parent = DOC-100');
+
+    // A raw SyntaxError also mentions the body, so the type is what pins the
+    // branch: only the client's own wrapper carries the site and the URL.
+    await expect(failure).rejects.toBeInstanceOf(JiraHttpError);
+    await expect(failure).rejects.toThrow(/login/);
   });
 
   it('reports a 404 on the search as a failure rather than an empty epic', async () => {
     const { fetch } = recordingFetch([new Response('gone', { status: 404 })]);
-    const client = new JiraClient({
-      site: 'example.atlassian.net',
-      email: 'me@example.com',
-      token: 'secret',
-      fetch,
-    });
 
-    await expect(client.searchJql('parent = DOC-100')).rejects.toBeInstanceOf(JiraHttpError);
+    await expect(makeClient(fetch).searchJql('parent = DOC-100')).rejects.toBeInstanceOf(
+      JiraHttpError,
+    );
   });
 
   it('throws a JiraHttpError carrying the status and body', async () => {
     const { fetch } = recordingFetch([new Response('jql is broken', { status: 400 })]);
-    const client = new JiraClient({
-      site: 'example.atlassian.net',
-      email: 'me@example.com',
-      token: 'secret',
-      fetch,
-    });
 
-    await expect(client.searchJql('nonsense')).rejects.toBeInstanceOf(JiraHttpError);
+    await expect(makeClient(fetch).searchJql('nonsense')).rejects.toBeInstanceOf(JiraHttpError);
+  });
+
+  it('refuses a non-2xx whose body is real JSON, which parses without complaint', async () => {
+    const { fetch } = recordingFetch([json({ errorMessages: ['bad jql'] }, 400)]);
+
+    const failure = makeClient(fetch).searchJql('nonsense');
+
+    await expect(failure).rejects.toBeInstanceOf(JiraHttpError);
+    await expect(failure).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('carries an abort signal on every request', async () => {
+    const { fetch, calls } = recordingFetch([json({ issues: [], isLast: true })]);
+
+    await makeClient(fetch).searchJql('parent = DOC-100');
+
+    expect(calls[0]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('reports a request that outlived its timeout as a Jira error naming the url', async () => {
+    const honoursTheSignal: FetchLike = async (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(init.signal?.reason ?? new Error('aborted'));
+        });
+      });
+
+    const failure = makeClient(honoursTheSignal, { timeoutMs: 1 }).searchJql('parent = DOC-100');
+
+    await expect(failure).rejects.toBeInstanceOf(JiraHttpError);
+    await expect(failure).rejects.toMatchObject({ status: 0 });
+    await expect(failure).rejects.toThrow(/example\.atlassian\.net/);
+    await expect(failure).rejects.toThrow(/timed out after 1 ms/);
   });
 });
 

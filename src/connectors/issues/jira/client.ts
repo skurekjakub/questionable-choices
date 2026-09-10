@@ -88,7 +88,7 @@ export type FetchLike = typeof globalThis.fetch;
  * Thrown when Jira answers a request with a non-2xx status.
  */
 export class JiraHttpError extends Error {
-  /** HTTP status Jira answered with. */
+  /** HTTP status Jira answered with, or 0 when no response arrived. */
   readonly status: number;
   /** Request URL, without credentials. */
   readonly url: string;
@@ -98,12 +98,15 @@ export class JiraHttpError extends Error {
   /**
    * Builds a Jira HTTP error.
    *
-   * @param status - HTTP status Jira answered with.
+   * @param status - HTTP status Jira answered with, or 0 when the request never
+   *   produced a response.
    * @param url - Request URL the failure belongs to.
-   * @param body - Response body, already truncated.
+   * @param body - Response body, already truncated, or the reason no response
+   *   arrived when `status` is 0.
    */
   constructor(status: number, url: string, body: string) {
-    super(`Jira answered ${status} for ${url}${body === '' ? '' : `: ${body}`}`);
+    const what = status === 0 ? `did not answer ${url}` : `answered ${status} for ${url}`;
+    super(`Jira ${what}${body === '' ? '' : `: ${body}`}`);
     this.name = 'JiraHttpError';
     this.status = status;
     this.url = url;
@@ -211,15 +214,28 @@ export class JiraClient {
    */
   private async request(path: string, init: RequestInit, missingAsNull = false): Promise<unknown> {
     const url = `https://${this.site}${path}`;
-    const response = await this.fetchImpl(url, {
-      ...init,
-      signal: AbortSignal.timeout(this.timeoutMs),
-      headers: {
-        accept: 'application/json',
-        authorization: this.authorization,
-        ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
-      },
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        ...init,
+        signal: AbortSignal.timeout(this.timeoutMs),
+        headers: {
+          accept: 'application/json',
+          authorization: this.authorization,
+          ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
+        },
+      });
+    } catch (cause) {
+      // A timeout rejects with a bare DOMException, which reaches the owner's
+      // banner as "The operation was aborted" with no site and no URL.
+      if (
+        cause instanceof Error &&
+        (cause.name === 'TimeoutError' || cause.name === 'AbortError')
+      ) {
+        throw new JiraHttpError(0, url, `timed out after ${this.timeoutMs} ms`);
+      }
+      throw cause;
+    }
     if (missingAsNull && response.status === 404) return null;
     if (!response.ok) {
       const body = await response.text().catch(() => '');

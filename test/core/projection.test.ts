@@ -202,6 +202,37 @@ describe('ordering', () => {
     expect(keysIn(view, 'needs-you')).toEqual(['DOC-3', 'DOC-2', 'DOC-4', 'DOC-1']);
   });
 
+  it('ranks a card on its oldest qualifying session, not its newest', () => {
+    // A card with two dialogs is as old as the older of them; ranking it on the
+    // newer one lets a shorter wait outrank a longer one.
+    const view = projectWith({
+      issues: [makeIssue({ key: 'DOC-1' }), makeIssue({ key: 'DOC-2' })],
+      sessions: [
+        makeRecord({
+          id: 'qc-DOC-1-a',
+          issueKey: 'DOC-1',
+          state: 'waiting-permission',
+          stateSince: '2026-09-09T09:00:00.000Z',
+        }),
+        makeRecord({
+          id: 'qc-DOC-1-b',
+          issueKey: 'DOC-1',
+          playbookId: 'test',
+          state: 'waiting-permission',
+          stateSince: '2026-09-09T11:00:00.000Z',
+        }),
+        makeRecord({
+          id: 'qc-DOC-2-a',
+          issueKey: 'DOC-2',
+          state: 'waiting-permission',
+          stateSince: '2026-09-09T10:00:00.000Z',
+        }),
+      ],
+    });
+
+    expect(keysIn(view, 'needs-you')).toEqual(['DOC-1', 'DOC-2']);
+  });
+
   it('ranks a blocked card on its dialog, not on an older idle session beside it', () => {
     const rows = [
       pair('DOC-1', 'waiting-permission', '2026-09-09T10:00:00.000Z'),
@@ -271,6 +302,7 @@ describe('card payload', () => {
           issueKey: 'DOC-7',
           state: 'waiting-permission',
           pending: { kind: 'permission', summary: 'Bash: ls' },
+          lastAssistantMessage: 'I looked at the loader.',
           branch: 'DOC-7-x',
         }),
       ],
@@ -296,6 +328,9 @@ describe('card payload', () => {
       state: 'waiting-permission',
       stateSince: '2026-09-09T10:00:00.000Z',
       pending: { kind: 'permission', summary: 'Bash: ls' },
+      lastAssistantMessage: 'I looked at the loader.',
+      lastExitCode: null,
+      staleSince: null,
       cache: null,
       done: false,
       live: true,
@@ -303,6 +338,55 @@ describe('card payload', () => {
       branch: 'DOC-7-x',
       attachCommand: 'tmux attach -t qc-DOC-7-implement',
     });
+  });
+
+  it('carries the last assistant snippet of an idle session, which has no pending', () => {
+    const view = projectWith({
+      issues: [makeIssue({ key: 'DOC-8' })],
+      sessions: [
+        makeRecord({
+          id: 'qc-DOC-8-implement',
+          issueKey: 'DOC-8',
+          state: 'idle',
+          pending: null,
+          lastAssistantMessage: 'Done: the loader now reads the front matter.',
+        }),
+      ],
+    });
+    const card = view.columns.find((column) => column.id === 'needs-you')?.cards[0] as Card;
+    expect(card.sessions[0]?.lastAssistantMessage).toBe(
+      'Done: the loader now reads the front matter.',
+    );
+  });
+
+  it('carries the exit code and the staleness marker a failed card needs', () => {
+    const view = projectWith({
+      issues: [makeIssue({ key: 'DOC-9' })],
+      sessions: [
+        makeRecord({
+          id: 'qc-DOC-9-implement',
+          issueKey: 'DOC-9',
+          state: 'failed',
+          lastExitCode: 127,
+          staleSince: '2026-09-09T12:00:00.000Z',
+        }),
+      ],
+    });
+    const card = view.columns
+      .flatMap((column) => column.cards)
+      .find((entry) => entry.issue.key === 'DOC-9') as Card;
+
+    expect(card.sessions[0]?.lastExitCode).toBe(127);
+    expect(card.sessions[0]?.staleSince).toBe('2026-09-09T12:00:00.000Z');
+  });
+
+  it('reports a null snippet when no Stop payload carried one', () => {
+    const card = projectWith({
+      sessions: [makeRecord({ lastAssistantMessage: null })],
+    })
+      .columns.flatMap((column) => column.cards)
+      .find((entry) => entry.sessions.length > 0) as Card;
+    expect(card.sessions[0]?.lastAssistantMessage).toBeNull();
   });
 
   it('has no worktree path when the workspace knows none', () => {

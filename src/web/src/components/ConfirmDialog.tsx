@@ -1,4 +1,4 @@
-import type { JSX } from 'react';
+import { useCallback, type JSX } from 'react';
 import { useFocusTrap } from '../hooks/useFocusTrap.js';
 
 /**
@@ -32,10 +32,16 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }): JSX.Element {
-  const dialog = useFocusTrap<HTMLDivElement>(onCancel);
+  // Backing out mid-flight would unmount the overlay while the request is still
+  // running, so the whole dismissal — Escape, backdrop and Cancel — is held.
+  const dismiss = useCallback(() => {
+    if (busy) return;
+    onCancel();
+  }, [busy, onCancel]);
+  const dialog = useFocusTrap<HTMLDivElement>(dismiss);
 
   return (
-    <div className="scrim dialog-scrim" onMouseDown={onCancel}>
+    <div className="scrim dialog-scrim" onMouseDown={dismiss}>
       <div
         className="dialog dialog-narrow"
         role="dialog"
@@ -58,7 +64,7 @@ export function ConfirmDialog({
         )}
         <div className="dialog-foot">
           <span className="action-spacer" />
-          <button type="button" className="btn btn-quiet" onClick={onCancel}>
+          <button type="button" className="btn btn-quiet" disabled={busy} onClick={dismiss}>
             Cancel
           </button>
           <button type="button" className="btn btn-danger" disabled={busy} onClick={onConfirm}>

@@ -92,6 +92,12 @@ export class FakeRepo implements Repo {
   readonly removed: Array<{ issueKey: string; force: boolean }> = [];
   /** Worktrees `worktreeFor` answers from. */
   readonly worktrees = new Map<string, WorktreeInfo>();
+  /** Directory `worktreePath` builds its answers under. */
+  worktreeDir = '/repos/worktrees';
+  /** Keys `worktreePath` refuses, standing in for the connector's key gate. */
+  readonly rejectedKeys = new Set<string>();
+  /** Message `lastFetchError` answers with, or null. */
+  fetchError: string | null = null;
 
   /**
    * Builds a repo that always prepares the same checkout.
@@ -145,6 +151,29 @@ export class FakeRepo implements Repo {
    */
   async worktreeFor(issueKey: string): Promise<WorktreeInfo | null> {
     return this.worktrees.get(issueKey) ?? null;
+  }
+
+  /**
+   * Builds the path an issue's worktree would sit at.
+   *
+   * @param issueKey - Key of the issue.
+   * @returns The path under `worktreeDir`.
+   * @throws {Error} When the key is in `rejectedKeys`.
+   */
+  worktreePath(issueKey: string): string {
+    if (this.rejectedKeys.has(issueKey)) {
+      throw new Error(`'${issueKey}' is not a usable issue key`);
+    }
+    return `${this.worktreeDir}/${issueKey}`;
+  }
+
+  /**
+   * Reports the configured fetch failure.
+   *
+   * @returns The message, or null.
+   */
+  lastFetchError(): string | null {
+    return this.fetchError;
   }
 }
 

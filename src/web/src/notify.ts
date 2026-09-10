@@ -14,29 +14,35 @@ const BASE_TITLE = 'questionable choices';
  * @returns A data URL for the icon, or null when canvas is unavailable.
  */
 function paintFavicon(needsYou: number): string | null {
-  const canvas = document.createElement('canvas');
-  canvas.width = 32;
-  canvas.height = 32;
-  const ctx = canvas.getContext('2d');
-  if (ctx === null) return null;
-  ctx.fillStyle = '#182228';
-  ctx.beginPath();
-  ctx.roundRect(1, 1, 30, 30, 7);
-  ctx.fill();
-  ctx.strokeStyle = '#2b3a42';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-  ctx.fillStyle = '#93a1a6';
-  for (const [index, width] of [16, 11, 7].entries()) {
-    ctx.fillRect(7, 9 + index * 6, width, 2);
-  }
-  if (needsYou > 0) {
-    ctx.fillStyle = '#f0a52e';
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 32;
+    canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    if (ctx === null) return null;
+    ctx.fillStyle = '#182228';
     ctx.beginPath();
-    ctx.arc(24, 24, 6, 0, Math.PI * 2);
+    // roundRect landed in Safari 16.4 and Firefox 112; an older browser throws
+    // here, and a decorative icon must not take the dashboard down with it.
+    ctx.roundRect(1, 1, 30, 30, 7);
     ctx.fill();
+    ctx.strokeStyle = '#2b3a42';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#93a1a6';
+    for (const [index, width] of [16, 11, 7].entries()) {
+      ctx.fillRect(7, 9 + index * 6, width, 2);
+    }
+    if (needsYou > 0) {
+      ctx.fillStyle = '#f0a52e';
+      ctx.beginPath();
+      ctx.arc(24, 24, 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    return canvas.toDataURL('image/png');
+  } catch {
+    return null;
   }
-  return canvas.toDataURL('image/png');
 }
 
 /**
@@ -48,6 +54,8 @@ function paintFavicon(needsYou: number): string | null {
 export function applyBadge(needsYou: number): void {
   document.title = needsYou > 0 ? `(${needsYou}) ${BASE_TITLE}` : BASE_TITLE;
   const href = paintFavicon(needsYou);
+  // Painting is best-effort; a browser that cannot draw the face keeps the icon
+  // it already has rather than losing the title update above.
   if (href === null) return;
   let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
   if (link === null) {
@@ -79,13 +87,20 @@ export function notificationPermission(): NotificationPermission | 'unsupported'
 /**
  * Asks the owner for permission to post notifications.
  *
- * @returns The permission after the prompt, or `'unsupported'`.
+ * @returns The permission after the prompt, `'denied'` when the browser refuses
+ * to prompt, or `'unsupported'`.
  */
 export async function requestNotificationPermission(): Promise<
   NotificationPermission | 'unsupported'
 > {
   if (!notificationsSupported()) return 'unsupported';
-  return Notification.requestPermission();
+  try {
+    return await Notification.requestPermission();
+  } catch {
+    // A context that exposes the API but refuses to prompt — private windows,
+    // policy-blocked embeds — rejects rather than resolving `'denied'`.
+    return 'denied';
+  }
 }
 
 /**
@@ -114,12 +129,14 @@ export function needsYouEntries(board: BoardView): Map<string, NeedsYouEntry> {
     for (const card of column.cards) {
       for (const session of card.sessions) {
         if (!session.needsYou) continue;
-        if (!NEEDS_YOU_STATES.includes(session.state)) continue;
+        if (!NEEDS_YOU_STATES.has(session.state)) continue;
         entries.set(session.id, {
           sessionId: session.id,
           issueKey: card.issue.key,
           state: session.state,
-          body: session.pending?.summary ?? '',
+          // An idle session has no pending by definition, so without the
+          // snippet the most common needs-you state would notify with no body.
+          body: session.pending?.summary ?? session.lastAssistantMessage ?? '',
         });
       }
     }
@@ -137,10 +154,17 @@ export function needsYouEntries(board: BoardView): Map<string, NeedsYouEntry> {
 export function notifyNeedsYou(entry: NeedsYouEntry, onOpen: (sessionId: string) => void): void {
   if (notificationPermission() !== 'granted') return;
   const label = STATE_LABELS[entry.state];
-  const notification = new Notification(`${entry.issueKey} · ${label}`, {
-    body: entry.body.length > 0 ? entry.body : label,
-    tag: entry.sessionId,
-  });
+  let notification: Notification;
+  try {
+    notification = new Notification(`${entry.issueKey} · ${label}`, {
+      body: entry.body.length > 0 ? entry.body : label,
+      tag: entry.sessionId,
+    });
+  } catch {
+    // Chrome on Android and some gated builds expose the constructor but throw
+    // from it; a missed notification must not unmount the board behind it.
+    return;
+  }
   notification.onclick = () => {
     window.focus();
     onOpen(entry.sessionId);

@@ -35,7 +35,9 @@ export async function readJsonObject(
   } catch {
     return null;
   }
-  if (text.length > limit) return null;
+  // `String.length` counts UTF-16 units, so a multi-byte body would pass a
+  // byte cap at up to three times its size.
+  if (Buffer.byteLength(text, 'utf8') > limit) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;

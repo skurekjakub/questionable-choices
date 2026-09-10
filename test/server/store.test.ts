@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Store } from '../../src/server/store.js';
+import { EVENT_STRING_MAX_LENGTH, Store, writeJsonAtomic } from '../../src/server/store.js';
 import { makeRecord } from '../core/helpers.js';
 
 describe('Store', () => {
@@ -50,7 +50,24 @@ describe('Store', () => {
     expect(store.session('qc-DOC-1-implement')?.state).toBe('idle');
   });
 
-  it('leaves no temporary file behind and never writes a partial document', async () => {
+  it.each([
+    ['sessions.json', '{}', (store: Store) => store.sessions()],
+    ['sessions.json', '"text"', (store: Store) => store.sessions()],
+    ['flags.json', '[]', (store: Store) => Object.keys(store.flagsOf('ws'))],
+    ['worktrees.json', '3', (store: Store) => Object.keys(store.worktreesOf('ws'))],
+  ])(
+    'treats %s holding %s as empty, since a cast would only defer the failure',
+    async (file, text, read) => {
+      await writeFile(join(dir, file), text, 'utf8');
+      const store = new Store(dir);
+
+      await store.load();
+
+      expect(read(store)).toEqual([]);
+    },
+  );
+
+  it('leaves every write either fully applied or not applied at all', async () => {
     const store = new Store(dir);
     await store.load();
     await Promise.all(
@@ -61,8 +78,44 @@ describe('Store', () => {
 
     const entries = await readdir(dir);
     expect(entries.filter((name) => name.includes('.tmp'))).toEqual([]);
+    // The document parses after twenty interleaved writes, which is what the
+    // temp-file-and-rename buys: no reader ever sees a half-written file.
     const text = await readFile(join(dir, 'sessions.json'), 'utf8');
     expect(JSON.parse(text)).toHaveLength(20);
+  });
+
+  it('replaces the document by renaming over it, never by truncating it in place', async () => {
+    // A truncate-then-write leaves a window in which a reader sees a partial
+    // document. A rename has no such window, and it is the new inode that
+    // proves one happened.
+    const path = join(dir, 'probe.json');
+    await writeJsonAtomic(path, { version: 1 });
+    const before = await stat(path);
+
+    await writeJsonAtomic(path, { version: 2 });
+
+    const after = await stat(path);
+    expect(after.ino).not.toBe(before.ino);
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ version: 2 });
+  });
+
+  it('keeps the old document when a write fails, in memory as well as on disk', async () => {
+    const store = new Store(dir);
+    await store.load();
+    await store.saveSession(makeRecord());
+    const before = await readFile(join(dir, 'sessions.json'), 'utf8');
+
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    const doomed = makeRecord({ id: 'qc-DOC-2-implement' });
+    (doomed as unknown as Record<string, unknown>)['loop'] = circular;
+
+    await expect(store.saveSession(doomed)).rejects.toThrow();
+
+    expect(await readFile(join(dir, 'sessions.json'), 'utf8')).toBe(before);
+    // A failed write must take its in-memory value with it, or the dashboard
+    // shows a session that vanishes on the next boot.
+    expect(store.session('qc-DOC-2-implement')).toBeUndefined();
   });
 
   it('merges flags and drops the ones set back to false', async () => {
@@ -116,5 +169,44 @@ describe('Store', () => {
     const store = new Store(dir);
     await store.load();
     expect(await store.readEvents('qc-DOC-9-implement')).toEqual([]);
+  });
+
+  it('reports a log it cannot read as a failure, not as an empty log', async () => {
+    // "the hooks never fired" and "the log could not be opened" are different
+    // answers, and only one of them is the owner's problem to fix.
+    const store = new Store(dir);
+    await store.load();
+    await mkdir(join(store.sessionDir('qc-DOC-1-implement'), 'events.jsonl'), { recursive: true });
+
+    await expect(store.readEvents('qc-DOC-1-implement')).rejects.toThrow();
+  });
+
+  it('caps a long string in a raw payload so one event cannot swallow the log', async () => {
+    const store = new Store(dir);
+    await store.load();
+    const huge = 'x'.repeat(EVENT_STRING_MAX_LENGTH * 3);
+
+    await store.appendEvent('qc-DOC-1-implement', {
+      at: '2026-09-09T10:00:00.000Z',
+      event: { hook_event_name: 'PostToolUse', tool_response: { text: huge }, keep: 'short' },
+      state: 'working',
+    });
+
+    const [entry] = await store.readEvents('qc-DOC-1-implement');
+    const event = entry?.event as { tool_response: { text: string }; keep: string };
+    expect(event.tool_response.text.length).toBeLessThan(huge.length);
+    expect(event.tool_response.text).toContain('truncated');
+    expect(event.keep).toBe('short');
+  });
+
+  it('leaves the worktrees document untouched when there is nothing to clear', async () => {
+    const store = new Store(dir);
+    await store.load();
+    await store.setWorktree('ws', 'DOC-1', { path: '/w/DOC-1', branch: 'x' });
+    const before = await stat(join(dir, 'worktrees.json'));
+
+    await store.clearWorktree('ws', 'DOC-404');
+
+    expect((await stat(join(dir, 'worktrees.json'))).mtimeMs).toBe(before.mtimeMs);
   });
 });
