@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState, type JSX } from 'react';
-import type { BoardView } from '../../../core/api.js';
+import type { BoardView, Card as CardModel } from '../../../core/api.js';
 import { deleteWorkspace, errorMessage, openEditor, setFlags } from '../api.js';
 import type { PublicConfigResponse } from '../../../core/api.js';
 import { AddWorkspaceDialog } from './AddWorkspaceDialog.js';
@@ -14,8 +14,8 @@ import { StartDialog } from './StartDialog.js';
  * Which overlay is open over the board, if any.
  */
 type Overlay =
-  | { kind: 'drawer'; issueKey: string }
-  | { kind: 'start'; issueKey: string; playbookId: string }
+  | { kind: 'drawer'; issueKey: string; opened: CardModel }
+  | { kind: 'start'; issueKey: string; playbookId: string; opened: CardModel }
   | { kind: 'add-workspace' }
   | { kind: 'remove-workspace' }
   | null;
@@ -83,9 +83,9 @@ export function Board({
   const active = workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
 
   const handlers: CardHandlers = {
-    openIssue: (card) => setOverlay({ kind: 'drawer', issueKey: card.issue.key }),
+    openIssue: (card) => setOverlay({ kind: 'drawer', issueKey: card.issue.key, opened: card }),
     startPlaybook: (card, playbookId) =>
-      setOverlay({ kind: 'start', issueKey: card.issue.key, playbookId }),
+      setOverlay({ kind: 'start', issueKey: card.issue.key, playbookId, opened: card }),
     openSession: onOpenSession,
     openEditor: (card) => {
       if (workspaceId === null) return;
@@ -102,12 +102,19 @@ export function Board({
   };
 
   const overlayKey = overlay !== null && 'issueKey' in overlay ? overlay.issueKey : null;
-  const overlayCard =
+  const listedCard =
     overlayKey === null
       ? null
       : (board?.columns
           .flatMap((column) => column.cards)
           .find((card) => card.issue.key === overlayKey) ?? null);
+  // An issue can leave the board's query while an overlay is open on it — a
+  // status change in the tracker, or a refresh. Unmounting the overlay over
+  // that would take an edited prompt or a read-in-progress with it, so the card
+  // it opened with stays on screen and the overlay says the board dropped it.
+  const openedCard = overlay !== null && 'opened' in overlay ? overlay.opened : null;
+  const overlayCard = listedCard ?? openedCard;
+  const overlayDropped = openedCard !== null && listedCard === null;
 
   const removeActive = (): void => {
     if (workspaceId === null) return;
@@ -201,6 +208,7 @@ export function Board({
           workspaceId={workspaceId}
           playbooks={board?.playbooks ?? []}
           nowMs={nowMs}
+          dropped={overlayDropped}
           onClose={() => setOverlay(null)}
           onOpenSession={onOpenSession}
         />
@@ -216,6 +224,7 @@ export function Board({
           playbooks={board?.playbooks ?? []}
           runner={config.runner}
           initialPlaybookId={overlay.playbookId}
+          dropped={overlayDropped}
           onClose={() => setOverlay(null)}
           onStarted={(sessionId) => {
             setOverlay(null);

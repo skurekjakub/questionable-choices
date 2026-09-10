@@ -73,6 +73,14 @@ export type SessionFrame = Extract<EventFrame, { type: 'session' }>;
 export { LIVE_STATES, NEEDS_YOU_STATES } from '../../core/api.js';
 
 /**
+ * What an overlay says when the board behind it has stopped listing the issue
+ * it was opened on, in the one place both overlays that can outlive a card
+ * read it from.
+ */
+export const DROPPED_SENTENCE =
+  'This issue has left the board — the epic’s query no longer returns it. What is shown is the card as it was opened.';
+
+/**
  * Words shown next to a session's state lamp.
  */
 export const STATE_LABELS: Readonly<Record<SessionState, string>> = {
