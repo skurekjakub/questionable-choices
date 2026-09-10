@@ -130,6 +130,53 @@ export function sendEscapeArgv(sessionId: string): string[] {
 }
 
 /**
+ * Builds the arguments that type text into a session without submitting it.
+ *
+ * `-l` makes every following argument literal, key names included, which is
+ * what lets a leading slash through — and is also why `Enter` cannot be
+ * appended here: it would arrive as the five characters that spell it.
+ *
+ * @param sessionId - tmux session name to type into.
+ * @param text - Text to deliver verbatim.
+ * @returns The arguments for tmux.
+ */
+export function sendLiteralArgv(sessionId: string, text: string): string[] {
+  return ['send-keys', '-t', sessionId, '-l', text];
+}
+
+/**
+ * Builds the arguments that submit whatever is in a session's prompt box.
+ *
+ * @param sessionId - tmux session name to submit in.
+ * @returns The arguments for tmux.
+ */
+export function sendEnterArgv(sessionId: string): string[] {
+  return ['send-keys', '-t', sessionId, 'Enter'];
+}
+
+/**
+ * Builds the invocations that type one line into a session and submit it.
+ *
+ * @param sessionId - tmux session name to type into.
+ * @param text - Line to type; empty to submit with nothing typed.
+ * @returns One argument list per invocation, in the order they must be run.
+ */
+export function sendLineArgvs(sessionId: string, text: string): string[][] {
+  const submit = sendEnterArgv(sessionId);
+  return text === '' ? [submit] : [sendLiteralArgv(sessionId, text), submit];
+}
+
+/**
+ * Builds the arguments that print a session's visible pane to stdout.
+ *
+ * @param sessionId - tmux session name to read.
+ * @returns The arguments for tmux.
+ */
+export function capturePaneArgv(sessionId: string): string[] {
+  return ['capture-pane', '-p', '-t', sessionId];
+}
+
+/**
  * Builds the arguments that kill a session.
  *
  * @param sessionId - tmux session name to kill.

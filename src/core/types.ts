@@ -709,6 +709,32 @@ export interface Runner {
    */
   interrupt(sessionId: string): Promise<void>;
   /**
+   * Types one line into the session and submits it.
+   *
+   * The text is delivered literally, so a leading slash reaches the CLI as the
+   * slash command it spells rather than as a key name. An empty text submits
+   * alone, which is how a confirmation dialog already on screen is answered.
+   *
+   * @param sessionId - Id of the session to type into.
+   * @param text - Line to type; empty to submit with nothing typed.
+   * @returns Nothing.
+   * @throws {Error} When the runner refuses the send.
+   */
+  sendLine(sessionId: string, text: string): Promise<void>;
+  /**
+   * Reads what is on the session's screen right now.
+   *
+   * A CLI that answers only on screen — a refusal, a confirmation dialog — can
+   * be read no other way. Nothing about the text is a contract, so a caller
+   * must treat a phrase it does not find as "not on screen", never as "not
+   * true".
+   *
+   * @param sessionId - Id of the session to read.
+   * @returns The visible contents of the session's pane.
+   * @throws {Error} When the runner cannot read the session.
+   */
+  capturePane(sessionId: string): Promise<string>;
+  /**
    * Kills the session's tmux session.
    *
    * @param sessionId - Id of the session to kill.

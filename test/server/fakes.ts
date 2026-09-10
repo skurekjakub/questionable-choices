@@ -275,6 +275,14 @@ export class FakeRunner implements Runner {
   readonly interrupted: string[] = [];
   /** Ids passed to `kill`, in order. */
   readonly killed: string[] = [];
+  /** Every `sendLine` call, in order. */
+  readonly lines: Array<{ sessionId: string; text: string }> = [];
+  /**
+   * Pane contents `capturePane` answers with, oldest first. The last entry is
+   * repeated once the script runs out, so a poll that outlives it keeps reading
+   * the screen the session was left on rather than an empty one.
+   */
+  readonly panes: string[] = [];
   /** Ids `isAlive` answers true for. */
   readonly alive = new Set<string>();
   /** Terminals handed out by `attach`, in order. */
@@ -285,6 +293,12 @@ export class FakeRunner implements Runner {
   resumeError: Error | null = null;
   /** Error `attach` throws instead of answering, or null. */
   attachError: Error | null = null;
+  /** Error `sendLine` throws instead of typing, or null. */
+  sendLineError: Error | null = null;
+  /** Error `capturePane` throws instead of answering, or null. */
+  capturePaneError: Error | null = null;
+  /** How many pane reads have been served, which indexes `panes`. */
+  private paneReads = 0;
 
   /**
    * Records a launch and marks the session alive.
@@ -337,6 +351,33 @@ export class FakeRunner implements Runner {
    */
   async interrupt(sessionId: string): Promise<void> {
     this.interrupted.push(sessionId);
+  }
+
+  /**
+   * Records a typed line.
+   *
+   * @param sessionId - Session typed into.
+   * @param text - Line typed; empty for a bare submit.
+   * @returns Nothing.
+   * @throws {Error} When `sendLineError` is set.
+   */
+  async sendLine(sessionId: string, text: string): Promise<void> {
+    this.lines.push({ sessionId, text });
+    if (this.sendLineError !== null) throw this.sendLineError;
+  }
+
+  /**
+   * Serves the next scripted pane, repeating the last one for ever.
+   *
+   * @param _sessionId - Session to read.
+   * @returns The scripted pane contents, or an empty screen when none is set.
+   * @throws {Error} When `capturePaneError` is set.
+   */
+  async capturePane(_sessionId: string): Promise<string> {
+    if (this.capturePaneError !== null) throw this.capturePaneError;
+    const index = Math.min(this.paneReads, this.panes.length - 1);
+    this.paneReads += 1;
+    return index < 0 ? '' : (this.panes[index] as string);
   }
 
   /**
