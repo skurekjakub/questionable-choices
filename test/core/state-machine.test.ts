@@ -1,9 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CACHE_TTL_1H_SECONDS, CACHE_TTL_5M_SECONDS } from '../../src/core/cache-clock.js';
+import { LIVE_STATES, NEEDS_YOU_STATES } from '../../src/core/api.js';
 import {
-  LIVE_STATES,
-  NEEDS_YOU_STATES,
   SNIPPET_MAX_LENGTH,
   asHookEvent,
   isHookEventName,
@@ -283,14 +282,23 @@ describe('reduce refusals', () => {
   });
 
   it('leaves the record untouched when nothing moved', () => {
-    const before = makeRecord({ state: 'working', pending: null });
+    const before = makeRecord({ state: 'working', pending: null, toolCallOpen: false });
     const result = reduce(
       before,
-      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash' }),
+      hookEvent({ hook_event_name: 'PostToolUse', tool_name: 'Bash' }),
       NOW,
     );
     expect(result.changed).toBe(false);
     expect(result.record).toBe(before);
+  });
+
+  it('records that a tool call is waiting, which is when a dialog can appear', () => {
+    const result = reduce(
+      makeRecord({ state: 'working', pending: null, toolCallOpen: false }),
+      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash' }),
+      NOW,
+    );
+    expect(result.record.toolCallOpen).toBe(true);
   });
 
   it('never notifies twice for the same demand', () => {
@@ -371,7 +379,10 @@ describe('a Notification that lags the dialog it describes', () => {
 
   it('still opens a permission for a tool that has not returned', () => {
     const running = reduce(
-      makeRecord({ state: 'working', lastToolResultPromptId: 'prompt-0' }),
+      makeRecord({
+        state: 'working',
+        answeredDialog: { promptId: 'prompt-0', summary: 'Bash: ls' },
+      }),
       hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash', prompt_id: PROMPT }),
       NOW,
     );
@@ -389,26 +400,44 @@ describe('a Notification that lags the dialog it describes', () => {
     expect(late.notify).toBe(true);
   });
 
-  it('opens a dialog the server never heard about, even later in the same turn', () => {
-    // The dedupe keys on a prompt id, i.e. a whole turn. A tool result that
-    // closed no dialog must not blind the Notification fallback for the rest
-    // of it, or a dialog whose PermissionRequest hook was dropped is invisible.
-    const returned = reduce(
-      makeRecord({ state: 'working', pending: null }),
-      hookEvent({ hook_event_name: 'PostToolUse', tool_name: 'Read', prompt_id: PROMPT }),
+  it('opens a second dialog of the same turn whose PermissionRequest was dropped', () => {
+    // A turn can raise two dialogs. Answering the first must not blind the
+    // fallback for the second, which is exactly the case the fallback exists
+    // for: its PermissionRequest never reached the server.
+    const asked = reduce(
+      makeRecord({ state: 'working' }),
+      hookEvent({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'AskUserQuestion',
+        prompt_id: PROMPT,
+        tool_input: { questions: [{ question: 'Which format?' }] },
+      }),
       NOW,
     );
-    expect(returned.record.lastToolResultPromptId ?? null).toBeNull();
+    const answered = reduce(
+      asked.record,
+      hookEvent({
+        hook_event_name: 'PostToolUse',
+        tool_name: 'AskUserQuestion',
+        prompt_id: PROMPT,
+      }),
+      NOW + 1_000,
+    );
+    const running = reduce(
+      answered.record,
+      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash', prompt_id: PROMPT }),
+      NOW + 2_000,
+    );
 
     const late = reduce(
-      returned.record,
+      running.record,
       hookEvent({
         hook_event_name: 'Notification',
         notification_type: 'permission_prompt',
         prompt_id: PROMPT,
         message: 'Claude needs your permission to run Bash',
       }),
-      NOW + 6_000,
+      NOW + 8_000,
     );
 
     expect(late.record.state).toBe('waiting-permission');
@@ -419,17 +448,108 @@ describe('a Notification that lags the dialog it describes', () => {
     expect(late.notify).toBe(true);
   });
 
+  it('still drops the answered dialog after a second tool of the same turn returned', () => {
+    // The memory of an answered dialog survives tool results that closed
+    // nothing; forgetting on the next one readmits the dialog's own echo.
+    const running = reduce(
+      makeRecord({ state: 'working' }),
+      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash', prompt_id: PROMPT }),
+      NOW,
+    );
+    const asked = reduce(
+      running.record,
+      hookEvent({
+        hook_event_name: 'PermissionRequest',
+        tool_name: 'Bash',
+        prompt_id: PROMPT,
+        tool_input: { command: 'rm -rf x' },
+      }),
+      NOW + 1_000,
+    );
+    expect(asked.record.pending?.summary).toBe('Bash: rm -rf x');
+    const answered = reduce(
+      asked.record,
+      hookEvent({ hook_event_name: 'PostToolUse', tool_name: 'Bash', prompt_id: PROMPT }),
+      NOW + 2_000,
+    );
+    const second = reduce(
+      reduce(
+        answered.record,
+        hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Read', prompt_id: PROMPT }),
+        NOW + 3_000,
+      ).record,
+      hookEvent({ hook_event_name: 'PostToolUse', tool_name: 'Read', prompt_id: PROMPT }),
+      NOW + 4_000,
+    );
+
+    const late = reduce(
+      second.record,
+      hookEvent({
+        hook_event_name: 'Notification',
+        notification_type: 'permission_prompt',
+        prompt_id: PROMPT,
+        message: 'Claude needs your permission',
+      }),
+      NOW + 8_000,
+    );
+
+    expect(late.record.state).toBe('working');
+    expect(late.record.pending).toBeNull();
+    expect(late.notify).toBe(false);
+  });
+
+  it('drops a notification that carries no prompt id once a dialog has been answered', () => {
+    // An unidentifiable payload cannot be placed in a turn, and the record is
+    // known to have answered a dialog in the turn it is in.
+    const answered = makeRecord({
+      state: 'working',
+      answeredDialog: { promptId: PROMPT, summary: 'Bash: rm -rf x' },
+    });
+
+    const late = reduce(
+      answered,
+      hookEvent({
+        hook_event_name: 'Notification',
+        notification_type: 'permission_prompt',
+        message: 'Claude needs your permission',
+      }),
+      NOW,
+    );
+
+    expect(late.changed).toBe(false);
+    expect(late.record.state).toBe('working');
+  });
+
   it.each([
     ['claude-exit', 'working' as const, { type: 'claude-exit', exitCode: 0 } as const],
     ['claude-start', 'exited' as const, { type: 'claude-start', mode: 'resume' } as const],
-  ])('forgets the answered turn across a %s run boundary', (_name, state, event) => {
-    // The id names a turn of one run; carrying it into the next one leaves the
-    // dedupe resting on prompt ids never repeating, which nothing guarantees.
-    const answered = makeRecord({ state, pending: null, lastToolResultPromptId: PROMPT });
+  ])('forgets the answered dialog across a %s run boundary', (_name, state, event) => {
+    // The dialog belongs to a turn of one run; carrying it into the next one
+    // leaves the guard resting on prompt ids never repeating.
+    const answered = makeRecord({
+      state,
+      pending: null,
+      answeredDialog: { promptId: PROMPT, summary: 'Bash: rm -rf x' },
+      toolCallOpen: true,
+    });
 
     const next = reduce(answered, event, NOW);
 
-    expect(next.record.lastToolResultPromptId ?? null).toBeNull();
+    expect(next.record.answeredDialog ?? null).toBeNull();
+    expect(next.record.toolCallOpen).toBe(false);
+  });
+
+  it('forgets the answered dialog when the owner submits the next prompt', () => {
+    const answered = makeRecord({
+      state: 'idle',
+      answeredDialog: { promptId: PROMPT, summary: 'Bash: rm -rf x' },
+      toolCallOpen: true,
+    });
+
+    const next = reduce(answered, hookEvent({ hook_event_name: 'UserPromptSubmit' }), NOW);
+
+    expect(next.record.answeredDialog ?? null).toBeNull();
+    expect(next.record.toolCallOpen).toBe(false);
   });
 });
 
@@ -496,13 +616,16 @@ describe('SessionEnd', () => {
     expect(result.record.endedAt).toBe(NOW_ISO);
   });
 
-  it('forgets the answered turn, which belongs to a run that has ended', () => {
+  it('forgets the answered dialog, which belongs to a run that has ended', () => {
     const result = reduce(
-      makeRecord({ state: 'working', lastToolResultPromptId: 'prompt-1' }),
+      makeRecord({
+        state: 'working',
+        answeredDialog: { promptId: 'prompt-1', summary: 'Bash: ls' },
+      }),
       hookEvent({ hook_event_name: 'SessionEnd' }),
       NOW,
     );
-    expect(result.record.lastToolResultPromptId ?? null).toBeNull();
+    expect(result.record.answeredDialog ?? null).toBeNull();
   });
 });
 
@@ -764,6 +887,50 @@ describe('replaying a recorded session', () => {
       hookEvent(asHookEvent(first.event, first.payload) as HookEvent),
       first.ts * 1000,
     ).record;
-    expect(record.claudeSessionId).toBe(first.payload['session_id']);
+    expect(record.claudeSessionId).toBe('00000000-0000-0000-0000-000000000000');
+  });
+
+  it('reaches waiting-permission on the notification when the Bash PermissionRequest is lost', () => {
+    // The hook is `curl … || true`, so a dropped hook is the case the
+    // Notification fallback exists for — and the recorded turn raises two
+    // dialogs, the first of which is answered before the second opens.
+    const dropped = lines.filter((_line, index) => index !== 7);
+    expect(lines[7]?.event).toBe('PermissionRequest');
+
+    let record = makeRecord({ state: 'starting' });
+    const states: SessionState[] = [];
+    for (const line of dropped) {
+      record = reduce(
+        record,
+        hookEvent(asHookEvent(line.event, line.payload) as HookEvent),
+        line.ts * 1000,
+      ).record;
+      states.push(record.state);
+    }
+
+    // Index 7 is the Notification that now stands alone for the Bash dialog.
+    expect(states[7]).toBe('waiting-permission');
+    expect(states).toEqual([
+      'starting',
+      'working',
+      'waiting-question',
+      'waiting-question',
+      'waiting-question',
+      'working',
+      'working',
+      'waiting-permission',
+      'working',
+      'idle',
+      'working',
+      'working',
+      'working',
+      'idle',
+      'working',
+      'working',
+      'working',
+      'waiting-permission',
+      'waiting-permission',
+      'exited',
+    ]);
   });
 });

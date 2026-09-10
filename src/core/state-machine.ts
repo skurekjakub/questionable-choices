@@ -1,3 +1,4 @@
+import { LIVE_STATES, NEEDS_YOU_STATES } from './api.js';
 import {
   CACHE_TTL_5M_SECONDS,
   cacheChanged,
@@ -6,27 +7,6 @@ import {
 } from './cache-clock.js';
 import type { StatuslinePayload } from './cache-clock.js';
 import type { SessionRecord, SessionRun, SessionState } from './types.js';
-
-/**
- * States in which the session is blocked on the owner.
- */
-export const NEEDS_YOU_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
-  'waiting-permission',
-  'waiting-question',
-  'idle',
-]);
-
-/**
- * States in which the session still counts as running.
- */
-export const LIVE_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
-  'bootstrapping',
-  'starting',
-  'working',
-  'waiting-permission',
-  'waiting-question',
-  'idle',
-]);
 
 /**
  * Reports whether a state counts as live.
@@ -387,7 +367,8 @@ type SessionPatch = Partial<
     | 'state'
     | 'pending'
     | 'claudeSessionId'
-    | 'lastToolResultPromptId'
+    | 'answeredDialog'
+    | 'toolCallOpen'
     | 'lastAssistantMessage'
     | 'lastExitCode'
     | 'staleSince'
@@ -396,6 +377,37 @@ type SessionPatch = Partial<
     | 'runs'
   >
 >;
+
+/**
+ * Forgets everything the notification guard knows about the current turn.
+ *
+ * Every run and turn boundary applies it, so the guard can never be answered by
+ * a dialog from a run or a turn that is over.
+ */
+const FORGET_DIALOGS: SessionPatch = { answeredDialog: null, toolCallOpen: false };
+
+/**
+ * Reports whether a `Notification` describes a dialog that is already gone.
+ *
+ * The notification lags the dialog by seconds and says only "Claude needs your
+ * permission", so it can never identify itself; the record's own memory of the
+ * last dialog a tool result closed is what decides. A dialog can only be on
+ * screen while a tool call is waiting, so an answered dialog with no tool call
+ * outstanding makes every notification of that turn an echo of it.
+ *
+ * @param record - The record the notification arrived for.
+ * @param promptId - The notification's `prompt_id`, when it carried one.
+ * @returns True when the notification must be dropped.
+ */
+function isStaleNotification(record: SessionRecord, promptId: string | undefined): boolean {
+  const answered = record.answeredDialog ?? null;
+  if (answered === null) return false;
+  // Without an id the notification cannot be placed in a turn, and the record
+  // is known to have answered a dialog in the one it is in.
+  if (promptId === undefined || promptId === '') return true;
+  if (promptId !== answered.promptId) return false;
+  return record.toolCallOpen !== true;
+}
 
 /**
  * Records an exit code on the newest run.
@@ -454,13 +466,19 @@ export function reduce(
   const now = new Date(nowMs).toISOString();
   const unchanged: ReduceResult = { record, changed: false, notify: false };
 
+  // A status-line payload is a once-a-second poll that carries no lifecycle
+  // information, so it neither proves the record is being told about its
+  // session nor clears the marker that says the state may be out of date.
+  const lifecycle = event.type !== 'statusline';
+
   const apply = (patch: SessionPatch, notifiable = true): ReduceResult => {
-    // An accepted event is proof the record is being told about its session
-    // again, which is exactly what the staleness marker waits for.
-    const next: SessionRecord = { ...record, staleSince: null, ...patch };
+    const next: SessionRecord = { ...record, ...(lifecycle ? { staleSince: null } : {}), ...patch };
     const stateChanged = next.state !== record.state;
     if (stateChanged) next.stateSince = now;
     if (stableJson(next) === stableJson(record)) return unchanged;
+    // Stamped after the comparison: a timestamp that moves on every call would
+    // make every repeat of an event look like a change worth broadcasting.
+    if (lifecycle) next.lastEventAt = now;
     const entered =
       stateChanged &&
       needsYou(next.state) &&
@@ -501,7 +519,10 @@ export function reduce(
       return apply({
         state: 'starting',
         pending: null,
-        lastToolResultPromptId: null,
+        ...FORGET_DIALOGS,
+        // The snippet belongs to the run that has just ended; carried into the
+        // new one it would be presented as what this session is waiting on.
+        lastAssistantMessage: null,
         lastExitCode: null,
         endedAt: null,
         runs: [...record.runs, { startedAt: now, kind: event.mode, exitCode: null }],
@@ -511,7 +532,7 @@ export function reduce(
       return apply({
         state: 'exited',
         pending: null,
-        lastToolResultPromptId: null,
+        ...FORGET_DIALOGS,
         lastExitCode: event.exitCode,
         endedAt: now,
         runs: closeLastRun(record.runs, event.exitCode),
@@ -523,7 +544,10 @@ export function reduce(
       }
       // The owner pressed the button; telling them their turn has come back
       // would be a notification about their own keystroke.
-      return apply({ state: 'idle', pending: null }, false);
+      return apply(
+        { state: 'idle', pending: null, ...FORGET_DIALOGS, lastAssistantMessage: null },
+        false,
+      );
 
     case 'statusline': {
       const cache = cacheFromStatusline(event.payload);
@@ -553,38 +577,58 @@ export function reduce(
     }
 
     case 'SessionEnd':
-      return apply({ state: 'exited', pending: null, lastToolResultPromptId: null, endedAt: now });
+      return apply({ state: 'exited', pending: null, ...FORGET_DIALOGS, endedAt: now });
 
     case 'UserPromptSubmit':
-      return live ? apply(busy) : unchanged;
+      return live ? apply({ ...busy, ...FORGET_DIALOGS }) : unchanged;
 
     case 'PreToolUse':
       if (!live) return unchanged;
+      // A tool is now waiting, so a dialog may be raised for it at any moment —
+      // including one whose PermissionRequest never reaches the server.
       return hook.tool_name === QUESTION_TOOL
-        ? apply(question(questionSummary(hook.tool_input)))
-        : apply(busy);
+        ? apply({
+            ...question(questionSummary(hook.tool_input)),
+            toolCallOpen: true,
+            answeredDialog: null,
+          })
+        : apply({ ...busy, toolCallOpen: true });
 
     case 'PostToolUse':
     case 'PostToolUseFailure':
     case 'PermissionDenied':
       if (!live) return unchanged;
-      // Only a result that closed a dialog the record knew about can make a
-      // later Notification stale. Remembering the turn of every tool result
-      // would blind the Notification fallback for the rest of that turn.
+      // Only a result that closed a dialog the record knew about names an
+      // answered dialog; a result that closed nothing leaves the previous
+      // answer standing, or a second tool of the turn would forget it.
       return apply({
         ...busy,
-        lastToolResultPromptId: record.pending === null ? null : (hook.prompt_id ?? null),
+        toolCallOpen: false,
+        ...(record.pending === null
+          ? {}
+          : {
+              answeredDialog: {
+                promptId: hook.prompt_id ?? null,
+                summary: record.pending.summary,
+              },
+            }),
       });
 
     case 'PermissionRequest': {
       if (!live) return unchanged;
+      // A dialog the record can see supersedes whatever was answered before it,
+      // so no lagging notification may be matched against the older one.
+      const opened: SessionPatch = { answeredDialog: null };
       // AskUserQuestion raises this hook too, so the tool name — never the
       // hook — decides whether the dialog is a question or a permission.
       if (hook.tool_name === QUESTION_TOOL) {
-        return apply(question(questionSummary(hook.tool_input)));
+        return apply({ ...question(questionSummary(hook.tool_input)), ...opened });
       }
       const digest = digestToolInput(hook.tool_input);
-      return apply(permission(digest === '' ? hook.tool_name : `${hook.tool_name}: ${digest}`));
+      return apply({
+        ...permission(digest === '' ? hook.tool_name : `${hook.tool_name}: ${digest}`),
+        ...opened,
+      });
     }
 
     case 'Notification': {
@@ -593,16 +637,7 @@ export function reduce(
       // "Claude needs your permission", so it is a last-resort signal: it may
       // open a pending, never redescribe or reclassify one.
       if (needsYou(record.state) || record.pending !== null) return unchanged;
-      // A tool of this turn has already returned, so the dialog this describes
-      // is one the owner answered while the notification was in flight.
-      const promptId = hook.prompt_id;
-      if (
-        promptId !== undefined &&
-        promptId !== '' &&
-        promptId === (record.lastToolResultPromptId ?? null)
-      ) {
-        return unchanged;
-      }
+      if (isStaleNotification(record, hook.prompt_id)) return unchanged;
       const message = oneLine(hook.message ?? '');
       if (hook.notification_type === 'permission_prompt') {
         return apply(permission(message === '' ? 'Permission requested' : message));
