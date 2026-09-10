@@ -68,6 +68,11 @@ export function useMenuKeys(open: boolean, onClose: () => void): MenuRefs {
         close.current();
         return;
       }
+      // Escape and Tab are the menu's wherever they are pressed; the arrows are
+      // not. Without this a press anywhere else on the page pulls focus into
+      // the panel, because an item index of -1 reads as "before the first".
+      const pressedIn = event.target;
+      if (!(pressedIn instanceof Node) || !element.contains(pressedIn)) return;
       const walkable = items(element);
       const index = walkable.indexOf(document.activeElement as HTMLElement);
       const target =

@@ -50,9 +50,26 @@ describe('lampFor', () => {
     }
   });
 
-  it('answers for every state the contract can send', () => {
+  it('gives every state the contract can send a shape and a tone of its own set', () => {
+    // `lampFor` is typed over `SessionState`, so exhaustiveness is already a
+    // compile error; what a test can hold is that no state answers with a
+    // silhouette or a band outside the palette the design names.
     for (const state of STATES) {
-      expect(lampFor(state)).toBeDefined();
+      const look = lampFor(state);
+      expect(['disc', 'ring', 'bar', 'square']).toContain(look.shape);
+      expect(['cyan', 'amber', 'red', 'moss', 'dim']).toContain(look.tone);
+      expect(typeof look.pulse).toBe('boolean');
     }
+  });
+
+  it('gives no two states the same signal', () => {
+    // Shape, colour and motion together are the whole lamp, so two states that
+    // match on all three are one signal wearing two names — which is what the
+    // amber ring would be if the pulse stopped separating the two waits.
+    const signals = STATES.map((state) => {
+      const look = lampFor(state);
+      return `${look.shape}/${look.tone}/${String(look.pulse)}`;
+    });
+    expect(new Set(signals).size).toBe(STATES.length);
   });
 });
