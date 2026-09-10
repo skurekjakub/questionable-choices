@@ -16,6 +16,14 @@
   flex: none;
 }
 
+/* The shell clips instead of scrolling, so anything the header cannot fit is
+   gone rather than reachable. The readings give their width up in order —
+   branch first, then the pill's pending summary — and the actions never do:
+   on a failed session Resume is the only control that still does anything. */
+.session-header .btn {
+  flex: none;
+}
+
 .session-header .key {
   font-family: var(--font-mono);
   font-size: var(--fs-body);
@@ -28,6 +36,8 @@
 }
 
 .session-header .branch {
+  flex: 0 8 auto;
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--fs-row);
   color: var(--paper-faint);
@@ -47,6 +57,10 @@
   font-size: var(--fs-row);
   color: var(--paper-dim);
   max-width: 46ch;
+  /* The state word is never given up — only the pending summary inside it
+     ellipsises — so the pill floors at roughly the longest of the eight. */
+  flex: 0 4 auto;
+  min-width: 18ch;
 }
 
 .state-pill[data-alert='true'] {

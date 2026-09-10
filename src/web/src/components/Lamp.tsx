@@ -69,3 +69,26 @@ export function Lamp({ state }: { state: SessionState }): JSX.Element {
     />
   );
 }
+
+/**
+ * What an unverified session's marker says, in the one place both surfaces
+ * that render it read it from.
+ */
+export const STALE_SENTENCE = 'No hook has been seen since the server restarted';
+
+/**
+ * Draws the marker for a session whose state has not been confirmed since the
+ * server restarted.
+ *
+ * It is a second indicator rather than a word because the row it sits in has
+ * no room for one: a chip long enough to say this pushed the time reading off
+ * the card. The sentence is carried by the accessible name and the tooltip, so
+ * nothing about it is colour-only.
+ *
+ * @returns The marker element.
+ */
+export function StaleMarker(): JSX.Element {
+  return (
+    <span className="session-stale" role="img" aria-label={STALE_SENTENCE} title={STALE_SENTENCE} />
+  );
+}

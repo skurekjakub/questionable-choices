@@ -9,14 +9,15 @@ import {
   sessionAction,
 } from '../api.js';
 import { failureReason } from '../failure.js';
-import { attachCommand, failureHint } from '../format.js';
+import { attachCommand, endedHint } from '../format.js';
 import { useSession } from '../hooks/useSession.js';
 import { LIVE_STATES, NEEDS_YOU_STATES, STATE_LABELS } from '../model.js';
 import { CacheReadout } from './CacheReadout.js';
 import { LabelChips, StatusChip } from './Chips.js';
 import { CopyButton } from './CopyButton.js';
+import { ErrorBoundary } from './ErrorBoundary.js';
 import { EditorIcon, ExternalIcon } from './Icons.js';
-import { Lamp } from './Lamp.js';
+import { Lamp, StaleMarker } from './Lamp.js';
 
 /**
  * The terminal and the xterm bundle behind it, which is the largest dependency
@@ -27,12 +28,29 @@ const SessionTerminal = lazy(() =>
 );
 
 /**
+ * What the event log had to say about a failed session.
+ *
+ * "The log names no reason" and "the log could not be read" are different
+ * answers to the owner's question, and collapsing them hides an outage behind
+ * a shrug.
+ */
+type FailureRead =
+  | { /** The log named a reason. */ kind: 'reason'; /** What it said. */ text: string }
+  | { /** The log was read and named nothing. */ kind: 'none' }
+  | {
+      /** The log could not be read. */ kind: 'unreadable';
+      /** Why the read failed. */ message: string;
+    };
+
+/**
  * Shows one session: its terminal, its lifecycle controls, and the issue it is
  * working on.
  *
- * A session no board lists has no terminal, no checkout and no attach command:
- * the sections that would describe one are suppressed rather than filled with
- * claims about a session that is not there.
+ * Whether the session exists is the board's answer, not the issue detail's: a
+ * tracker that cannot be reached refuses the detail for a session that is
+ * running perfectly, and taking its terminal away over that is the outage
+ * spreading. Only a session no board lists loses the terminal, the checkout and
+ * the attach command.
  *
  * @param props - Component props.
  * @param props.sessionId - Id of the session to show.
@@ -62,6 +80,7 @@ export function SessionView({
     worktreePath,
     error,
     loading: sessionLoading,
+    missing,
     reload,
   } = useSession(sessionId, board);
   const loading = sessionLoading || resolving;
@@ -71,50 +90,58 @@ export function SessionView({
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [forceRemove, setForceRemove] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
+  const [failure, setFailure] = useState<FailureRead | null>(null);
 
-  // The reducer keeps no field for why a session failed, so the reason is read
-  // back out of the raw event log the server already serves.
-  const state = record?.state ?? null;
+  const cardSession =
+    board?.columns
+      .flatMap((column) => column.cards)
+      .flatMap((card) => card.sessions)
+      .find((session) => session.id === sessionId) ?? null;
+  // The record is the authority the moment it exists, including for the fields
+  // it clears: the board's copy is a debounced snapshot, so falling through to
+  // it on a null would resurrect a pending prompt or a staleness marker the
+  // server has just cleared. Before the record loads the card is all there is.
+  const shown = record ?? cardSession;
+
+  const ended = shown === null ? null : endedHint(sessionId, shown.state, shown.lastExitCode);
+
+  // The reducer keeps no field for why a session ended badly, so the reason is
+  // read back out of the raw event log the server already serves. A retry that
+  // fails again re-enters the state with a new timestamp and code, which is
+  // what makes the second failure reach the panel.
+  const endedBadly = ended !== null;
+  const stateSince = shown?.stateSince ?? null;
+  const lastExitCode = shown?.lastExitCode ?? null;
   useEffect(() => {
-    if (state !== 'failed') {
+    if (!endedBadly) {
       setFailure(null);
       return;
     }
     let live = true;
     getSessionEvents(sessionId)
       .then((log) => {
-        if (live) setFailure(failureReason(log.events));
+        if (!live) return;
+        const reason = failureReason(log.events);
+        setFailure(reason === null ? { kind: 'none' } : { kind: 'reason', text: reason });
       })
-      .catch(() => {
-        if (live) setFailure(null);
+      .catch((cause: unknown) => {
+        if (live) setFailure({ kind: 'unreadable', message: errorMessage(cause) });
       });
     return () => {
       live = false;
     };
-  }, [sessionId, state]);
+  }, [sessionId, endedBadly, stateSince, lastExitCode]);
 
   // No board lists the session and nothing is still looking, so the terminal,
   // the checkout and the attach command have nothing to describe.
-  const absent = record === null && !loading;
-  const live = record !== null && LIVE_STATES.has(record.state);
-  const needsYou = record !== null && NEEDS_YOU_STATES.has(record.state);
+  const absent = missing && !loading;
+  const live = shown !== null && LIVE_STATES.has(shown.state);
+  const needsYou = shown !== null && NEEDS_YOU_STATES.has(shown.state);
   const playbookLabel =
-    board?.playbooks.find((playbook) => playbook.id === record?.playbookId)?.label ??
-    record?.playbookId ??
+    board?.playbooks.find((playbook) => playbook.id === shown?.playbookId)?.label ??
+    shown?.playbookId ??
     '';
-  const cardSession =
-    board?.columns
-      .flatMap((column) => column.cards)
-      .flatMap((card) => card.sessions)
-      .find((session) => session.id === sessionId) ?? null;
   const attach = attachCommand(sessionId, cardSession?.attachCommand);
-  // The board names the branch before the issue detail has loaded, so the
-  // header reads it from whichever source has it.
-  const branch = record?.branch ?? cardSession?.branch ?? null;
-  const failedHint =
-    record?.state === 'failed' ? failureHint(sessionId, record.lastExitCode) : null;
-  const staleSince = record?.staleSince ?? cardSession?.staleSince ?? null;
 
   const runAction = (action: SessionAction): void => {
     setBusy(true);
@@ -152,27 +179,20 @@ export function SessionView({
         </button>
         <span className="key">{record?.issueKey ?? issue?.key ?? sessionId}</span>
         <span className="playbook">{playbookLabel}</span>
-        {record === null ? (
+        {shown === null ? (
           <span className="state-pill">
             {loading ? 'loading' : error !== null ? 'could not load' : 'session not found'}
           </span>
         ) : (
           <span className="state-pill" data-alert={needsYou}>
-            <Lamp state={record.state} />
-            {failedHint?.label ?? STATE_LABELS[record.state]}
-            {failedHint === null ? null : <span className="pending">— {failedHint.shell}</span>}
-            {record.pending === null ? null : (
-              <span className="pending">— {record.pending.summary}</span>
-            )}
+            <Lamp state={shown.state} />
+            {ended?.label ?? STATE_LABELS[shown.state]}
+            {shown.pending === null ? null : <span className="pending">— {shown.pending.summary}</span>}
           </span>
         )}
-        {staleSince === null ? null : (
-          <span className="session-stale" title="No hook has been seen since the server restarted">
-            unverified since restart
-          </span>
-        )}
-        {branch === null ? null : <span className="branch">{branch}</span>}
-        <CacheReadout cache={record?.cache ?? null} nowMs={nowMs} />
+        {shown?.staleSince == null ? null : <StaleMarker />}
+        {shown?.branch == null ? null : <span className="branch">{shown.branch}</span>}
+        <CacheReadout cache={shown?.cache ?? null} nowMs={nowMs} />
         <span className="header-spacer" />
         <button
           type="button"
@@ -190,15 +210,17 @@ export function SessionView({
         >
           Kill
         </button>
-        {record !== null && !live ? (
+        {shown !== null && !live ? (
           <button
             type="button"
             className="btn btn-primary"
-            disabled={busy || record.claudeSessionId === null}
+            disabled={busy || record === null || record.claudeSessionId === null}
             title={
-              record.claudeSessionId === null
-                ? 'This session never reported a Claude session id'
-                : undefined
+              record === null
+                ? 'The issue detail has not loaded, so this session’s Claude id is unknown'
+                : record.claudeSessionId === null
+                  ? 'This session never reported a Claude session id'
+                  : undefined
             }
             onClick={() => runAction('resume')}
           >
@@ -216,11 +238,7 @@ export function SessionView({
       <div className="session-main">
         <div className="terminal-pane">
           {absent ? (
-            <p className="empty">
-              {error === null
-                ? 'No board lists this session, so there is no terminal to attach to.'
-                : 'This session could not be loaded, so no terminal was attached.'}
-            </p>
+            <p className="empty">No board lists this session, so there is no terminal to attach to.</p>
           ) : (
             <>
               <div role="status">
@@ -237,14 +255,44 @@ export function SessionView({
                   </div>
                 )}
               </div>
-              <Suspense fallback={<div className="terminal-host" />}>
-                <SessionTerminal
-                  sessionId={sessionId}
-                  reconnectSignal={reconnectSignal}
-                  live={live}
-                  onAttached={setAttached}
-                />
-              </Suspense>
+              {/* The xterm bundle is a separate chunk, so it can 404 on its own
+                  — a tab kept open across a rebuild, or an offline reload. The
+                  root boundary would answer that by replacing the dashboard;
+                  this one answers it with the command that does the same job. */}
+              <ErrorBoundary
+                fallback={(message, retry) => (
+                  <div className="terminal-host">
+                    <p className="empty" role="alert">
+                      The terminal could not be loaded: {message}
+                    </p>
+                    <p className="empty empty-inline">
+                      Attach to it from a shell instead: <code className="path">{attach}</code>
+                    </p>
+                    <div className="session-block-actions">
+                      <button type="button" className="btn" onClick={retry}>
+                        Try again
+                      </button>
+                    </div>
+                  </div>
+                )}
+              >
+                <Suspense
+                  fallback={
+                    <div className="terminal-host">
+                      <p className="empty" role="status">
+                        Loading the terminal.
+                      </p>
+                    </div>
+                  }
+                >
+                  <SessionTerminal
+                    sessionId={sessionId}
+                    reconnectSignal={reconnectSignal}
+                    live={live}
+                    onAttached={setAttached}
+                  />
+                </Suspense>
+              </ErrorBoundary>
             </>
           )}
         </div>
@@ -262,11 +310,10 @@ export function SessionView({
           <section className="section">
             {absent ? (
               <>
-                <h2>{error === null ? 'No such session' : 'This session could not be loaded'}</h2>
+                <h2>No such session</h2>
                 <p className="empty empty-inline">
-                  {error === null
-                    ? 'No workspace on this dashboard lists it. It may have been archived, or its workspace removed.'
-                    : 'The message above says why. Nothing below describes it, because nothing is known about it.'}
+                  No workspace on this dashboard lists it. It may have been archived, or its
+                  workspace removed.
                 </p>
                 <div className="path-row">
                   <code className="path">{sessionId}</code>
@@ -290,10 +337,28 @@ export function SessionView({
             )}
           </section>
 
-          {failure === null ? null : (
+          {ended === null || shown === null ? null : (
             <section className="section">
-              <h3>Why it failed</h3>
-              <pre className="description">{failure}</pre>
+              <h3>{shown.state === 'failed' ? 'Why it failed' : 'Why it ended'}</h3>
+              {failure === null ? (
+                <p className="empty empty-inline">Reading the event log.</p>
+              ) : failure.kind === 'reason' ? (
+                <pre className="description">{failure.text}</pre>
+              ) : failure.kind === 'none' ? (
+                <p className="empty empty-inline">
+                  The event log records no reason beyond the exit code.
+                </p>
+              ) : (
+                <p className="empty empty-inline">
+                  The event log could not be read, so the reason is unknown: {failure.message}
+                </p>
+              )}
+              {ended.shell === null ? null : (
+                <p className="empty empty-inline">
+                  The failed shell is still open, so the output that ended it can be read there:{' '}
+                  {ended.shell}.
+                </p>
+              )}
             </section>
           )}
 
