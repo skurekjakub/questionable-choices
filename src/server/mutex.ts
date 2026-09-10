@@ -31,14 +31,4 @@ export class KeyedMutex {
     });
     return result;
   }
-
-  /**
-   * Reports whether any work is queued or running under a key.
-   *
-   * @param key - Identity to probe.
-   * @returns True while the key has a chain.
-   */
-  busy(key: string): boolean {
-    return this.chains.has(key);
-  }
 }

@@ -402,7 +402,9 @@ describe('HTTP API', () => {
 
     beforeEach(async () => {
       const webRoot = join(dir, 'web');
-      await mkdir(webRoot, { recursive: true });
+      // `assets/` is what tells a built SPA from the Vite source tree, which
+      // also has an index.html.
+      await mkdir(join(webRoot, 'assets'), { recursive: true });
       await writeFile(join(webRoot, 'index.html'), '<!doctype html>shell', 'utf8');
       await writeFile(join(webRoot, 'app.js'), 'console.log(1);', 'utf8');
       spa = createApp({ manager, logger: new RecordingLogger(), webRoot });

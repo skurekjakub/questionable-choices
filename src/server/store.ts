@@ -28,6 +28,36 @@ const FLAGS_FILE = 'flags.json';
 const WORKTREES_FILE = 'worktrees.json';
 
 /**
+ * Longest string kept from a raw hook payload in the event log, in characters.
+ *
+ * A `PostToolUse` payload carries the whole tool response, so without a cap one
+ * session that reads a few hundred large files writes a log the reader cannot
+ * hold in a single string.
+ */
+export const EVENT_STRING_MAX_LENGTH = 4096;
+
+/**
+ * Truncates every string inside a raw event payload.
+ *
+ * @param value - The payload, whatever shape it arrived in.
+ * @returns A copy with long strings replaced by a truncated, marked version.
+ */
+function capStrings(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return value.length <= EVENT_STRING_MAX_LENGTH
+      ? value
+      : `${value.slice(0, EVENT_STRING_MAX_LENGTH)}… [truncated ${String(value.length - EVENT_STRING_MAX_LENGTH)} chars]`;
+  }
+  if (Array.isArray(value)) return value.map(capStrings);
+  if (typeof value === 'object' && value !== null) {
+    const capped: Record<string, unknown> = {};
+    for (const [key, member] of Object.entries(value)) capped[key] = capStrings(member);
+    return capped;
+  }
+  return value;
+}
+
+/**
  * Writes a JSON document so that readers never observe a partial file.
  *
  * @param path - Absolute path of the destination file.
@@ -44,24 +74,56 @@ export async function writeJsonAtomic(path: string, value: unknown): Promise<voi
 }
 
 /**
- * Reads a JSON document, falling back when it is missing or unreadable.
+ * Reads a JSON document, falling back when it is missing, unreadable or the
+ * wrong shape.
+ *
+ * A document that parses but is not what the caller expects is as unusable as
+ * one that does not parse, and a cast would leave every later read of it
+ * throwing on a shape nothing reported.
  *
  * @param path - Absolute path of the file to read.
- * @param fallback - Value returned when the file cannot be read or parsed.
+ * @param fallback - Value returned when the document cannot be used.
+ * @param isShape - Predicate the parsed document must satisfy.
  * @returns The parsed document, or `fallback`.
  */
-async function readJson<T>(path: string, fallback: T): Promise<T> {
+async function readJson<T>(
+  path: string,
+  fallback: T,
+  isShape: (value: unknown) => value is T,
+): Promise<T> {
   let text: string;
   try {
     text = await readFile(path, 'utf8');
   } catch {
     return fallback;
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(text) as T;
+    parsed = JSON.parse(text) as unknown;
   } catch {
     return fallback;
   }
+  return isShape(parsed) ? parsed : fallback;
+}
+
+/**
+ * Reports whether a parsed document is an array.
+ *
+ * @param value - The parsed document.
+ * @returns True when the document is an array.
+ */
+function isRecordArray(value: unknown): value is SessionRecord[] {
+  return Array.isArray(value);
+}
+
+/**
+ * Reports whether a parsed document is a plain object.
+ *
+ * @param value - The parsed document.
+ * @returns True when the document is a non-null, non-array object.
+ */
+function isPlainObject<T>(value: unknown): value is T {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -80,6 +142,7 @@ export class Store {
   private flags: FlagsByWorkspace = {};
   private worktrees: WorktreesByRepo = {};
   private queue: Promise<void> = Promise.resolve();
+  private readonly eventDirsMade = new Set<string>();
 
   /**
    * Builds a store over a data directory. Nothing is read until `load` runs.
@@ -93,17 +156,18 @@ export class Store {
   /**
    * Creates the data directory and reads whatever is already in it.
    *
-   * A missing or corrupt document is treated as empty rather than fatal, so a
-   * hand-edited file cannot stop the dashboard from booting.
+   * A document that is missing, unparseable or not the shape it should be is
+   * treated as empty, so a hand-edited file costs the state it held rather than
+   * leaving the dashboard answering every later request with a 500.
    *
    * @returns Nothing.
    * @throws {Error} When the data directory cannot be created.
    */
   async load(): Promise<void> {
     await mkdir(join(this.dataDir, 'sessions'), { recursive: true });
-    this.records = await readJson<SessionRecord[]>(this.path(SESSIONS_FILE), []);
-    this.flags = await readJson<FlagsByWorkspace>(this.path(FLAGS_FILE), {});
-    this.worktrees = await readJson<WorktreesByRepo>(this.path(WORKTREES_FILE), {});
+    this.records = await readJson<SessionRecord[]>(this.path(SESSIONS_FILE), [], isRecordArray);
+    this.flags = await readJson<FlagsByWorkspace>(this.path(FLAGS_FILE), {}, isPlainObject);
+    this.worktrees = await readJson<WorktreesByRepo>(this.path(WORKTREES_FILE), {}, isPlainObject);
   }
 
   /**
@@ -159,10 +223,19 @@ export class Store {
    * @throws {Error} When the file cannot be written.
    */
   async saveSession(record: SessionRecord): Promise<void> {
+    const previous = [...this.records];
     const index = this.records.findIndex((existing) => existing.id === record.id);
     if (index === -1) this.records.push(record);
     else this.records[index] = record;
-    await this.enqueue(() => writeJsonAtomic(this.path(SESSIONS_FILE), this.records));
+    // Memory is what every later read answers from, so a failed write has to
+    // take the in-memory value with it; otherwise the dashboard shows a session
+    // that vanishes on the next boot.
+    try {
+      await this.enqueue(() => writeJsonAtomic(this.path(SESSIONS_FILE), this.records));
+    } catch (cause) {
+      this.records = previous;
+      throw cause;
+    }
   }
 
   /**
@@ -198,9 +271,16 @@ export class Store {
       if (patch.done) merged.done = true;
       else delete merged.done;
     }
+    const previous = perWorkspace[issueKey];
     perWorkspace[issueKey] = merged;
     this.flags[workspaceId] = perWorkspace;
-    await this.enqueue(() => writeJsonAtomic(this.path(FLAGS_FILE), this.flags));
+    try {
+      await this.enqueue(() => writeJsonAtomic(this.path(FLAGS_FILE), this.flags));
+    } catch (cause) {
+      if (previous === undefined) delete perWorkspace[issueKey];
+      else perWorkspace[issueKey] = previous;
+      throw cause;
+    }
     return merged;
   }
 
@@ -236,9 +316,16 @@ export class Store {
    */
   async setWorktree(repoId: string, issueKey: string, worktree: WorktreeRecord): Promise<void> {
     const perRepo = this.worktrees[repoId] ?? {};
+    const previous = perRepo[issueKey];
     perRepo[issueKey] = worktree;
     this.worktrees[repoId] = perRepo;
-    await this.enqueue(() => writeJsonAtomic(this.path(WORKTREES_FILE), this.worktrees));
+    try {
+      await this.enqueue(() => writeJsonAtomic(this.path(WORKTREES_FILE), this.worktrees));
+    } catch (cause) {
+      if (previous === undefined) delete perRepo[issueKey];
+      else perRepo[issueKey] = previous;
+      throw cause;
+    }
   }
 
   /**
@@ -252,8 +339,14 @@ export class Store {
   async clearWorktree(repoId: string, issueKey: string): Promise<void> {
     const perRepo = this.worktrees[repoId];
     if (perRepo === undefined || perRepo[issueKey] === undefined) return;
+    const previous = perRepo[issueKey];
     delete perRepo[issueKey];
-    await this.enqueue(() => writeJsonAtomic(this.path(WORKTREES_FILE), this.worktrees));
+    try {
+      await this.enqueue(() => writeJsonAtomic(this.path(WORKTREES_FILE), this.worktrees));
+    } catch (cause) {
+      perRepo[issueKey] = previous;
+      throw cause;
+    }
   }
 
   /**
@@ -269,6 +362,9 @@ export class Store {
   /**
    * Appends one accepted event to a session's raw event log.
    *
+   * Strings inside the raw payload are capped at `EVENT_STRING_MAX_LENGTH`, so
+   * one event cannot cost as much as a whole hook request body.
+   *
    * @param sessionId - Session the event belongs to.
    * @param entry - Timestamp, raw payload and the state the event produced.
    * @returns Nothing.
@@ -276,8 +372,12 @@ export class Store {
    */
   async appendEvent(sessionId: string, entry: SessionEventLogEntry): Promise<void> {
     const dir = this.sessionDir(sessionId);
-    await mkdir(dir, { recursive: true });
-    await appendFile(join(dir, 'events.jsonl'), `${JSON.stringify(entry)}\n`, 'utf8');
+    if (!this.eventDirsMade.has(sessionId)) {
+      await mkdir(dir, { recursive: true });
+      this.eventDirsMade.add(sessionId);
+    }
+    const capped: SessionEventLogEntry = { ...entry, event: capStrings(entry.event) };
+    await appendFile(join(dir, 'events.jsonl'), `${JSON.stringify(capped)}\n`, 'utf8');
   }
 
   /**
@@ -288,13 +388,18 @@ export class Store {
    *
    * @param sessionId - Session whose log to read.
    * @returns The accepted events, oldest first; empty when there is no log.
+   * @throws {Error} When a log exists but cannot be read.
    */
   async readEvents(sessionId: string): Promise<SessionEventLogEntry[]> {
     let text: string;
     try {
       text = await readFile(join(this.sessionDir(sessionId), 'events.jsonl'), 'utf8');
-    } catch {
-      return [];
+    } catch (cause) {
+      // Only "there is no log" is an empty log. Anything else — a permission
+      // problem, a log past the maximum string length — must reach the caller,
+      // or the route reports "the hooks never fired" for a log it could not open.
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw cause;
     }
     const entries: SessionEventLogEntry[] = [];
     for (const line of text.split('\n')) {

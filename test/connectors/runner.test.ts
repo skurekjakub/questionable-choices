@@ -38,6 +38,16 @@ let root = '';
 let dataDir = '';
 let home = '';
 
+/**
+ * Stands in for the store's own session-directory resolver.
+ *
+ * @param sessionId - Id of the session.
+ * @returns The directory the session's generated files belong in.
+ */
+function sessionDir(sessionId: string): string {
+  return join(dataDir, 'sessions', sessionId);
+}
+
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'qc-runner-'));
   dataDir = join(root, 'data');
@@ -132,7 +142,7 @@ describe('readOwnerStatuslineCommand', () => {
 
 describe('ClaudeTmuxRunner.writeSessionFiles', () => {
   it('writes the four generated files into the session directory', async () => {
-    const runner = new ClaudeTmuxRunner({ config: RUNNER_CONFIG, port: 4400, dataDir, home });
+    const runner = new ClaudeTmuxRunner({ config: RUNNER_CONFIG, port: 4400, home, sessionDir });
     const record = makeRecord({ prompt: 'Work on DOC-1' });
 
     const dir = await runner.writeSessionFiles({
@@ -156,7 +166,7 @@ describe('ClaudeTmuxRunner.writeSessionFiles', () => {
 
   it('chains the owner status line captured at construction', async () => {
     await writeOwnerSettings({ statusLine: { type: 'command', command: 'bash ~/sl.sh' } });
-    const runner = new ClaudeTmuxRunner({ config: RUNNER_CONFIG, port: 4400, dataDir, home });
+    const runner = new ClaudeTmuxRunner({ config: RUNNER_CONFIG, port: 4400, home, sessionDir });
 
     const dir = await runner.writeSessionFiles({
       record: makeRecord(),
@@ -171,7 +181,7 @@ describe('ClaudeTmuxRunner.writeSessionFiles', () => {
   });
 
   it('renders a resume launcher without a prompt', async () => {
-    const runner = new ClaudeTmuxRunner({ config: RUNNER_CONFIG, port: 4400, dataDir, home });
+    const runner = new ClaudeTmuxRunner({ config: RUNNER_CONFIG, port: 4400, home, sessionDir });
 
     const dir = await runner.writeSessionFiles({
       record: makeRecord({ claudeSessionId: 'abc-123' }),
@@ -188,7 +198,7 @@ describe('ClaudeTmuxRunner.writeSessionFiles', () => {
 
 describe('ClaudeTmuxRunner.resume', () => {
   it('refuses a record that never reported a claude session id', async () => {
-    const runner = new ClaudeTmuxRunner({ config: RUNNER_CONFIG, port: 4400, dataDir, home });
+    const runner = new ClaudeTmuxRunner({ config: RUNNER_CONFIG, port: 4400, home, sessionDir });
 
     await expect(runner.resume(makeRecord({ claudeSessionId: null }))).rejects.toBeInstanceOf(
       ResumeUnavailableError,
@@ -231,7 +241,7 @@ describe('ClaudeTmuxRunner.start', () => {
     const runner = new ClaudeTmuxRunner({
       config: { ...RUNNER_CONFIG, claudeBin: 'qc-no-such-binary' },
       port: 4400,
-      dataDir,
+      sessionDir,
       home,
     });
 
@@ -244,7 +254,7 @@ describe('ClaudeTmuxRunner.start', () => {
     const runner = new ClaudeTmuxRunner({
       config: { ...RUNNER_CONFIG, claudeBin: 'qc-no-such-binary' },
       port: 4400,
-      dataDir,
+      sessionDir,
       home,
     });
     const record = makeRecord();
@@ -264,7 +274,7 @@ describe('ClaudeTmuxRunner.resume', () => {
     const runner = new ClaudeTmuxRunner({
       config: { ...RUNNER_CONFIG, claudeBin: 'qc-no-such-binary' },
       port: 4400,
-      dataDir,
+      sessionDir,
       home,
     });
     const record = makeRecord({ claudeSessionId: 'abc' });
@@ -280,7 +290,7 @@ describe('ClaudeTmuxRunner.resume', () => {
     const runner = new ClaudeTmuxRunner({
       config: { ...RUNNER_CONFIG, claudeBin: 'qc-no-such-binary' },
       port: 4400,
-      dataDir,
+      sessionDir,
       home,
     });
 
@@ -292,13 +302,13 @@ describe('ClaudeTmuxRunner.resume', () => {
 
 describe('createRunner', () => {
   it('builds the claude-tmux runner', () => {
-    const runner = createRunner({ config: RUNNER_CONFIG, port: 4400, dataDir, home });
+    const runner = createRunner({ config: RUNNER_CONFIG, port: 4400, home, sessionDir });
     expect(runner.type).toBe('claude-tmux');
   });
 
   it('refuses an unknown runner type', () => {
     const config = { ...RUNNER_CONFIG, type: 'screen' } as unknown as RunnerConfig;
-    expect(() => createRunner({ config, port: 4400, dataDir, home })).toThrow(
+    expect(() => createRunner({ config, port: 4400, home, sessionDir })).toThrow(
       /unknown runner type/,
     );
   });
@@ -306,7 +316,7 @@ describe('createRunner', () => {
 
 describe('ClaudeTmuxRunner.sessionDir', () => {
   it('puts one directory per session under the data directory', () => {
-    const runner = new ClaudeTmuxRunner({ config: RUNNER_CONFIG, port: 4400, dataDir, home });
+    const runner = new ClaudeTmuxRunner({ config: RUNNER_CONFIG, port: 4400, home, sessionDir });
     expect(runner.sessionDir('qc-DOC-1-implement')).toBe(
       join(dataDir, 'sessions', 'qc-DOC-1-implement'),
     );
@@ -316,9 +326,8 @@ describe('ClaudeTmuxRunner.sessionDir', () => {
     const runner = new ClaudeTmuxRunner({
       config: RUNNER_CONFIG,
       port: 4400,
-      dataDir,
       home,
-      sessionDir: (sessionId) => join(dataDir, 'elsewhere', sessionId),
+      sessionDir: (sessionId: string) => join(dataDir, 'elsewhere', sessionId),
     });
 
     const dir = await runner.writeSessionFiles({

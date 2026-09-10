@@ -429,17 +429,53 @@ describe('SessionManager', () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       await h.manager.applyEvent('qc-DOC-1-implement', { type: 'claude-start', mode: 'start' }, {});
       h.runner.alive.clear();
+      h.clock.ms += RECONCILE_INTERVAL_MS;
 
       await h.manager.reconcile();
       const record = h.store.session('qc-DOC-1-implement');
       expect(record?.state).toBe('exited');
       expect(record?.endedAt).not.toBeNull();
+      expect(record?.stateSince).toBe(new Date(h.clock.ms).toISOString());
     });
 
-    it('leaves a live session alone', async () => {
+    it('leaves a session the runner still reports alive alone, having asked', async () => {
       await h.manager.startSession('ws', 'DOC-1', START);
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+      const probed: string[] = [];
+      h.runner.isAlive = async (sessionId: string) => {
+        probed.push(sessionId);
+        return true;
+      };
+
       await h.manager.reconcile();
+
+      expect(probed).toEqual(['qc-DOC-1-implement']);
       expect(h.store.session('qc-DOC-1-implement')?.state).toBe('starting');
+    });
+
+    it('leaves a record whose state changed within one interval alone, mid-resume', async () => {
+      // A resume kills and recreates the tmux session; a pass that lands in
+      // that gap would read it as a death and flicker the card to Exited.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.applyEvent('qc-DOC-1-implement', { type: 'claude-start', mode: 'start' }, {});
+      h.runner.alive.clear();
+
+      await h.manager.reconcile();
+
+      expect(h.store.session('qc-DOC-1-implement')?.state).toBe('starting');
+    });
+
+    it('survives a probe that throws, leaving the record and naming it in the log', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+      h.runner.isAlive = async () => {
+        throw new Error('tmux is not on PATH');
+      };
+
+      await expect(h.manager.reconcile()).resolves.toBeUndefined();
+
+      expect(h.store.session('qc-DOC-1-implement')?.state).toBe('starting');
+      expect(h.logger.lines.join('\n')).toContain('cannot probe qc-DOC-1-implement');
     });
   });
 

@@ -22,8 +22,8 @@ describe('the connector factories', () => {
     const runner = createRunner({
       config: RUNNER_CONFIG,
       port: 4400,
-      dataDir: '/data',
       home: '/home/nobody',
+      sessionDir: (sessionId: string) => `/data/sessions/${sessionId}`,
     });
 
     expect(issues).toBeInstanceOf(JiraIssueSource);

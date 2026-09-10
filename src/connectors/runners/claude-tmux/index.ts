@@ -107,16 +107,14 @@ export interface ClaudeTmuxRunnerOptions {
   config: RunnerConfig;
   /** Port the dashboard listens on, baked into every generated hook URL. */
   port: number;
-  /** Absolute directory the session directories are created under. */
-  dataDir: string;
   /** Owner's home directory, read once for their own status-line command. */
   home: string;
   /**
-   * Resolves the directory one session's generated files live in. Pass the
-   * store's own resolver so both sides read and write the same directory;
-   * defaults to `<dataDir>/sessions/<id>`.
+   * Resolves the directory one session's generated files live in. It is the
+   * store's own resolver, so the runner's scripts and the store's event log
+   * share one directory and neither side restates the layout.
    */
-  sessionDir?: ((sessionId: string) => string) | undefined;
+  sessionDir: (sessionId: string) => string;
 }
 
 /**
@@ -183,9 +181,7 @@ export class ClaudeTmuxRunner implements Runner {
   constructor(options: ClaudeTmuxRunnerOptions) {
     this.config = options.config;
     this.port = options.port;
-    const dataDir = options.dataDir;
-    this.resolveSessionDir =
-      options.sessionDir ?? ((sessionId) => join(dataDir, 'sessions', sessionId));
+    this.resolveSessionDir = options.sessionDir;
     this.ownerStatuslineCommand = readOwnerStatuslineCommand(options.home);
   }
 

@@ -1,5 +1,6 @@
 import { serveStatic } from '@hono/node-server/serve-static';
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type {
@@ -37,7 +38,33 @@ export interface AppDeps {
  * @returns True for the API and WebSocket namespaces.
  */
 function isServerPath(path: string): boolean {
-  return path.startsWith('/api/') || path.startsWith('/ws/');
+  // The bare prefixes belong to the server too: without them `GET /api` is one
+  // character short of the guard and falls through to the SPA shell.
+  return path === '/api' || path.startsWith('/api/') || path === '/ws' || path.startsWith('/ws/');
+}
+
+/**
+ * Directory the SPA build emits its hashed bundles into, relative to the web
+ * root. Its presence is what tells a built SPA from the Vite source tree, which
+ * also has an `index.html` but loads it from a dev server.
+ */
+const WEB_BUILD_MARKER = 'assets';
+
+/**
+ * Body served in place of the SPA when no built one is available.
+ */
+export const WEB_NOT_BUILT_MESSAGE =
+  'The dashboard SPA is not built. Run `npm run build:web` and restart, or use `npm run dev` and open the Vite dev server on port 5173. The API on this port works either way.';
+
+/**
+ * Reports whether a directory holds a built SPA rather than its source tree.
+ *
+ * @param root - Directory to inspect.
+ * @returns True when the directory has both an `index.html` and the build's
+ *   asset directory.
+ */
+export function isBuiltWebRoot(root: string): boolean {
+  return existsSync(join(root, 'index.html')) && existsSync(join(root, WEB_BUILD_MARKER));
 }
 
 /**
@@ -241,15 +268,19 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   const webRoot = deps.webRoot;
-  if (webRoot !== undefined && existsSync(webRoot)) {
+  if (webRoot !== undefined && isBuiltWebRoot(webRoot)) {
     const asset = serveStatic({ root: webRoot });
     const shell = serveStatic({ root: webRoot, path: 'index.html' });
     // Both handlers match every path and index.html always exists, so without
     // this guard an unrouted /api/ or /ws/ request is answered with the SPA.
-    app.use('/*', async (c, next) => (isServerPath(c.req.path) ? next() : asset(c, next)));
+    app.get('/*', async (c, next) => (isServerPath(c.req.path) ? next() : asset(c, next)));
     // The SPA owns /session/:id, so anything that is not a real file falls back
     // to index.html rather than 404ing on a deep link.
     app.get('/*', async (c, next) => (isServerPath(c.req.path) ? next() : shell(c, next)));
+  } else {
+    app.get('/*', async (c, next) =>
+      isServerPath(c.req.path) ? next() : c.text(WEB_NOT_BUILT_MESSAGE, 503),
+    );
   }
 
   return app;
