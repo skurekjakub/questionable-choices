@@ -294,6 +294,11 @@ export interface RunnerConfig {
   defaultEffort: Effort;
   /** Permission mode preselected when the playbook names none. */
   defaultPermissionMode: PermissionModeSetting;
+  /**
+   * Model a session is switched to for the duration of a `/compact`, so the
+   * summarising turn is not paid for at the session's own model's rate.
+   */
+  compactModel: string;
 }
 
 /**

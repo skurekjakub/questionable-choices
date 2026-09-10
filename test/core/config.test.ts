@@ -181,6 +181,7 @@ describe('defaults', () => {
     expect(config.runner.tmuxPrefix).toBe('qc');
     expect(config.runner.defaultEffort).toBe('medium');
     expect(config.runner.defaultPermissionMode).toBe('default');
+    expect(config.runner.compactModel).toBe('claude-sonnet-5');
     const repo = config.repos['app'];
     expect(repo?.baseRef).toBe('origin/main');
     expect(repo?.branchPattern).toBe('{{key}}-{{slug}}');
@@ -190,6 +191,14 @@ describe('defaults', () => {
     const workspace = config.workspaces['ws'];
     expect(workspace?.pollSeconds).toBe(120);
     expect(workspace?.reviewStatuses).toEqual(['Ready for review']);
+  });
+
+  it('accepts a compactModel that names one of the offered models', () => {
+    const document = minimal();
+    const runner = document['runner'] as Record<string, unknown>;
+    const models = runner['models'] as Array<Record<string, unknown>>;
+    runner['compactModel'] = models[0]?.['id'];
+    expect(parseConfig(document, { home: HOME }).runner.compactModel).toBe(models[0]?.['id']);
   });
 
   it('accepts a jql override alongside the epic', () => {
@@ -357,6 +366,13 @@ describe('rejections', () => {
         (document['runner'] as Record<string, unknown>)['defaultModel'] = 'ghost';
       }),
       locator: 'runner.defaultModel',
+    },
+    {
+      name: 'a compact model that is neither offered nor the shipped default',
+      document: broken((document) => {
+        (document['runner'] as Record<string, unknown>)['compactModel'] = 'ghost';
+      }),
+      locator: 'runner.compactModel',
     },
     {
       name: 'an unknown runner type',

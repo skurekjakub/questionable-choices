@@ -131,6 +131,11 @@ runner
                            suffixed with a timestamp when that name is taken (§5.1)
   models[]                 {id,label} shown in the picker
   defaultModel / defaultEffort / defaultPermissionMode
+  compactModel             model a session is switched to for the length of a Compact
+                           (§5.5) and switched back from; default 'claude-sonnet-5'.
+                           Must be one of `models` or exactly that default: it is
+                           never picked in a dialog, so a configuration that ignores
+                           compaction must not have to name it
 connectors{id}
   type                     'jira'
   site, emailEnv, tokenEnv

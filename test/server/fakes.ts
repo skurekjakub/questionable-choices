@@ -419,6 +419,7 @@ export function makeConfig(dataDir: string, repo: Partial<RepoConfig> = {}): Con
       defaultModel: 'claude-fable-5-1',
       defaultEffort: 'high',
       defaultPermissionMode: 'acceptEdits',
+      compactModel: 'claude-sonnet-5',
     },
     connectors: { tracker: makeConnector() },
     repos: { app: makeRepo({ bootstrap: 'npm ci', ...repo }) },

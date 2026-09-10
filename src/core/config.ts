@@ -24,6 +24,14 @@ export const DEFAULT_REVIEW_STATUSES = ['Ready for review'];
 export const DEFAULT_POLL_SECONDS = 120;
 
 /**
+ * Model a compaction runs on when the runner names none.
+ *
+ * It is accepted whether or not `runner.models` lists it, so a configuration
+ * that never mentions compaction still validates.
+ */
+export const DEFAULT_COMPACT_MODEL = 'claude-sonnet-5';
+
+/**
  * Thrown when a configuration document is unreadable or fails validation.
  */
 export class ConfigError extends Error {
@@ -115,6 +123,7 @@ const runnerSchema = z.strictObject({
   defaultModel: nonEmpty('defaultModel'),
   defaultEffort: z.enum(EFFORTS).default('medium'),
   defaultPermissionMode: z.enum(PERMISSION_MODE_SETTINGS).default('default'),
+  compactModel: nonEmpty('compactModel').default(DEFAULT_COMPACT_MODEL),
 });
 
 const editorSchema = z.strictObject({
@@ -313,6 +322,17 @@ function buildConfigSchema(home: string) {
           message: `defaultModel '${runner.defaultModel}' is not one of runner.models`,
           path: ['runner', 'defaultModel'],
           input: runner.defaultModel,
+        });
+      }
+      // The shipped default is accepted whether or not the picker offers it:
+      // the compact model is never picked in the dialog, so requiring it in
+      // `models` would make a configuration that ignores compaction invalid.
+      if (runner.compactModel !== DEFAULT_COMPACT_MODEL && !modelIds.has(runner.compactModel)) {
+        ctx.issues.push({
+          code: 'custom',
+          message: `compactModel '${runner.compactModel}' is not one of runner.models`,
+          path: ['runner', 'compactModel'],
+          input: runner.compactModel,
         });
       }
 

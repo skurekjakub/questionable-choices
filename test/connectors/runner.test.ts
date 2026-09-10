@@ -34,6 +34,7 @@ const RUNNER_CONFIG: RunnerConfig = {
   defaultModel: 'claude-fable-5-1',
   defaultEffort: 'high',
   defaultPermissionMode: 'acceptEdits',
+  compactModel: 'claude-sonnet-5',
 };
 
 let root = '';
