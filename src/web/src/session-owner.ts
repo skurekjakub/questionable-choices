@@ -27,12 +27,20 @@ export function lists(board: BoardView, sessionId: string): boolean {
  * Rejects once the given delay has passed.
  *
  * @param ms - Delay in milliseconds.
- * @returns A promise that never resolves and rejects on the deadline.
+ * @returns The deadline promise and the call that disarms it, so a caller that
+ * won the race does not leave a timer armed for the rest of the budget.
  */
-function expiresIn(ms: number): Promise<never> {
-  return new Promise((_resolve, reject) => {
-    setTimeout(() => reject(new Error('the search ran out of time')), ms);
+function expiresIn(ms: number): { promise: Promise<never>; cancel: () => void } {
+  let handle: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<never>((_resolve, reject) => {
+    handle = setTimeout(() => reject(new Error('the search ran out of time')), ms);
   });
+  return {
+    promise,
+    cancel: () => {
+      if (handle !== undefined) clearTimeout(handle);
+    },
+  };
 }
 
 /**
@@ -60,13 +68,16 @@ export async function findSessionOwner(
   for (const workspaceId of workspaceIds) {
     const left = deadline - Date.now();
     if (left <= 0) return null;
+    const expiry = expiresIn(left);
     try {
-      const view = await Promise.race([readBoard(workspaceId), expiresIn(left)]);
+      const view = await Promise.race([readBoard(workspaceId), expiry.promise]);
       if (lists(view, sessionId)) return workspaceId;
     } catch {
       // Unreachable, refused, or out of time: the remaining boards can still
       // answer, and the budget above is what stops this walking forever.
       continue;
+    } finally {
+      expiry.cancel();
     }
   }
   return null;
