@@ -107,13 +107,18 @@ class FakeSocket {
 }
 
 /**
- * Lets every queued microtask and timer-free promise settle.
+ * Gives the event loop enough real turns for the route's frame queue to drain.
  *
+ * Real turns rather than a fixed number of microtask rounds: one more `await`
+ * in the attach chain must not silently stop being covered.
+ *
+ * @param turns - Event-loop turns to yield.
  * @returns Nothing.
  */
-async function flush(): Promise<void> {
-  for (let round = 0; round < 5; round += 1) await Promise.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+async function flush(turns = 20): Promise<void> {
+  for (let round = 0; round < turns; round += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 }
 
 describe('WebSocket routes', () => {
@@ -300,6 +305,44 @@ describe('WebSocket routes', () => {
 
       expect(terminal.writes).toEqual(['ls\r']);
       expect(logger.lines.join('\n')).toContain('dropped a frame');
+    });
+
+    it('does not apply a frame that arrived before a close to the disposed pty', async () => {
+      // The frame is queued behind the attach; by the time it runs the viewer
+      // has gone and the pty's descriptor is closed.
+      const socket = await open(`/ws/terminal/${SESSION_ID}`);
+      const terminal = runner.terminals[0] as FakeTerminal;
+      const before = terminal.resizes.length;
+
+      handlers.onMessage?.(
+        new MessageEvent('message', {
+          data: JSON.stringify({ type: 'resize', cols: 80, rows: 24 }),
+        }),
+        socket.asContext(),
+      );
+      handlers.onClose?.(new CloseEvent('close'), socket.asContext());
+      await flush();
+
+      expect(terminal.resizes).toHaveLength(before);
+      expect(terminal.disposed).toBe(true);
+    });
+
+    it('reports an attach that could not even close the socket', async () => {
+      // The attach is a link in the same queue as every later frame, so an
+      // unguarded throw there becomes an unhandled rejection that nothing here
+      // reports and that silently swallows the next frame.
+      runner.attachError = new Error('no server running');
+      await app.request(`/ws/terminal/${SESSION_ID}`);
+      const socket = new FakeSocket();
+      socket.close = () => {
+        throw new Error('the adapter tore this socket down already');
+      };
+
+      handlers.onOpen?.(new Event('open'), socket.asContext());
+      await flush();
+
+      expect(logger.lines.join('\n')).toContain('dropped a frame');
+      expect(logger.lines.join('\n')).toContain('tore this socket down');
     });
 
     it('drops pty output while the viewer is not reading it', async () => {

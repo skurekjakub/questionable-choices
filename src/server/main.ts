@@ -119,7 +119,9 @@ export async function main(): Promise<void> {
     console.warn(`warning: ${warning}`);
   }
 
-  const store = new Store(config.dataDir);
+  const store = new Store(config.dataDir, (message) => {
+    consoleLogger.warn(message);
+  });
   await store.load();
 
   const { runner, repos, workspaces } = buildConnectors(config, home, (sessionId) =>
@@ -187,10 +189,10 @@ export async function main(): Promise<void> {
  * be free of side effects, so the boot below is gated on being the entry point
  * rather than running on every import.
  *
- * @returns True when `process.argv[1]` resolves to this file.
+ * @param entry - Path the process was started with; defaults to `argv[1]`.
+ * @returns True when the entry path resolves to this file.
  */
-function isProcessEntry(): boolean {
-  const entry = process.argv[1];
+export function isProcessEntry(entry: string | undefined = process.argv[1]): boolean {
   if (entry === undefined) return false;
   try {
     return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(entry);
@@ -199,4 +201,12 @@ function isProcessEntry(): boolean {
   }
 }
 
-if (isProcessEntry()) await main();
+if (isProcessEntry()) {
+  // A boot that never gets as far as listening must exit non-zero: the
+  // unhandledRejection handler would otherwise print "still serving" about a
+  // process that serves nothing and then exit 0 for a supervisor to read as ok.
+  await main().catch((cause: unknown) => {
+    console.error(`questionable-choices failed to start: ${messageOf(cause)}`);
+    fatalExit(1);
+  });
+}

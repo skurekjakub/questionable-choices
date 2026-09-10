@@ -37,6 +37,20 @@ describe('KeyedMutex', () => {
     expect(order).toEqual(['enter-0', 'leave-0', 'enter-1', 'leave-1', 'enter-2', 'leave-2']);
   });
 
+  /**
+   * Counts the chains a mutex is still holding.
+   *
+   * Read through the private field on purpose: a public accessor would be
+   * production code with no production caller, which is what the last one was
+   * deleted for.
+   *
+   * @param mutex - The mutex to inspect.
+   * @returns The number of keys with a chain.
+   */
+  function chainCount(mutex: KeyedMutex): number {
+    return (mutex as unknown as { chains: Map<string, unknown> }).chains.size;
+  }
+
   it('lets different keys run at the same time', async () => {
     const mutex = new KeyedMutex();
     const held = deferred();
@@ -92,5 +106,36 @@ describe('KeyedMutex', () => {
     await Promise.all([b, c]);
 
     expect(order).toEqual(['a-enter', 'a-leave', 'b-enter', 'b-leave', 'c-enter']);
+  });
+
+  it('holds no chain for a key whose work has finished', async () => {
+    // One key per (repo, issue) and one per session id: a map that only grows
+    // is a leak the size of the owner's whole issue history.
+    const mutex = new KeyedMutex();
+
+    for (let index = 0; index < 50; index += 1) {
+      await mutex.run(`key-${String(index)}`, async () => index);
+    }
+    // The deletion is queued behind the chain's own resolution, so it lands one
+    // turn after the caller is answered.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(chainCount(mutex)).toBe(0);
+  });
+
+  it('holds one chain per key while work is queued on it', async () => {
+    const mutex = new KeyedMutex();
+    const held = deferred();
+
+    const first = mutex.run('key', () => held.promise);
+    const second = mutex.run('key', async () => undefined);
+    const other = mutex.run('other', () => held.promise);
+    expect(chainCount(mutex)).toBe(2);
+
+    held.resolve();
+    await Promise.all([first, second, other]);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(chainCount(mutex)).toBe(0);
   });
 });
