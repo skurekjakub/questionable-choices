@@ -137,6 +137,121 @@ describe('useSessionOwner', () => {
     expect(readings.at(-1)?.searching).toBe(false);
   });
 
+  it('drops the answer to a search for a session the owner has navigated away from', async () => {
+    // Both sessions are unlisted here, so the second starts a search of its
+    // own: the first one's answer must not clear the flag that search owns,
+    // nor switch the board to the workspace that owns a session off screen.
+    const answers: Array<(view: BoardView) => void> = [];
+    vi.mocked(getBoard).mockImplementation(
+      () =>
+        new Promise<BoardView>((resolve) => {
+          answers.push(resolve);
+        }),
+    );
+    const readings: Reading[] = [];
+    const picked: string[] = [];
+    const props = {
+      config: publicConfig(['docs', 'migration']),
+      board: boardListing('docs', []),
+      onSelectWorkspace: (id: string) => picked.push(id),
+      readings,
+    };
+    const { rerender } = render(<Probe {...props} sessionId="qc-DOC-9-implement" />);
+    expect(readings.at(-1)?.searching).toBe(true);
+
+    rerender(<Probe {...props} sessionId="qc-DOC-8-implement" />);
+    expect(answers).toHaveLength(2);
+
+    await act(async () => {
+      answers[0]?.(boardListing('migration', ['qc-DOC-9-implement']));
+    });
+    expect(picked).toEqual([]);
+    expect(readings.at(-1)?.searching).toBe(true);
+  });
+
+  it('does not switch the board for a session the owner has left for one this board lists', async () => {
+    // The second session needs no search, so nothing else retires the first
+    // one's: its answer would otherwise pull the board out from under a session
+    // that is rendering perfectly well.
+    const answers: Array<(view: BoardView) => void> = [];
+    vi.mocked(getBoard).mockImplementation(
+      () =>
+        new Promise<BoardView>((resolve) => {
+          answers.push(resolve);
+        }),
+    );
+    const readings: Reading[] = [];
+    const picked: string[] = [];
+    const props = {
+      config: publicConfig(['docs', 'migration']),
+      onSelectWorkspace: (id: string) => picked.push(id),
+      readings,
+    };
+    const { rerender } = render(
+      <Probe {...props} sessionId="qc-DOC-9-implement" board={boardListing('docs', [])} />,
+    );
+    expect(readings.at(-1)?.searching).toBe(true);
+
+    rerender(
+      <Probe
+        {...props}
+        sessionId="qc-DOC-1-implement"
+        board={boardListing('docs', ['qc-DOC-1-implement'])}
+      />,
+    );
+    expect(readings.at(-1)?.searching).toBe(false);
+
+    await act(async () => {
+      answers[0]?.(boardListing('migration', ['qc-DOC-9-implement']));
+    });
+    expect(picked).toEqual([]);
+    expect(readings.at(-1)?.searching).toBe(false);
+  });
+
+  it('is still searching after a board listed the session and then stopped', async () => {
+    // A board frame that lists the session answers the question; a later one
+    // that does not puts the question back, and the search started for it is
+    // still running.
+    vi.mocked(getBoard).mockImplementation(() => new Promise<BoardView>(() => {}));
+    const readings: Reading[] = [];
+    const props = {
+      sessionId: 'qc-DOC-9-implement',
+      config: publicConfig(['docs', 'migration']),
+      onSelectWorkspace: () => {},
+      readings,
+    };
+    const { rerender } = render(<Probe {...props} board={boardListing('docs', [])} />);
+    expect(readings.at(-1)?.searching).toBe(true);
+
+    rerender(<Probe {...props} board={boardListing('docs', ['qc-DOC-9-implement'])} />);
+    expect(readings.at(-1)?.searching).toBe(false);
+
+    rerender(<Probe {...props} board={boardListing('docs', [])} />);
+    expect(readings.at(-1)?.searching).toBe(true);
+    expect(vi.mocked(getBoard).mock.calls).toHaveLength(1);
+  });
+
+  it('searches a session a single-workspace configuration could not answer for', async () => {
+    // Marking it searched without searching it means a workspace added while
+    // the session route is open can never answer for the session on screen.
+    vi.mocked(getBoard).mockResolvedValue(boardListing('migration', ['qc-DOC-9-implement']));
+    const readings: Reading[] = [];
+    const picked: string[] = [];
+    const props = {
+      sessionId: 'qc-DOC-9-implement',
+      board: boardListing('docs', []),
+      onSelectWorkspace: (id: string) => picked.push(id),
+      readings,
+    };
+    const { rerender } = render(<Probe {...props} config={publicConfig(['docs'])} />);
+    await act(async () => {});
+    expect(vi.mocked(getBoard).mock.calls).toHaveLength(0);
+
+    rerender(<Probe {...props} config={publicConfig(['docs', 'migration'])} />);
+    await act(async () => {});
+    expect(picked).toEqual(['migration']);
+  });
+
   it('does not search before the board or the configuration has loaded', () => {
     const readings: Reading[] = [];
     render(

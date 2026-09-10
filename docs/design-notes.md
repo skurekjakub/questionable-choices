@@ -163,7 +163,8 @@ losing their words.
   the server has not heard confirmed since it restarted. On the card row it sits
   at the right-hand end, with the duration and the done marker rather than next
   to the state lamp, because the row reads left to right as the spec's sentence
-  does: playbook, state, time in state, done, unverified, gauge. In the session
+  does: playbook, state, time in state, done, unverified, may-need-you, gauge.
+  In the session
   header it sits inside the state pill, which is the one thing the header says
   about state. It is a marker rather than a word because the sentence it stands
   for is longer than the track it would sit in; the sentence is its accessible
@@ -236,3 +237,14 @@ forced palette replaces or flattens. Closing this means auditing every token
 against the `forced-colors` system colours and giving the lamps a border in that
 mode so their silhouettes survive a flattened fill, which is a design pass
 rather than a fix. Recorded here so it is a decision rather than an oversight.
+
+**`Terminal.tsx` has no test, and is the largest untested surface in the SPA.**
+Every suite that renders a session replaces the module wholesale, because xterm
+does not survive jsdom: it measures a canvas the environment does not implement.
+So the xterm and socket construction, the dispose-and-rethrow paths around them,
+the reconnect backoff and `onAttached` are all shipped unproven, and only the
+boundary around them is covered — which proves the dashboard survives a terminal
+that fails, not that the terminal ever works. Closing this means either a
+headless-browser test of the attach path or a seam that lets a fake xterm stand
+in, both of which are more than a fix. Recorded here so it is a decision rather
+than an oversight.

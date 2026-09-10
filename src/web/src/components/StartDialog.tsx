@@ -35,12 +35,20 @@ const DISCARD_NOTE: Readonly<Record<DiscardIntent['kind'], string>> = {
 };
 
 /**
+ * What a dismissal refused over the start request tells the owner.
+ */
+export const STILL_STARTING_SENTENCE =
+  'The session is still starting, so the dialog is holding on for the answer. Dismiss it again to leave without one.';
+
+/**
  * Collects everything a start needs: which playbook, what prompt, and which
  * runner settings, prefilled from the server and editable before sending.
  *
  * Once the prompt differs from the prefill, everything that would replace it —
  * dismissing the dialog, and picking another playbook — asks for confirmation
- * instead of throwing the edit away.
+ * instead of throwing the edit away. A dismissal over the start request is
+ * refused once and honoured the second time, which abandons the request: the
+ * session still starts, and its answer is dropped rather than acted on.
  *
  * @param props - Component props.
  * @param props.card - Card the start was triggered from.
@@ -85,7 +93,9 @@ export function StartDialog({
   const [warnings, setWarnings] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
+  const [refusedDismissal, setRefusedDismissal] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const abandoned = useRef(false);
 
   useEffect(() => {
     let live = true;
@@ -121,8 +131,19 @@ export function StartDialog({
   const requestClose = useCallback(() => {
     // The session is started whether or not this dialog is on screen, so
     // closing over the request in flight loses both the id to navigate to and
-    // the refusal that says why nothing started.
-    if (starting) return;
+    // the refusal that says why nothing started. Nothing lowers `starting` for
+    // a request that never answers, though, and every way out routes through
+    // here: the second dismissal abandons the request rather than sealing the
+    // dialog until the tab is reloaded.
+    if (starting) {
+      if (!refusedDismissal) {
+        setRefusedDismissal(true);
+        return;
+      }
+      abandoned.current = true;
+      onClose();
+      return;
+    }
     if (confirming) {
       setDiscardIntent(null);
       return;
@@ -132,7 +153,7 @@ export function StartDialog({
       return;
     }
     onClose();
-  }, [starting, confirming, edited, onClose]);
+  }, [starting, refusedDismissal, confirming, edited, onClose]);
   const dialog = useFocusTrap<HTMLDivElement>(requestClose);
   const keepEditing = useRef<HTMLButtonElement>(null);
   const promptField = useRef<HTMLTextAreaElement>(null);
@@ -176,6 +197,8 @@ export function StartDialog({
   const selected = playbooks.find((playbook) => playbook.id === playbookId) ?? null;
 
   const start = (): void => {
+    abandoned.current = false;
+    setRefusedDismissal(false);
     setStarting(true);
     createSession(workspaceId, card.issue.key, {
       playbookId,
@@ -184,9 +207,15 @@ export function StartDialog({
       effort,
       permissionMode,
     })
-      .then((record) => onStarted(record.id))
-      .catch((cause: unknown) => setError(errorMessage(cause)))
-      .finally(() => setStarting(false));
+      .then((record) => {
+        if (!abandoned.current) onStarted(record.id);
+      })
+      .catch((cause: unknown) => {
+        if (!abandoned.current) setError(errorMessage(cause));
+      })
+      .finally(() => {
+        if (!abandoned.current) setStarting(false);
+      });
   };
 
   return (
@@ -219,11 +248,14 @@ export function StartDialog({
         </div>
 
         <div className="dialog-body">
-          {dropped ? (
-            <p className="empty empty-inline" role="status">
-              {DROPPED_SENTENCE}
-            </p>
-          ) : null}
+          {/* The live region is mounted empty and filled later: a region that
+              arrives with its content already in it announces nothing. */}
+          <div role="status">
+            {dropped ? <p className="empty empty-inline">{DROPPED_SENTENCE}</p> : null}
+            {refusedDismissal && starting ? (
+              <p className="empty empty-inline">{STILL_STARTING_SENTENCE}</p>
+            ) : null}
+          </div>
           <label className="field">
             <span>Playbook</span>
             <select value={playbookId} onChange={(event) => selectPlaybook(event.target.value)}>

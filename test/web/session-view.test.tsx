@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import type { JSX } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IssueDetailResponse } from '../../src/core/api.js';
 import { ApiError } from '../../src/web/src/api.js';
@@ -139,8 +140,10 @@ describe('SessionView', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('cannot fetch'));
     expect(screen.queryByText(/No board lists this session/)).toBeNull();
     screen.getByTestId('terminal');
-    expect(screen.getByText('tmux attach -t qc-DOC-1-implement')).toBeTruthy();
-    expect(screen.getByText('Attach in a terminal')).toBeTruthy();
+    const attach = screen.getByText('Attach in a terminal').closest('section');
+    expect(attach?.querySelector('code.path')?.textContent).toBe(
+      'tmux attach -t qc-DOC-1-implement',
+    );
   });
 
   it('prefers the record over the card for a field the server has just cleared', async () => {
@@ -240,13 +243,54 @@ describe('SessionView', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByText(/needs permission/)).toBeTruthy());
-    expect(screen.getByText(/Bash: rm -rf \.next\/cache/)).toBeTruthy();
+    const pill = await waitFor(() => {
+      const found = document.querySelector('.state-pill');
+      expect(found?.textContent).toContain('needs permission');
+      return found;
+    });
+    // The prompt is what the pill is for: the state word alone does not say
+    // what the session is waiting to be told.
+    expect(pill?.textContent).toContain('Bash: rm -rf .next/cache');
     expect(screen.queryByText('session not found')).toBeNull();
     // A session waiting on the owner is still running, so the header offers the
     // controls that act on a running session and not the one that restarts it.
     expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Interrupt' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('shows the session on screen, not the one it was opened from, while its detail loads', async () => {
+    // One component instance renders every session route, so the record and the
+    // issue loaded for the last session outlive the navigation to the next.
+    const board = boardView('docs', [
+      card('DOC-1', [cardSession('qc-DOC-1-implement', { state: 'working' })]),
+      card('DOC-2', [cardSession('qc-DOC-2-implement', { state: 'failed', lastExitCode: 1 })]),
+    ]);
+    vi.mocked(getIssue).mockResolvedValueOnce(detailFor('DOC-1'));
+    vi.mocked(getSessionEvents).mockResolvedValue({ events: [] });
+    const view = (sessionId: string): JSX.Element => (
+      <SessionView
+        sessionId={sessionId}
+        board={board}
+        nowMs={Date.parse(FIXTURE_NOW)}
+        resolving={false}
+        onBack={() => {}}
+      />
+    );
+    const { rerender } = render(view('qc-DOC-1-implement'));
+    await waitFor(() => expect(screen.getByText('DOC-1 summary')).toBeTruthy());
+
+    // The second session's detail is still in flight for the whole assertion.
+    vi.mocked(getIssue).mockImplementation(() => new Promise(() => {}));
+    rerender(view('qc-DOC-2-implement'));
+
+    // The failed session's own panel, which also settles the log read.
+    await screen.findByText(/records no reason/);
+    const pill = document.querySelector('.state-pill');
+    expect(pill?.textContent).toContain('failed, exit 1');
+    expect(screen.queryByText('DOC-1 summary')).toBeNull();
+    expect(screen.queryByText('DOC-1')).toBeNull();
+    // `live` decides these two, and it is read off whatever the header shows.
+    expect(screen.getByRole('button', { name: 'Kill' }).hasAttribute('disabled')).toBe(true);
   });
 
   it('takes the terminal away only from a session no board lists', async () => {
@@ -307,6 +351,9 @@ describe('SessionView', () => {
       />,
     );
     expect(screen.queryByTestId('terminal')).toBeNull();
+    // This board has answered; what is being waited on is the other boards.
+    expect(screen.getByText(/Looking through the other workspaces/)).toBeTruthy();
+    expect(screen.queryByText(/Waiting for the board/)).toBeNull();
   });
 
   it('says the log could not be read rather than that it named no reason', async () => {
@@ -372,9 +419,12 @@ describe('SessionView', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByText(/records no reason/)).toBeTruthy());
-    expect(screen.getByText(/failed, exit 128/)).toBeTruthy();
-    expect(screen.getByText(/shell open in tmux qc-DOC-1-implement/)).toBeTruthy();
+    const reason = await screen.findByText(/records no reason/);
+    expect(reason.textContent).toBe('The event log records no reason beyond the exit code.');
+    expect(document.querySelector('.state-pill')?.textContent).toContain('failed, exit 128');
+    expect(screen.getByText(/shell open in tmux qc-DOC-1-implement/).textContent).toContain(
+      'the output that ended it can be read there',
+    );
   });
 
   it('names the exit code of a session that ran and died, not only of a failed one', async () => {
@@ -393,7 +443,9 @@ describe('SessionView', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByText(/exited, code 1/)).toBeTruthy());
-    expect(screen.getByText('Why it ended')).toBeTruthy();
+    await screen.findByText('Why it ended');
+    expect(document.querySelector('.state-pill')?.textContent).toContain('exited, code 1');
+    // A clean exit is not a failure, and the panel's heading is what says so.
+    expect(screen.queryByText('Why it failed')).toBeNull();
   });
 });

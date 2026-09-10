@@ -4,6 +4,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal as Xterm } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalServerFrame } from '../../../core/api.js';
+import { errorMessage } from '../api.js';
 import { reconnectDelayMs, socketUrl } from '../ws.js';
 
 /**
@@ -86,43 +87,48 @@ export function SessionTerminal({
   useEffect(() => {
     const element = host.current;
     if (element === null) return;
-    const xterm = new Xterm({
-      allowProposedApi: true,
-      convertEol: false,
-      cursorBlink: true,
-      fontFamily: "'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace",
-      fontSize: 13,
-      lineHeight: 1.2,
-      scrollback: 8000,
-      theme: THEME,
-    });
-    const fitAddon = new FitAddon();
-    const observer = new ResizeObserver(() => {
-      fitAddon.fit();
-      const live = socket.current;
-      if (live?.readyState !== WebSocket.OPEN) return;
-      live.send(JSON.stringify({ type: 'resize', cols: xterm.cols, rows: xterm.rows }));
-    });
     // The cleanup below is the effect's return value, so nothing that throws
-    // before the effect returns is ever cleaned up: without this the xterm
+    // before the effect returns is ever cleaned up: everything constructed
+    // here is therefore constructed inside the try, or an xterm that was built
     // keeps its DOM and its renderer for the life of the page.
+    let built: Xterm | undefined;
+    let watcher: ResizeObserver | undefined;
     try {
+      const xterm = new Xterm({
+        allowProposedApi: true,
+        convertEol: false,
+        cursorBlink: true,
+        fontFamily: "'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace",
+        fontSize: 13,
+        lineHeight: 1.2,
+        scrollback: 8000,
+        theme: THEME,
+      });
+      built = xterm;
+      const fitAddon = new FitAddon();
+      const observer = new ResizeObserver(() => {
+        fitAddon.fit();
+        const live = socket.current;
+        if (live?.readyState !== WebSocket.OPEN) return;
+        live.send(JSON.stringify({ type: 'resize', cols: xterm.cols, rows: xterm.rows }));
+      });
+      watcher = observer;
       xterm.loadAddon(fitAddon);
       xterm.loadAddon(new WebLinksAddon());
       xterm.open(element);
       fitAddon.fit();
       observer.observe(element);
+      term.current = xterm;
+      fit.current = fitAddon;
     } catch (cause: unknown) {
-      observer.disconnect();
-      xterm.dispose();
+      watcher?.disconnect();
+      built?.dispose();
       throw cause;
     }
-    term.current = xterm;
-    fit.current = fitAddon;
 
     return () => {
-      observer.disconnect();
-      xterm.dispose();
+      watcher?.disconnect();
+      built?.dispose();
       term.current = null;
       fit.current = null;
     };
@@ -140,17 +146,9 @@ export function SessionTerminal({
       if (closed) return;
       fit.current?.fit();
       const query = `?cols=${xterm.cols}&rows=${xterm.rows}`;
-      let next: WebSocket;
-      // Same rule as the xterm above: a throw from the constructor happens
-      // before the cleanup exists, so the socket it may already have opened is
-      // closed here or never at all.
-      try {
-        next = new WebSocket(socketUrl(`/ws/terminal/${encodeURIComponent(sessionId)}${query}`));
-      } catch (cause: unknown) {
-        socket.current?.close();
-        socket.current = null;
-        throw cause;
-      }
+      const next = new WebSocket(
+        socketUrl(`/ws/terminal/${encodeURIComponent(sessionId)}${query}`),
+      );
       next.binaryType = 'arraybuffer';
       socket.current = next;
 
@@ -186,7 +184,16 @@ export function SessionTerminal({
           xterm.writeln('\r\n\x1b[90mnot reattaching; use Reconnect to try again\x1b[0m');
           return;
         }
-        retry = window.setTimeout(open, reconnectDelayMs(attempt));
+        retry = window.setTimeout(() => {
+          // A throw from a timer reaches no error boundary, so a reconnect that
+          // cannot even build its socket would stop the terminal reconnecting
+          // with nothing on screen saying so.
+          try {
+            open();
+          } catch (cause: unknown) {
+            xterm.writeln(`\r\n\x1b[31m${errorMessage(cause)}\x1b[0m`);
+          }
+        }, reconnectDelayMs(attempt));
         attempt += 1;
       };
       next.onerror = () => next.close();

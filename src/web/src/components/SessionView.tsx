@@ -1,12 +1,4 @@
-import {
-  lazy,
-  Suspense,
-  useEffect,
-  useMemo,
-  useState,
-  type JSX,
-  type LazyExoticComponent,
-} from 'react';
+import { lazy, Suspense, useEffect, useState, type JSX, type LazyExoticComponent } from 'react';
 import type { BoardView, SessionAction } from '../../../core/api.js';
 import {
   ApiError,
@@ -121,12 +113,15 @@ export function SessionView({
   const [forceRemove, setForceRemove] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<FailureRead | null>(null);
-  const [terminalAttempt, setTerminalAttempt] = useState(0);
 
   // React caches a rejected lazy payload for the life of the component, so the
   // chunk-404 this boundary exists for can only be retried by handing Suspense
   // a different `lazy()` — re-rendering the same one throws the same rejection.
-  const SessionTerminal = useMemo(() => loadTerminal(), [terminalAttempt]);
+  // State rather than a memo: a discarded memo cell would hand Suspense a
+  // second `lazy()` on a healthy render, remounting a working terminal and
+  // reopening its socket.
+  const [SessionTerminal, setSessionTerminal] =
+    useState<LazyExoticComponent<typeof SessionTerminalComponent>>(loadTerminal);
 
   const cardSession =
     board?.columns
@@ -291,7 +286,9 @@ export function SessionView({
             </p>
           ) : !answered ? (
             <p className="empty" role="status">
-              Waiting for the board to say whether this session exists.
+              {resolving
+                ? 'Looking through the other workspaces for the one that owns this session.'
+                : 'Waiting for the board to say whether this session exists.'}
             </p>
           ) : (
             <>
@@ -327,7 +324,7 @@ export function SessionView({
                         type="button"
                         className="btn"
                         onClick={() => {
-                          setTerminalAttempt((value) => value + 1);
+                          setSessionTerminal(loadTerminal());
                           retry();
                         }}
                       >
