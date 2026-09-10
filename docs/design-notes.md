@@ -30,14 +30,18 @@ one real gauge. Not a page of floating cards. Concretely:
   swipe.
 - Columns are separated by 1 px hairlines, not gutters. The board reads as
   one divided surface.
-- Elevation comes from surface lightness only. No drop shadows anywhere.
+- Elevation comes from surface lightness only. Nothing is raised by a shadow:
+  the only `box-shadow` in the product is the needs-you lamp's glow, and the
+  static ring that replaces it under `prefers-reduced-motion`.
 - "Editorial" shows up as real prose typesetting for the one piece of human
-  writing on screen — the issue summary and description — set in a serif at
-  a comfortable measure, not clipped UI chrome.
+  writing on screen — the issue summary and description — set in a serif at a
+  comfortable measure. On a card the summary is clamped to two lines, because a
+  card is an index entry; wherever the text is the subject, in the drawer and
+  the session panel, it is set in full.
 
 ## Colour
 
-Six base values, dark cyan-slate ink with warm parchment text. The warmth of
+Eight base values, dark cyan-slate ink with warm parchment text. The warmth of
 the text against the cool ground is what keeps it from reading as a generic
 near-black terminal theme.
 
@@ -55,17 +59,23 @@ near-black terminal theme.
 `--paper-faint` carries real readings — the cache countdown, time in state,
 column counts — so it is held at 4.5:1 against the card and column surfaces
 rather than tuned by eye. Anything quieter than this belongs to a shape or a
-lamp, not to text.
+lamp, not to text. It clears that bar only against the grounds it was measured
+on: the switcher panel sits on `--ink-700`, so the text there steps up to
+`--paper-dim`.
 
-Three signal colours, borrowed from indicator lamps rather than from a brand
-palette. They appear only on indicators, never as surfaces:
+Four signal colours, borrowed from indicator lamps rather than from a brand
+palette. They appear only on indicators — the lamps, the card rail, the lane
+dot, the cache gauge — and never as a surface behind content:
 
 | Token          | Value     | Meaning                                                   |
 | -------------- | --------- | --------------------------------------------------------- |
-| `--lamp-cyan`  | `#5ec8d8` | Live and moving: bootstrapping, starting, working         |
+| `--lamp-cyan`  | `#5ec8d8` | Live and moving: bootstrapping, working                   |
 | `--lamp-amber` | `#f0a52e` | Wants the owner: waiting, idle, cache running low         |
 | `--lamp-red`   | `#e2664b` | Stopped or spent: failed, cold cache, destructive actions |
 | `--lamp-moss`  | `#8fae6a` | Settled: done, marked done                                |
+
+`starting` is the one live state that is not cyan: the launcher has been told to
+go and nothing has reported back yet, so it stays dim until it does.
 
 Cache tones map straight onto the lamps: `dim` → `--paper-faint`,
 `yellow` → `--lamp-amber`, `red` → `--lamp-red`.
@@ -76,9 +86,10 @@ Two systems, clearly distinct, both from Google Fonts with a real fallback
 stack.
 
 - **Newsreader** (serif) — issue summaries, issue descriptions, column
-  headings, the app name. Screen-cut serif with low stroke contrast, so it
-  holds up on a dark ground where a display serif would fray. This is the
-  editorial half, and it is used only for text a human wrote.
+  headings, dialog and drawer titles, the app name. Screen-cut serif with low
+  stroke contrast, so it holds up on a dark ground where a display serif would
+  fray. This is the editorial half: the writing itself and the headings that
+  frame it, never a control.
 - **IBM Plex Sans** — every control, label, button and chip. Engineered,
   slightly squared grotesque drawn for technical equipment; the machine half.
 - **IBM Plex Mono** — issue keys, timers, branch names, worktree paths,
@@ -86,46 +97,67 @@ stack.
   decorative: `⏳ 4:07` re-renders every second and must not jitter, and paths
   and keys are machine identifiers.
 
+Both families are fetched from Google Fonts, which a dashboard whose whole point
+is running locally will not reach when the machine is offline. That is accepted
+rather than overlooked: the fallback stacks are real system faces, and bundling
+three families to survive a case where the tracker is unreachable anyway is not
+worth the weight.
+
 Type scale (rem, 16 px root): `0.6875` (11 px, chip/meta) · `0.75` (12 px,
 labels and session rows) · `0.8125` (13 px, controls) · `0.875` (14 px, body)
-· `1` (16 px, card summary) · `1.125` (18 px, drawer heading) · `1.375`
-(22 px, dialog and drawer titles).
+· `1` (16 px, card summary) · `1.125` (18 px, wordmark and session side-panel
+heading) · `1.375` (22 px, dialog and drawer titles).
 
 Rules the UI keeps: sentence case everywhere, no tracked-out all-caps
-eyebrows, no arrows appended to button labels, no middle-dot meta strings
-(hairline rules separate meta instead). Line length in the drawer and dialog
-is capped near 72 characters.
+eyebrows, no arrows appended to button labels, no middle-dot meta strings on
+screen (hairline rules separate meta instead; the one middle dot in the product
+is in a desktop notification's title, whose format the spec fixes). Line length
+is capped at 66 characters in the drawer and the dialogs; the session side panel
+drops the cap, being a narrow column already.
 
 ## Spacing and shape
 
 4 px base unit: `--sp-1` 4 · `--sp-2` 8 · `--sp-3` 12 · `--sp-4` 16 ·
-`--sp-5` 24 · `--sp-6` 32 · `--sp-7` 48. Card padding is 12; the gap between
-a card's blocks is 8; the column gutter is 16.
+`--sp-5` 24 · `--sp-6` 32 · `--sp-7` 48. Card padding is 12, with the left side
+inset by the 2 px rail so the text keeps its 12; the gap between a card's blocks
+is 8; lane bodies are padded 12 and separated by a 1 px hairline rather than a
+gutter.
 
-Radius is hierarchical, not uniform: chips and lamps `2px`, buttons and
-inputs `4px`, cards `6px`, dialog `8px`. The drawer has square edges because
-it is flush to the viewport edge.
+Radius is hierarchical, not uniform: chips `2px`, buttons and inputs `4px`,
+cards `6px`, dialog `8px`. A row inside a menu or the switcher panel takes the
+chip radius, being flush to the panel's own edge. Lamps are drawn as shapes
+rather than boxes, so they carry their own: a disc and a ring are circles, the
+failed square is softened by 1 px, the exited bar is square. The drawer has
+square edges because it is flush to the viewport edge.
 
 ## How state is signalled
 
 Colour never carries meaning alone. Every state is a shape, a word and a
 colour together.
 
-- **Session lamp** — a 9 px indicator to the left of each session row.
-  Filled disc = the machine is working; ring = the machine has stopped and is
-  waiting; a horizontal bar = exited; a filled square = failed. Colour adds
-  the urgency band, and the state word sits right next to it.
+- **Session lamp** — a 9 px indicator to the left of each session row. A
+  horizontal bar = exited; a filled square = failed; everything live is a disc
+  or a ring, and the silhouette separates the two states that share a colour.
+  Cyan is a ring while the worktree is still being built and a disc once the CLI
+  is running. Amber is a disc for a permission prompt, which blocks on one
+  answer, and a ring for a question or an idle turn, which are open-ended.
+  Colour adds the urgency band, and the state word sits right next to it.
 - **Card rail** — a 2 px vertical rule down the card's left edge, coloured by
   the card's most urgent session. This is the peripheral-vision signal that
   lets a column be scanned without reading. Cards themselves are never
   tinted.
-- **Needs-you pulse** — the lamp on a waiting session breathes at 2 s. Under
-  `prefers-reduced-motion` the animation is replaced by a static outer ring,
-  so the distinction survives without motion.
+- **Needs-you pulse** — the lamp breathes at 2 s on a session waiting for one
+  specific answer: a permission prompt or a question. An idle turn does not
+  pulse; it is where a session rests after it has finished speaking, and a
+  column of them would be nothing but motion. Under `prefers-reduced-motion` the
+  animation is replaced by a static outer ring, so the distinction survives
+  without motion.
 - **Cache gauge** — the one gauge in the product, and the only decorative
   flourish that survives. Under the `⏳ m:ss` countdown sits a 28 px hairline
-  that depletes with `secondsLeft / ttlSeconds`. Nothing else in the UI gets
-  a gauge, so it reads as the instrument's needle rather than as chrome.
+  that depletes with `secondsLeft / ttlSeconds`, falling back to the
+  five-minute default when the payload named no TTL, so the bar and the label
+  never disagree. Nothing else in the UI gets a gauge, so it reads as the
+  instrument's needle rather than as chrome.
 
 ## The workspace switcher
 
@@ -133,8 +165,8 @@ A workspace is one epic, so the switcher is a custom popover rather than a
 `<select>`: each row needs two lines. Line one is the workspace name in the UI
 face; line two is the epic key and the repo id in mono, spaced apart rather
 than joined by a separator character. The active row's name is tinted
-`--lamp-cyan`, the only place that colour appears outside a state lamp. The
-trigger shows the same pair inline, name then epic key.
+`--lamp-cyan`, the same accent the focus ring and the links carry. The trigger
+shows the same pair inline, name then epic key.
 
 Adding and removing a workspace sit at the bottom of that panel, below a
 hairline, because they change the list the panel is showing. Removal is
@@ -144,7 +176,11 @@ the switcher, the repo's sessions and worktrees stay.
 ## Restraint
 
 One bold element: the cache gauge. Everything around it is quiet — no
-gradients, no shadows, no hover lifts, no entrance animations. The only
-motion in the product is the needs-you pulse and the terminal's own cursor.
-Focus rings are a 2 px `--lamp-cyan` outline with a 2 px offset, visible on
-every interactive element.
+gradients, no drop shadows, no hover lifts, no entrance animations, and not one
+transition or transform anywhere. The only animation in the product is the
+needs-you pulse and the terminal's own cursor; below 1040 px the lane strip
+snaps as it is scrolled, which is the browser's motion rather than ours.
+
+Focus rings are a 2 px `--lamp-cyan` outline with a 2 px offset, drawn on
+`:focus-visible`: they follow the keyboard, and a pointer click leaves no ring
+behind on the control it pressed.
