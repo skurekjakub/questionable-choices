@@ -66,8 +66,9 @@ src/
     prompt.ts           template rendering ({{key}} … ) and slug()
     projection.ts       issues + sessions → columns/cards for the board
     cache-clock.ts      prompt-cache expiry derivation
-    api.ts              wire types shared with src/web (REST + WS payloads)
-    index.ts            the package's public surface, re-exported from the above
+    api.ts              wire types shared with src/web (REST + WS payloads),
+                        plus NEEDS_YOU_STATES / LIVE_STATES, which the reducer
+                        imports from here so the SPA never reaches into it
   connectors/
     issues/jira/        IssueSource over Jira Cloud REST v3
     repos/git/          Repo over git worktrees (worktree | issue-worktree | shared)
@@ -86,14 +87,19 @@ src/
     util.ts             shared JSON-body reader and error-message helper
   web/                  Vite + React SPA (vite.config.ts, index.html, src/,
                         including dev-mock.ts, which VITE_MOCK=1 installs)
-test/                   vitest, mirrors src/core and pure parts of connectors
+test/                   vitest: core/, connectors/, server/ and web/, plus
+                        fixtures/. `test/web` holds the SPA's own suites,
+                        including component suites that opt into jsdom with a
+                        per-file `@vitest-environment jsdom` docblock; every
+                        other file runs in the node environment
 docs/                   spec.md, plan.md, connectors.md, design-notes.md,
                         verification.md, screenshots/
 config.example.json     the owner's real shape, minus secrets
 ```
 
 Dependency direction: `web → core/api.ts` and `core/cache-clock.ts` (both of
-which import only types from `core/types.ts`) only; `server → core, connectors`;
+which import only types from `core/types.ts`, and neither of which imports the
+reducer) only; `server → core, connectors`;
 `connectors → core`. `core` imports nothing from the other three, and reads no
 files: `loadConfig` lives in `server/config-file.ts` so `core/config.ts` stays
 a pure schema.
@@ -141,9 +147,13 @@ repos{id}
   path                     absolute path of the main checkout
   worktreeDir              where worktrees go; worktree path = <worktreeDir>/<KEY>
   baseRef                  'origin/main'; its remote is fetched at the start of every
-                           non-shared `prepare`, before the reuse check. The fetch is
-                           an attempt: an unreachable remote leaves the refs stale and
-                           the start dialog says so, it never refuses the start
+                           non-shared `prepare`, before the reuse check, under a kill
+                           deadline (`GIT_NETWORK_TIMEOUT_MS`) because it runs inside the
+                           caller's checkout lock. The fetch is an attempt: an unreachable
+                           remote leaves the refs stale and the start dialog says so, it
+                           never refuses the start. Before the first fetch of a process the
+                           dialog warns that nothing has checked the refs yet, which is a
+                           different answer from "they are current"
   branchPattern            '{{key}}-{{slug}}'
   bootstrap                shell string run in the tmux session after a NEW worktree
   playbooks[]
@@ -201,8 +211,18 @@ interface SessionRecord {
   state: SessionState;
   stateSince: string; // ISO
   pending: { kind: 'permission' | 'question'; summary: string } | null;
-  lastToolResultPromptId?: string | null; // prompt whose newest tool call returned
+  // The dialog a tool result closed, and whether a tool call is still
+  // outstanding: together they decide whether a lagging Notification describes
+  // a dialog that is gone or one the server was never told about (§5.3).
+  answeredDialog?: { promptId: string | null; summary: string } | null;
+  toolCallOpen?: boolean;
   lastAssistantMessage: string | null; // snippet, from Stop hook when present
+  lastExitCode: number | null; // bootstrap's or the CLI's, whichever ended last
+  // Server start that found this live record already older than itself, or
+  // null when the state is current (§5.5). Never set from a status-line
+  // payload, which carries no state.
+  staleSince: string | null;
+  lastEventAt: string | null; // last accepted event that carried lifecycle information
   cache: {
     expiresAt: number | null;
     ttlSeconds: number;
@@ -243,48 +263,61 @@ failed          bootstrap or launch failed; tmux window holds the failed shell
 
 Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 
-| Event                                           | From                                    | To                 | Side data                                                                    |
-| ----------------------------------------------- | --------------------------------------- | ------------------ | ---------------------------------------------------------------------------- |
-| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                              |
-| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                              |
-| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended                                                             |
-| hook SessionStart (source ≠ resume)             | starting                                | starting           | record `claudeSessionId`; an empty id never overwrites a known one           |
-| hook SessionStart (source = resume)             | starting                                | idle               | the only signal that a resumed session is back at the prompt; never notifies |
-| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                                |
-| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                                |
-| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                              |
-| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                                |
-| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                |
-| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict      |
-| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, under the notification guard         |
-| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message, under the notification guard         |
-| hook PermissionDenied                           | any live                                | working            | clear pending                                                                |
-| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl  |
-| action interrupt                                | working, waiting-*                      | idle               | the runner sent Escape; no hook reports an interrupt                         |
-| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                      |
-| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                    |
-| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9)                                               |
+| Event                                           | From                                    | To                 | Side data                                                                             |
+| ----------------------------------------------- | --------------------------------------- | ------------------ | ------------------------------------------------------------------------------------- |
+| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                                       |
+| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                                       |
+| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended; `lastAssistantMessage` and `lastExitCode` cleared                   |
+| hook SessionStart (source ≠ resume)             | any                                     | unchanged          | record `claudeSessionId`; an empty id never overwrites a known one                    |
+| hook SessionStart (source = resume)             | starting                                | idle               | the only signal that a resumed session is back at the prompt; never notifies          |
+| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                                         |
+| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                                         |
+| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                                       |
+| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                                         |
+| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                         |
+| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict               |
+| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, under the notification guard                  |
+| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message, under the notification guard                  |
+| hook PermissionDenied                           | any live                                | working            | clear pending                                                                         |
+| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl           |
+| action interrupt                                | working, waiting-*                      | idle               | the runner sent Escape; no hook reports an interrupt; `lastAssistantMessage` cleared  |
+| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                               |
+| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                             |
+| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9); never stamps `lastEventAt`, never clears `staleSince` |
 
 The notification guard, shared by both Notification rows: a Notification only
 ever opens a pending, never redescribes or reclassifies one, so it is dropped
-when the record already needs the owner or already carries a `pending`. It is
-dropped too when its `prompt_id` is the one on `lastToolResultPromptId`: the
-dialog it describes was answered while it was in flight (it lags by ~6 s, and a
-question answered in 3 s lands its PostToolUse first).
+when the record already needs the owner or already carries a `pending`.
 
-`lastToolResultPromptId` is written by PostToolUse / PostToolUseFailure /
-PermissionDenied and holds the turn of a tool result **that closed a dialog the
-record knew about** — a result arriving with `pending` already null writes null
-instead. Otherwise the first tool result of a turn would suppress every later
-Notification of that turn, including one describing a dialog whose
-PermissionRequest hook never reached the server, which is exactly the case the
-Notification is the fallback for. Every run boundary (`claude-start`,
-`claude-exit`, SessionEnd) clears it, so the guard never depends on prompt ids
-being unique across runs.
+Past that, the guard is keyed on the **dialog**, not on the turn. A
+Notification carries only `notification_type` and a generic message and lags
+the dialog by ~6 s, so it can never identify itself; what decides is the
+record's own memory:
+
+- `answeredDialog` holds the `prompt_id` and the summary of the dialog a tool
+  result most recently closed. It is written by PostToolUse /
+  PostToolUseFailure / PermissionDenied **only when the record had a `pending`
+  to close** — a result that closed nothing leaves the previous answer
+  standing, or a second tool of the same turn would forget it. Opening a new
+  dialog clears it, and so does every turn boundary (UserPromptSubmit) and
+  every run boundary (`claude-start`, `claude-exit`, SessionEnd), so the guard
+  never depends on prompt ids being unique across runs.
+- `toolCallOpen` is set by PreToolUse and cleared by the tool's result. A
+  dialog can only be on screen while a tool call is waiting.
+
+A Notification is therefore dropped when the record has an answered dialog and
+either the payload carries no `prompt_id` at all (it cannot be placed, and the
+last resort must fail closed), or it names that dialog's turn and no tool call
+is outstanding — which makes it that dialog's own lagging echo. A Notification
+of the same turn **with** a tool call outstanding is admitted: it may describe
+a second dialog whose PermissionRequest hook never reached the server, which is
+exactly the case the Notification is the fallback for, and the one recorded
+session in `test/fixtures/hook-events.jsonl` opens two dialogs in its first
+turn.
 
 Unknown events are ignored and logged. Every hook and launcher signal is
-appended to `<dataDir>/sessions/<id>/events.jsonl` (raw payload + resulting
-state) whether or not it moved the record. The one exception is a status-line
+appended to `<dataDir>/sessions/<id>/events.jsonl` (the payload as it arrived,
+capped per §13, plus the resulting state) whether or not it moved the record. The one exception is a status-line
 payload that changed nothing: `refreshInterval: 1` posts one every second, and
 a 19-minute verification session logged 870 of them against 47 real events —
 1.4 MB in which the lifecycle was unreadable.
@@ -390,13 +423,22 @@ the release is what they are pinned to:
    reached `starting`). A probe that throws is logged and the record is left
    alone; a pass that is already running is skipped rather than overlapped.
 
-   The reconciler answers liveness and nothing else. A record whose `stateSince`
-   predates the server's own start survived a restart: the hooks that would have
-   moved it were POSTed at a dead port and are gone, and nothing can recover
-   them. Such a record gets `staleSince: <this server's start>` on the record
-   and on `CardSession`, which says "this state may be out of date" rather than
-   guessing at a better one. The next event the reducer accepts for that session
-   clears it. The state is never inferred from a transcript.
+   The reconciler answers liveness and nothing else. A live record this server
+   has never heard from — `lastEventAt`, falling back to `stateSince` for a
+   record written before that field existed, older than the server's own start
+   — survived a restart: the hooks that would have moved it were POSTed at a
+   dead port and are gone, and nothing can recover them. Such a record gets
+   `staleSince: <this server's start>` on the record and on `CardSession`,
+   which says "this state may be out of date" rather than guessing at a better
+   one. The state is never inferred from a transcript.
+
+   The judgement is on `lastEventAt`, not on `stateSince`: a session that has
+   been `working` since before the restart and is still posting hooks is being
+   told about, and `stateSince` only moves when the state changes. The next
+   lifecycle event the reducer accepts clears the marker — a status-line
+   payload is not one, because it carries no state at all — and so does the
+   reconciler when the same pass closes the record, whose state is then the
+   most certain one available and which will receive no further event.
 
 ## 6. Board projection (`core/projection.ts`)
 
@@ -608,15 +650,15 @@ paginated on `nextPageToken`. Status category from
 `status.statusCategory.key` (`new` → todo, `indeterminate` → inprogress,
 `done` → done). Description ADF → plain text in the connector; a document that
 is not shaped like ADF degrades to less text, never to a failed fetch, and a
-resource with no usable `key` is dropped from the list.
+resource with no usable `key` is dropped from the list and reported as "no such
+issue" by `get`.
 
 Limits, both user-visible: every request carries a 15 s abort (`JIRA_TIMEOUT_MS`),
 reported as a `JiraHttpError` naming the site and the URL rather than as a bare
 `TimeoutError`; and a search walks at most 50 pages of 100
 (`JIRA_MAX_PAGES` × `JIRA_PAGE_SIZE`). A query with pages left after the cap
 fails rather than presenting a partial epic as the whole one, and because
-repeating it changes nothing it also suspends that workspace's poll timer until
-the owner asks for a refresh.
+repeating it changes nothing it is raised as a **permanent** source error.
 
 Polling: every `pollSeconds`, plus `POST /api/workspaces/:id/refresh`, plus once
 whenever a session leaves the live set. On failure the last good list is
@@ -625,6 +667,14 @@ caller that arrives while a fetch is already in flight joins it only when that
 fetch was issued after the caller's own request; otherwise it awaits it and
 then runs its own, so a refresh never answers with a list read before the
 change it was clicked for.
+
+A permanent source error — one carrying `permanent: true`, which
+`isPermanentSourceError` in `core/types.ts` recognises — suspends that
+workspace's poll timer instead. Only the owner lifts the suspension:
+`POST /api/workspaces/:id/refresh` and the first refresh of a newly added
+workspace. A session leaving the live set still refetches, but never lifts it;
+neither does a board request. The suspension belongs to the issue-source
+interface, so the server never names a connector's own error classes.
 
 Interface:
 
@@ -636,6 +686,9 @@ interface IssueSource {
 }
 ```
 
+A source raises `PermanentSourceError` (`core/types.ts`) for a query that
+repeating cannot fix and an ordinary `Error` for everything else.
+
 ## 11. Server API (`core/api.ts` is the contract)
 
 REST (JSON):
@@ -643,11 +696,13 @@ REST (JSON):
 ```
 GET  /api/config/public                → { workspaces: [{id,name,epic,repo,connector}], repos: [{id,path}], connectors: [{id,site}], runner: {models, defaults, efforts, permissionModes} }
 POST /api/workspaces                   { id?, name, epic, repo, connector | newConnector: {id, site, emailEnv, tokenEnv}, reviewStatuses?, jql? } → 201 workspace summary; 400 with zod issues, 409 on duplicate id
-DELETE /api/workspaces/:id             → 204; sessions and worktrees are untouched (they belong to the repo).
-                                         A connector no remaining workspace references goes with it: nothing
-                                         else can remove one, so an inline connector created from the dialog
-                                         would otherwise be permanent.
-GET  /api/workspaces/:id/board         → BoardView { workspaceId, name, playbooks[], columns[], sourceError, fetchedAt, needsYouCount }
+DELETE /api/workspaces/:id             → 204; 404 for an unknown id. Sessions and worktrees are untouched
+                                         (they belong to the repo). Exactly one other thing goes with it: the
+                                         connector this workspace named, and only when no remaining workspace
+                                         names it — nothing else can remove a connector, so an inline one
+                                         created from the dialog would otherwise be permanent. A connector no
+                                         workspace ever named is left alone.
+GET  /api/workspaces/:id/board         → BoardView { workspaceId, playbooks[], columns[], sourceError, fetchedAt, needsYouCount }
 POST /api/workspaces/:id/refresh       → BoardView
 GET  /api/workspaces/:id/issues/:key   → IssueDetail { issue (with description), sessions[], worktreePath, flags }
 GET  /api/workspaces/:id/issues/:key/prefill?playbook=  → { prompt, model, effort, permissionMode, isolation, warnings[] }; `playbook` is required, 400 without it
@@ -655,8 +710,12 @@ POST /api/workspaces/:id/issues/:key/sessions           { playbookId, prompt, mo
 POST /api/workspaces/:id/issues/:key/flags              { review?: boolean, done?: boolean } → IssueFlags
 POST /api/workspaces/:id/issues/:key/open-editor        → 204, or 409 when the issue has no worktree
 POST /api/sessions/:id/resume | interrupt | kill | mark-done | unmark-done | archive
-POST /api/sessions/:id/remove-worktree { force?: boolean }
-GET  /api/sessions/:id/events          → raw event log (debug)
+POST /api/sessions/:id/remove-worktree { force?: boolean } → { path }
+GET  /api/sessions/:id/events          → { events[] }; 404 for an unknown session id, 409 when a log
+                                         exists but cannot be read. It backs the "Why it failed" /
+                                         "Why it ended" panel, so the UI distinguishes "the log named
+                                         no reason" from "the log could not be read" — the second is
+                                         the owner's problem to fix and the first is not.
 POST /api/hooks/:sessionId/:event            → 204 (hook ingress, loopback only)
 POST /api/hooks/:sessionId/statusline        → 204 (status-line ingress)
 POST /api/hooks/:sessionId/launcher/:event   → 204 (launcher ingress, §5.5)
@@ -678,22 +737,31 @@ WS /ws/terminal/:sessionId?cols=&rows=   see §8.3
 Errors: JSON
 `{ error: string, detail?: string, issues?: [{path, message}], reason?: ErrorReason }`
 with 4xx for refusals (no live session, no branch found, dirty worktree, an
-issue the tracker would not hand over) so the UI can show them verbatim. `issues` carries the zod problems of a rejected
-workspace request, each path pointing at the field that caused it. `reason` is
+issue the tracker would not hand over) so the UI can place them against fields
+without parsing prose. `issues` carries the zod problems of a rejected
+workspace request, each `path` request-relative — `epic`, `newConnector.site`,
+`reviewStatuses[0]` — so a dialog can put a problem next to the input that
+caused it. `reason` is
 the closed set `dirty-worktree | session-live | main-checkout | duplicate-id |
 no-branch | missing-executable | detached-worktree`; it is the only thing a UI
 may branch on, so `error` and `detail` stay free text. A refusal none of those
-names describes carries no `reason`.
+names describes carries no `reason`. Every member is reachable: `session-live`
+on a start that clashes with a live session and on a removal blocked by one,
+`missing-executable` when the runner cannot find the CLI on a start or a
+resume, `no-branch` / `detached-worktree` / `dirty-worktree` / `main-checkout`
+from the checkout, `duplicate-id` from a workspace request.
 
 ## 12. Web UI
 
 Vite + React 19, plain CSS with custom properties (no utility framework),
-`@xterm/xterm` + fit addon. Two routes handled by a tiny hash-free history
-switch: `/` board, `/session/:id` terminal.
+`@xterm/xterm` with its fit and web-links addons. Two routes handled by a tiny
+hash-free history switch: `/` board, `/session/:id` terminal.
 
 In dev the SPA is served by Vite on 5173, which proxies `/api` and `/ws` to the
-server on 4400; 4400 itself has no built SPA and says so rather than serving
-the source `index.html`. After `npm run build` the SPA is served from 4400 and
+server on 4400; 4400 answers **503** with the "not built" message on every
+non-`/api`, non-`/ws` GET rather than serving the source `index.html` — the
+bundle a browser asks for is as unserved as the shell, and a 404 there explains
+nothing. After `npm run build` the SPA is served from 4400 and
 Vite is not running. `VITE_MOCK=1 npm run dev:web` installs the hand-written
 fixtures in `src/web/src/dev-mock.ts` in place of every request and socket, so
 the UI runs with no server, no Jira and no tmux. The mock certifies nothing —
@@ -709,22 +777,31 @@ the implementer commits to one direction and records it in
 
 Board:
 
-- Header: workspace switcher — a dropdown of epics (workspace name, with the
-  epic key and repo as secondary text), always shown, active one remembered
-  in localStorage, "Add workspace…" as its last entry, and a remove action on
-  the active workspace (confirm; nothing else is deleted). Then synced-ago,
-  refresh, count of
-  needs-you as a badge that also goes into `document.title` and the favicon.
-- Five columns, each scrollable, counts in the heading.
-- Card: key (mono) + type glyph, summary (two lines max), Jira status chip,
-  labels (max 3 + "+n"), then one row per live/latest session: playbook,
-  state indicator, `time in state`, cache countdown. Primary action button
-  for the column's playbook; an "Open in VS Code" icon button whenever the
-  issue has a worktree; overflow menu with the other playbooks,
-  Send to review / Clear, Mark done, Open in Jira.
+- Header, in this order: wordmark, needs-you badge, synced-ago,
+  stream-offline indicator, rule, refresh, notifications. The workspace
+  switcher is a dropdown of epics (workspace name, with the epic key and repo
+  as secondary text), always shown, active one remembered in localStorage,
+  with "Add workspace…" and then "Remove this workspace" as its last two
+  entries (confirm; nothing but the workspace and its own connector goes).
+  The needs-you badge also goes into `document.title` and the favicon.
+- Five columns, each scrollable, counts in the heading; the lane strip is one
+  tab stop.
+- Card: type glyph then key (mono) — glyph first, everywhere — summary (two
+  lines max), Jira status chip, labels (max 3 + "+n"), then one row per
+  non-archived session: playbook, state, `time in state`, a done marker, an
+  unverified-since-restart marker, and the cache gauge. The state reads
+  `failed, exit N` and `exited, code N` for a non-zero code, with the tmux
+  hint in its `title`. The unverified marker is a lamp-style dot whose whole
+  sentence lives in its `aria-label` and `title`. On a narrow track the cache
+  gauge moves to a second line. Primary action button for the column's
+  playbook, which reads "Open <label> session" and navigates instead of
+  starting when a live session for that playbook already exists; an "Open in
+  VS Code" icon button whenever the issue has a worktree; overflow menu with
+  the other playbooks, Send to review / Clear review, Mark done / Unmark
+  done, Open in Jira.
 - Clicking the card body opens the issue drawer: description, all sessions
   with actions, worktree path, Open in VS Code, tmux attach command (copy
-  button).
+  button), Remove worktree and Archive.
 - Add workspace dialog (from the switcher): name, epic key, repo (select
   from config), connector (select from config, or "new" revealing id, site,
   email env var, token env var), review statuses (comma-separated, default
@@ -733,14 +810,25 @@ Board:
 
 Session view:
 
-- Terminal fills ~75 %; header with key, playbook, state pill, branch,
-  cache countdown; buttons Interrupt · Kill · Resume (when exited) · Back.
+- Terminal fills ~75 %; header, in this order: Back, key, playbook, state
+  pill (carrying the ended-state label and the unverified marker), branch,
+  cache countdown, then Interrupt · Kill · Resume. Resume appears for any
+  non-live state, `failed` included, and is disabled while the record has no
+  Claude session id or the issue detail has not loaded yet.
 - Right panel: issue summary/description, status chip, labels, Jira link,
-  worktree path, Open in VS Code, `tmux attach -t <id>` copy, Remove
-  worktree (with force confirm when the refusal carries
-  `reason: 'dirty-worktree'`; the message text is never parsed).
-- When the session needs you the header pill pulses and shows the pending
-  summary.
+  worktree path, Open in VS Code, `tmux attach -t <id>` copy and the shell
+  hint that goes with it, Remove worktree.
+- Remove worktree has no confirmation dialog: a refusal carrying
+  `reason: 'dirty-worktree'` relabels the button to say it will force, and
+  the second click executes. The message text is never parsed.
+- When the session needs you the header shows the pending summary; the pill
+  itself does not pulse, only the lamp animates.
+
+Keyboard: every dialog traps focus and restores it to the element that opened
+it, by ancestry when that element has gone; menus move on arrow keys with Home
+and End; the lane strip is one tab stop; the start and add-workspace dialogs
+guard a discard; Escape closes an open menu before it closes the dialog under
+it.
 
 Notifications: `Notification` API, permission requested once from a button in
 the header; one notification per transition into the needs-you set, titled
@@ -757,56 +845,120 @@ flags.json              { [workspaceId]: { [issueKey]: { review?, done? } } }
 worktrees.json          { [repoId]: { [issueKey]: { path, branch } } }
                         worktrees only; a `shared` session's main checkout is not one
 sessions/<id>/          prompt.txt settings.json statusline.sh run.sh events.jsonl
+                        bootstrap.log when the repo has a bootstrap command
 ```
+
+Two things this layer discards on purpose, both worth knowing before hand-editing
+a file:
+
+- **The event log is capped, not raw.** Every string inside a payload is
+  truncated past `EVENT_STRING_MAX_LENGTH` (4096) and every array or object is
+  cut to `EVENT_MEMBERS_MAX` (200) members, each with a marker saying how much
+  went. A `PostToolUse` carries the whole tool response, so without both caps
+  one session that reads a few hundred large files writes a log no reader can
+  hold. `GET /api/sessions/:id/events` therefore serves an edited transcript.
+- **A document the store cannot use is set aside, never silently replaced.**
+  `sessions.json`, `flags.json` and `worktrees.json` are checked on load; one
+  that is missing, unparseable or the wrong shape is renamed to
+  `<name>.rejected`, reported, and treated as empty, because the next write
+  renames a fresh document over that path. A `sessions.json` that parses as an
+  array keeps the members that carry an `id`, `issueKey`, `repoId`, `state`
+  and `stateSince`, and drops the rest with a count: one bad member must not
+  cost the others, and an unchecked one reaches the projection.
+
+An atomic write means a reader always sees one whole document, the old one or
+the new one. It is not durability: nothing is fsynced.
 
 ## 14. Error handling
 
 - Config invalid → process exits 1 with the zod issues; nothing else starts.
 - Jira unreachable → stale board + banner; start still allowed with a
   `warnings[]` entry in prefill ("issue text may be stale").
-- tmux missing / claude missing → start refused with the exact command that
-  failed.
+- tmux missing / claude missing → start refused with a 409 carrying the
+  command that failed as `detail` and `reason: 'missing-executable'`; the UI
+  shows the server's `error`, `detail` and `reason`, and never rebuilds the
+  sentence itself.
 - Worktree add fails (dirty base, branch exists elsewhere) → start refused
   with git's stderr.
+- A `git fetch` that hangs → killed at `GIT_NETWORK_TIMEOUT_MS` and recorded
+  as staleness, so the checkout lock is never held on a remote that never
+  answers.
 - Hook arrives for an unknown session → 404, logged.
-- PTY spawn fails → WS closes with a reason frame; the UI shows it.
+- PTY spawn fails → WS closes with a reason frame; the SPA writes the reason
+  into the xterm buffer as a red line and shows "Detached from the terminal.";
+  the buffer is discarded on the next reconnect.
 - Bootstrap exits non-zero → `failed`, with the exit code on the record and on
-  `CardSession.lastExitCode`; the failed shell stays open in tmux.
+  `CardSession.lastExitCode`, and the tail of the bootstrap's own output posted
+  as `message` on the `bootstrap-failed` signal, which survives in the event
+  log; the failed shell stays open in tmux.
 - The listening socket cannot be opened, for any reason → the cause is logged
   and the process exits 1. Without a socket it serves nothing, and the signal
   handlers keep the event loop alive, so it must not stay up.
+- Boot fails before the socket is listening — an unwritable `dataDir`, a
+  connector that cannot be built → the cause is logged and the process exits 1.
 - An unhandled _rejection_ is logged and swallowed: it usually arrives outside
   the request that caused it, and losing every session's state tracking is
   worse than one lost stack trace. An uncaught _exception_ is logged and the
   process exits 1 — it may be mid-invariant, and the reconciler picks the live
   records up on the next boot.
 
+What the SPA degrades to rather than failing:
+
+- The event stream dropping → a stream-offline indicator in the header; the
+  board keeps showing what it last had.
+- A session route whose record is unknown → "session not found", which is a
+  different message from "could not load".
+- A terminal that keeps failing to attach → retries up to a cap, then stops
+  and says so.
+- The lazily-loaded Terminal chunk failing → the attach command, so the owner
+  can reach the session from a shell.
+- `GET /api/sessions/:id/events` failing → "the log could not be read", never
+  "the session ended for no reason".
+- A render that throws → an error boundary that resets on navigation and
+  offers Try again, rather than a dead page until a manual reload.
+
 ## 15. Testing
 
-Vitest. No tmux and no network, with one sanctioned exception:
-`test/connectors/git-repo.test.ts` builds a real repository, a real bare
-`origin` and real worktrees under a temporary directory and drives `GitRepo`
-against them. A seam there would test the seam: every behaviour the file
-covers — reuse, detached HEAD, dirty-tree refusal, fetch-before-reuse, branch
-resolution by commit date — is a fact about git, not about the connector's own
-logic.
+Vitest. Every module gets a suite next to it under `test/<layer>/`, so the rule
+rather than a list: `test/core`, `test/connectors`, `test/server` and
+`test/web` mirror `src/`, and a new module arrives with its suite.
 
-- `state-machine`: a table of (state, event) → (state, pending, extras),
-  including "unknown event leaves state untouched" and "SessionEnd from
-  anywhere".
+**No tmux, no tracker and no listening socket.** Three things a test may still
+really do, because a seam there would test the seam rather than the behaviour:
+
+- `test/connectors/git-repo.test.ts` builds a real repository, a real bare
+  `origin` and real worktrees under a temporary directory and drives `GitRepo`
+  against them. Reuse, detached HEAD, dirty-tree refusal, fetch-before-reuse
+  and branch resolution by commit date are facts about git. Its unreachable
+  remotes are a local path that does not exist and an `ext::sleep` transport,
+  so nothing opens a socket, and the fetch deadline is measured rather than
+  asserted from an option.
+- `test/connectors/session-files.test.ts` runs the generated launcher under
+  `bash` with a stub `curl` on `PATH`, which is the only way to prove the
+  bootstrap-failure body it posts is JSON a server can parse.
+- `test/server/session-manager.test.ts` spawns a real child process for the
+  editor launcher, whose failure arrives as an asynchronous `error` event and
+  nowhere else.
+
+What every suite must cover is the behaviour its module promises, and the
+yardstick for "covered" is mutation: a test that survives the deletion of the
+line it exists for is theatre. Suites that carry a claim worth naming here:
+
+- `state-machine`: a table of (state, event) → (state, pending, extras);
+  "unknown event leaves state untouched"; "SessionEnd from anywhere"; the
+  notification guard in both directions, replayed against
+  `test/fixtures/hook-events.jsonl` with one hook dropped.
 - `config`: example config validates; missing env name, bad effort, unknown
-  workspace reference, duplicate playbook ids fail with a locator.
-- `prompt`: rendering, unknown variable untouched, slug rules
-  (lowercase, `[a-z0-9]+` runs joined by `-`, max 60 chars).
-- `projection`: column precedence table, ordering, union with session-only
-  issues.
-- `cache-clock`: statusline payload → cache, derived fallback, cold rules.
-- `jira/map`: fixture JSON → Issue, ADF → text, and ADF that is not shaped like
-  ADF degrading to less text rather than to a failed fetch.
-- `connectors/git-parsers`: parsing of `git branch -r`, `for-each-ref` and
-  `git worktree list --porcelain` output.
-- `connectors/git-repo`: the integration file above.
-- `server/mutex`: ordering, a rejecting critical section, chain cleanup.
+  workspace reference, duplicate playbook ids fail with a locator; the
+  connector cascade takes the removed workspace's own connector and nothing
+  else.
+- `server/session-manager`: the locks, observed by holding one side open and
+  asserting the other has not proceeded; the poll suspension in all three
+  directions; the staleness marker.
+- `server/store`: the atomic write, asserted by reading the document
+  throughout a run of writes rather than by its inode; the rejection path.
+- `server/main`: `isProcessEntry` answers false under the runner, and
+  importing the module performs no listen.
 
 Manual verification (plan task, integration): start an implement session on a
 real DOC-3807 child, watch bootstrapping → starting → working → idle, answer
