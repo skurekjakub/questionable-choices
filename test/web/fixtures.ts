@@ -32,6 +32,8 @@ export function cardSession(id: string, overrides: Partial<CardSession> = {}): C
     staleSince: null,
     hint: null,
     cache: null,
+    model: null,
+    compacting: false,
     done: false,
     // Read off the contract's own set rather than restated: a fixture that can
     // disagree with the contract it claims to carry is worse than no fixture.

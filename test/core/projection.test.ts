@@ -332,12 +332,66 @@ describe('card payload', () => {
       staleSince: null,
       hint: null,
       cache: null,
+      model: null,
+      compacting: false,
       done: false,
       live: true,
       needsYou: true,
       branch: 'DOC-7-x',
       attachCommand: 'tmux attach -t qc-DOC-7-implement',
     });
+  });
+
+  it('shows the model the session is on, not the one it was launched with', () => {
+    const view = projectWith({
+      issues: [makeIssue({ key: 'DOC-9' })],
+      sessions: [
+        makeRecord({
+          id: 'qc-DOC-9-implement',
+          issueKey: 'DOC-9',
+          state: 'idle',
+          model: 'claude-fable-5-1',
+          currentModel: 'claude-sonnet-5',
+        }),
+      ],
+    });
+    const card = view.columns.find((column) => column.id === 'needs-you')?.cards[0] as Card;
+    expect(card.sessions[0]?.model).toBe('claude-sonnet-5');
+  });
+
+  it('reports a session with a compaction marker as compacting', () => {
+    const view = projectWith({
+      issues: [makeIssue({ key: 'DOC-10' })],
+      sessions: [
+        makeRecord({
+          id: 'qc-DOC-10-implement',
+          issueKey: 'DOC-10',
+          state: 'idle',
+          compacting: {
+            restoreModel: 'claude-fable-5-1',
+            globalDefault: null,
+            startedAt: null,
+            requestedAt: '2026-09-09T10:00:00.000Z',
+          },
+        }),
+      ],
+    });
+    const card = view.columns.find((column) => column.id === 'needs-you')?.cards[0] as Card;
+    expect(card.sessions[0]?.compacting).toBe(true);
+    // The session is at the prompt with a driver typing at it, which is not a
+    // lane of its own: only the state decides where the card sits.
+    expect(card.column).toBe('needs-you');
+  });
+
+  it('reports a record written before the marker existed as not compacting', () => {
+    // The store shape-checks five fields and keeps the rest as written, so a
+    // record from an older document reaches the projection with no `compacting`
+    // key at all — and `undefined !== null`.
+    const legacy = makeRecord({ id: 'qc-DOC-11-implement', issueKey: 'DOC-11', state: 'idle' });
+    delete (legacy as { compacting?: unknown }).compacting;
+    const view = projectWith({ issues: [makeIssue({ key: 'DOC-11' })], sessions: [legacy] });
+    const card = view.columns.find((column) => column.id === 'needs-you')?.cards[0] as Card;
+    expect(card.sessions[0]?.compacting).toBe(false);
   });
 
   it('carries the last assistant snippet of an idle session, which has no pending', () => {

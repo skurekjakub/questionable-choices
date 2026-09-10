@@ -24,6 +24,10 @@
  *                                                          malformed body
  * POST   /api/workspaces/:id/issues/:key/open-editor     → 204; 409 without a checkout
  * POST   /api/sessions/:id/<SessionAction>               → 200 SessionRecord
+ * POST   /api/sessions/:id/compact                       → 202 SessionRecord
+ *                                                          404 when no session has the id
+ *                                                          409 `not-idle` unless the session is idle
+ *                                                          409 `compacting` when one is already running
  * POST   /api/sessions/:id/remove-worktree               → 200 RemoveWorktreeResponse
  * GET    /api/sessions/:id/events                        → 200 SessionEventsResponse
  *                                                          404 when no session has the id
@@ -124,7 +128,9 @@ export type ErrorReason =
   | 'duplicate-id'
   | 'no-branch'
   | 'missing-executable'
-  | 'detached-worktree';
+  | 'detached-worktree'
+  | 'not-idle'
+  | 'compacting';
 
 /**
  * Body of every non-2xx JSON response.
@@ -340,6 +346,19 @@ export interface CardSession {
   hint: string | null;
   /** Prompt-cache state the countdown ticks from, or null when unknown. */
   cache: SessionCache | null;
+  /**
+   * Model the session is on now, or null before any status-line payload has
+   * said. It is not the model the session was launched with: a `/model` switch
+   * moves it, and only the status line reports one.
+   */
+  model: string | null;
+  /**
+   * Whether the dashboard is driving a compaction on this session right now.
+   *
+   * While it is true the session is being typed at, so a UI must neither offer
+   * a second compaction nor present the session as merely idle.
+   */
+  compacting: boolean;
   /** Owner-set "this session did its job" flag. */
   done: boolean;
   /** Whether the session still counts as running. */

@@ -205,10 +205,21 @@ describe('hook ingress', () => {
   );
 
   it('ignores an unsubscribed hook name with a 204 and a log line', async () => {
-    const response = await post(app, `/api/hooks/${SESSION_ID}/PreCompact`, {});
+    // Compaction runs as an unnamed subagent, so this is a hook the CLI really
+    // sends and the dashboard really refuses.
+    const response = await post(app, `/api/hooks/${SESSION_ID}/SubagentStop`, {});
     expect(response.status).toBe(204);
     expect(store.session(SESSION_ID)?.state).toBe('starting');
-    expect(logger.lines.some((line) => line.includes('PreCompact'))).toBe(true);
+    expect(logger.lines.some((line) => line.includes('SubagentStop'))).toBe(true);
+  });
+
+  it('accepts both compaction hooks without moving the state', async () => {
+    for (const event of ['PreCompact', 'PostCompact']) {
+      const response = await post(app, `/api/hooks/${SESSION_ID}/${event}`, { trigger: 'manual' });
+      expect(response.status, event).toBe(204);
+    }
+    expect(store.session(SESSION_ID)?.state).toBe('starting');
+    expect(logger.lines.some((line) => line.includes('PreCompact'))).toBe(false);
   });
 
   it('accepts the four launcher signals', async () => {

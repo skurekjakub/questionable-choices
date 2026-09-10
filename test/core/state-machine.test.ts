@@ -839,6 +839,128 @@ describe('statusline events', () => {
     });
     expect(reduce(record, { type: 'statusline', payload }, NOW).changed).toBe(false);
   });
+
+  it('counts a model id that moved as a change, with no cache in the payload at all', () => {
+    // A `/model` switch emits no hook and leaves `prompt_cache` byte-identical,
+    // so a reducer that only watches the cache reports the whole switch as
+    // nothing happening.
+    const record = makeRecord({ currentModel: 'claude-fable-5-1' });
+    const result = reduce(
+      record,
+      { type: 'statusline', payload: { model: { id: 'claude-sonnet-5' } } },
+      NOW,
+    );
+    expect(result.changed).toBe(true);
+    expect(result.record.currentModel).toBe('claude-sonnet-5');
+    // The launch model is what a resume relaunches on, so the switch may not
+    // rewrite it.
+    expect(result.record.model).toBe(record.model);
+    expect(result.record.state).toBe(record.state);
+  });
+
+  it('reports no change for a payload repeating the model the record already holds', () => {
+    const record = makeRecord({ currentModel: 'claude-sonnet-5' });
+    const payload = { model: { id: 'claude-sonnet-5', display_name: 'Sonnet 5' } };
+    expect(reduce(record, { type: 'statusline', payload }, NOW).changed).toBe(false);
+  });
+
+  it.each([
+    ['no model block', {}],
+    ['a null model block', { model: null }],
+    ['a model with no id', { model: { display_name: 'Sonnet 5' } }],
+    ['a model whose id is empty', { model: { id: '' } }],
+  ])('leaves the model alone for a payload carrying %s', (_label, payload) => {
+    const record = makeRecord({ currentModel: 'claude-fable-5-1' });
+    const result = reduce(record, { type: 'statusline', payload }, NOW);
+    expect(result.changed).toBe(false);
+    expect(result.record.currentModel).toBe('claude-fable-5-1');
+  });
+
+  it('never stamps lastEventAt, whatever the payload moved', () => {
+    // A once-a-second poll says nothing about the lifecycle, so a model change
+    // in one must not pass for having heard from the session.
+    const result = reduce(
+      makeRecord({ staleSince: '2026-09-09T09:00:00.000Z' }),
+      { type: 'statusline', payload: { model: { id: 'claude-sonnet-5' } } },
+      NOW,
+    );
+    expect(result.record.lastEventAt).toBeNull();
+    expect(result.record.staleSince).toBe('2026-09-09T09:00:00.000Z');
+  });
+});
+
+describe('compaction hooks', () => {
+  const marker = {
+    restoreModel: 'claude-fable-5-1',
+    globalDefault: 'claude-fable-5-1',
+    startedAt: null,
+    requestedAt: '2026-09-09T11:59:00.000Z',
+  };
+
+  it('stamps startedAt on the PreCompact of a compaction the dashboard asked for', () => {
+    const result = reduce(
+      makeRecord({ state: 'idle', compacting: marker }),
+      hookEvent({ hook_event_name: 'PreCompact', trigger: 'manual', custom_instructions: null }),
+      NOW,
+    );
+    expect(result.record.compacting?.startedAt).toBe(NOW_ISO);
+    expect(result.record.state).toBe('idle');
+    expect(result.notify).toBe(false);
+  });
+
+  it('keeps the first startedAt when a second PreCompact arrives', () => {
+    // `PreCompact` firing is not a promise that anything was compacted, so a
+    // refused one can be followed by another inside the same sequence.
+    const started = { ...marker, startedAt: '2026-09-09T11:59:30.000Z' };
+    const result = reduce(
+      makeRecord({ state: 'idle', compacting: started }),
+      hookEvent({ hook_event_name: 'PreCompact', trigger: 'manual' }),
+      NOW,
+    );
+    expect(result.record.compacting?.startedAt).toBe('2026-09-09T11:59:30.000Z');
+  });
+
+  it('moves nothing for an auto-compaction the owner never asked for', () => {
+    // Claude Code compacts on its own when the context fills. The card must not
+    // show an action the owner did not take and cannot cancel.
+    const result = reduce(
+      makeRecord({ state: 'working', compacting: null }),
+      hookEvent({ hook_event_name: 'PreCompact', trigger: 'auto' }),
+      NOW,
+    );
+    expect(result.record.compacting).toBeNull();
+    expect(result.record.state).toBe('working');
+  });
+
+  it.each([
+    ['PreCompact', { hook_event_name: 'PreCompact' as const, trigger: 'auto' }],
+    ['PostCompact', { hook_event_name: 'PostCompact' as const, trigger: 'manual' }],
+  ])('counts %s as having heard from the session', (_name, hook) => {
+    const result = reduce(
+      makeRecord({
+        state: 'working',
+        staleSince: '2026-09-09T09:00:00.000Z',
+        hint: { summary: 'Claude is waiting for your input', at: '2026-09-09T09:00:00.000Z' },
+      }),
+      hookEvent(hook as HookEvent),
+      NOW,
+    );
+    expect(result.record.lastEventAt).toBe(NOW_ISO);
+    expect(result.record.staleSince).toBeNull();
+    expect(result.record.hint).toBeNull();
+  });
+
+  it('leaves the marker for the driver to clear when the compaction ends', () => {
+    // The compaction is over but the sequence is not: the session is still on
+    // the compact model until the driver switches it back.
+    const result = reduce(
+      makeRecord({ state: 'idle', compacting: { ...marker, startedAt: NOW_ISO } }),
+      hookEvent({ hook_event_name: 'PostCompact', trigger: 'manual', compact_summary: '<a/>' }),
+      NOW,
+    );
+    expect(result.record.compacting?.restoreModel).toBe('claude-fable-5-1');
+    expect(result.record.state).toBe('idle');
+  });
 });
 
 describe('asHookEvent', () => {
@@ -846,7 +968,12 @@ describe('asHookEvent', () => {
     ['SessionStart', true],
     ['Stop', true],
     ['PermissionRequest', true],
-    ['PreCompact', false],
+    ['PreCompact', true],
+    ['PostCompact', true],
+    // Compaction runs as an unnamed subagent, so a real hook fires that the
+    // dashboard deliberately does not take: it cannot be told from a genuine
+    // subagent by name alone.
+    ['SubagentStop', false],
     ['', false],
   ])('recognises %s as a subscribed hook: %s', (name, expected) => {
     expect(isHookEventName(name)).toBe(expected);
@@ -1004,5 +1131,96 @@ describe('replaying a recorded session', () => {
       expect(needsYou(before.state)).toBe(true);
       expect(record).toBe(before);
     }
+  });
+});
+
+describe('replaying a recorded compaction', () => {
+  interface FixtureLine {
+    event: string;
+    ts: number;
+    payload: Record<string, unknown>;
+  }
+
+  const lines = readFileSync(
+    new URL('../fixtures/compaction-events.jsonl', import.meta.url),
+    'utf8',
+  )
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as FixtureLine);
+
+  const marker = {
+    restoreModel: 'claude-fable-5-1',
+    globalDefault: 'claude-fable-5-1',
+    startedAt: null,
+    requestedAt: '2026-09-09T10:00:00.000Z',
+  };
+
+  it('never moves the state, from the refused PreCompact to the end', () => {
+    // The session sits at the prompt for the whole thing: a card that moved to
+    // Working for it would be reporting a turn nobody submitted.
+    let record = makeRecord({ state: 'idle', compacting: marker });
+    for (const line of lines) {
+      const hook = asHookEvent(line.event, line.payload);
+      if (hook === null) continue;
+      record = reduce(record, hookEvent(hook), line.ts * 1000).record;
+      expect(record.state).toBe('idle');
+    }
+  });
+
+  it('stamps startedAt from the first PreCompact of the run', () => {
+    let record = makeRecord({ state: 'idle', compacting: marker });
+    for (const line of lines) {
+      const hook = asHookEvent(line.event, line.payload);
+      if (hook === null) continue;
+      record = reduce(record, hookEvent(hook), line.ts * 1000).record;
+    }
+    expect(record.compacting?.startedAt).toBe(new Date(1789038751.902 * 1000).toISOString());
+  });
+
+  it('does not subscribe to the SubagentStop a compaction fires', () => {
+    // Compaction runs as an unnamed subagent, so the hook is indistinguishable
+    // from a real subagent's by name — which is what a settings file matches on.
+    const subagent = lines.find((line) => line.event === 'SubagentStop');
+    expect(subagent?.payload['agent_type']).toBe('');
+    expect(asHookEvent('SubagentStop', subagent?.payload ?? {})).toBeNull();
+  });
+
+  it('carries the compaction on one prompt_id across all four events', () => {
+    // The only field that ties the events of one compaction together; the
+    // session id does not change across a compaction, so it cannot separate two.
+    const real = lines.filter((line) => line.ts >= 1789038799);
+    expect(real.map((line) => line.event)).toEqual([
+      'PreCompact',
+      'SubagentStop',
+      'SessionStart',
+      'PostCompact',
+    ]);
+    expect(new Set(real.map((line) => line.payload['prompt_id'])).size).toBe(1);
+  });
+
+  it('reports the end of the compaction twice, 18 ms apart', () => {
+    // `SessionStart{source:"compact"}` and `PostCompact` say the same thing, so
+    // a driver waits on whichever arrives first rather than on a chosen one.
+    const start = lines.find((line) => line.payload['source'] === 'compact');
+    const post = lines.find((line) => line.event === 'PostCompact');
+    expect(start?.event).toBe('SessionStart');
+    expect(start?.payload['model']).toBe('claude-sonnet-5');
+    expect(post?.payload['trigger']).toBe('manual');
+    expect(Math.round(((post?.ts ?? 0) - (start?.ts ?? 0)) * 1000)).toBe(18);
+  });
+
+  it('learns nothing new from the post-compact SessionStart, which keeps the session id', () => {
+    const start = lines.find((line) => line.payload['source'] === 'compact') as FixtureLine;
+    const record = makeRecord({
+      state: 'idle',
+      claudeSessionId: String(start.payload['session_id']),
+    });
+    const result = reduce(
+      record,
+      hookEvent(asHookEvent(start.event, start.payload) as HookEvent),
+      start.ts * 1000,
+    );
+    expect(result.changed).toBe(false);
   });
 });

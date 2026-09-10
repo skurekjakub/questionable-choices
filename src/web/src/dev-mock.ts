@@ -127,6 +127,8 @@ function session(overrides: Partial<CardSession> & Pick<CardSession, 'id' | 'sta
     staleSince: null,
     hint: null,
     cache: null,
+    model: 'claude-opus-5',
+    compacting: false,
     done: false,
     live,
     needsYou,
@@ -1374,6 +1376,7 @@ function mockRecord(workspaceId: string, issueKey: string, entry: CardSession): 
     cwd: `/home/jakubs/repositories/worktrees/${issueKey}`,
     branch: entry.branch,
     model: 'claude-opus-5',
+    currentModel: entry.model,
     effort: 'high',
     permissionMode: 'acceptEdits',
     prompt: `You are working on ${issueKey}.`,
@@ -1387,6 +1390,14 @@ function mockRecord(workspaceId: string, issueKey: string, entry: CardSession): 
     staleSince: entry.staleSince,
     hint: entry.hint === null ? null : { summary: entry.hint, at: entry.stateSince },
     cache: entry.cache,
+    compacting: entry.compacting
+      ? {
+          restoreModel: 'claude-opus-5',
+          globalDefault: 'claude-fable-5-1',
+          startedAt: null,
+          requestedAt: new Date().toISOString(),
+        }
+      : null,
     createdAt: ago(9600),
     endedAt: entry.live ? null : ago(600),
     done: entry.done,

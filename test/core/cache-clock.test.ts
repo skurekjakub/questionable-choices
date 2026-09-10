@@ -7,6 +7,7 @@ import {
   cacheDerived,
   cacheFromStatusline,
   describeCache,
+  modelFromStatusline,
   secondsLeft,
   ttlSeconds,
 } from '../../src/core/cache-clock.js';
@@ -29,6 +30,21 @@ describe('ttlSeconds', () => {
   });
 });
 
+describe('modelFromStatusline', () => {
+  it('reads the model id out of the recorded payload of a real session', () => {
+    expect(modelFromStatusline(fixture)).toBe('claude-fable-5-1');
+  });
+
+  it.each([
+    ['no model block', {}],
+    ['a null model block', { model: null }],
+    ['a model with no id', { model: { display_name: 'Sonnet 5' } }],
+    ['a model whose id is empty', { model: { id: '' } }],
+  ])('returns null for %s', (_label, payload) => {
+    expect(modelFromStatusline(payload as StatuslinePayload)).toBeNull();
+  });
+});
+
 describe('cacheFromStatusline', () => {
   it('reads the recorded payload of a real session', () => {
     expect(cacheFromStatusline(fixture)).toEqual({
@@ -44,6 +60,13 @@ describe('cacheFromStatusline', () => {
     ['a null prompt_cache block', { prompt_cache: null }],
   ])('returns null for %s', (_label, payload) => {
     expect(cacheFromStatusline(payload as StatuslinePayload)).toBeNull();
+  });
+
+  it('leaves the model out of the cache reading entirely', () => {
+    // A model switch leaves `prompt_cache` byte-identical, so the two readings
+    // must not be able to move each other.
+    const switched = { ...fixture, model: { id: 'claude-sonnet-5', display_name: 'Sonnet 5' } };
+    expect(cacheFromStatusline(switched)).toEqual(cacheFromStatusline(fixture));
   });
 
   it('reports a cold cache with a null expiry', () => {

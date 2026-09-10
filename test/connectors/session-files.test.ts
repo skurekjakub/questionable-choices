@@ -83,6 +83,17 @@ describe('buildSettings', () => {
     expect(Object.keys(settings.hooks)).toEqual([...HOOK_EVENT_NAMES]);
   });
 
+  it('subscribes to both compaction hooks, with no matcher on either', () => {
+    // Without them a compaction is a ~20 s silence in which the card reads
+    // "your turn" and nothing on the record moves; `PreCompact` is the only
+    // report that one started and `PostCompact` the only one that names it.
+    for (const event of ['PreCompact', 'PostCompact']) {
+      const entry = settings.hooks[event]?.[0];
+      expect(entry, event).toBeDefined();
+      expect(entry?.matcher).toBeUndefined();
+    }
+  });
+
   it('gives every hook a five-second timeout and its own ingress path', () => {
     for (const event of HOOK_EVENT_NAMES) {
       const entry = settings.hooks[event]![0]!;
