@@ -905,4 +905,13 @@ describe('readDerivedCacheTtlSeconds', () => {
     await writeFile(path, JSON.stringify({ env: { ENABLE_PROMPT_CACHING_1H: '0' } }), 'utf8');
     expect(readDerivedCacheTtlSeconds(path)).toBe(300);
   });
+
+  it('stays at five minutes for an env block that does not name the flag', async () => {
+    // `String(undefined)` is the string 'undefined', which is neither '', '0'
+    // nor 'false': a settings file with any other env entry would buy an hour.
+    const path = join(dir, 'settings.json');
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(path, JSON.stringify({ env: { SOMETHING_ELSE: '1' } }), 'utf8');
+    expect(readDerivedCacheTtlSeconds(path)).toBe(300);
+  });
 });

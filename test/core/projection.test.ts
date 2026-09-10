@@ -202,6 +202,37 @@ describe('ordering', () => {
     expect(keysIn(view, 'needs-you')).toEqual(['DOC-3', 'DOC-2', 'DOC-4', 'DOC-1']);
   });
 
+  it('ranks a card on its oldest qualifying session, not its newest', () => {
+    // A card with two dialogs is as old as the older of them; ranking it on the
+    // newer one lets a shorter wait outrank a longer one.
+    const view = projectWith({
+      issues: [makeIssue({ key: 'DOC-1' }), makeIssue({ key: 'DOC-2' })],
+      sessions: [
+        makeRecord({
+          id: 'qc-DOC-1-a',
+          issueKey: 'DOC-1',
+          state: 'waiting-permission',
+          stateSince: '2026-09-09T09:00:00.000Z',
+        }),
+        makeRecord({
+          id: 'qc-DOC-1-b',
+          issueKey: 'DOC-1',
+          playbookId: 'test',
+          state: 'waiting-permission',
+          stateSince: '2026-09-09T11:00:00.000Z',
+        }),
+        makeRecord({
+          id: 'qc-DOC-2-a',
+          issueKey: 'DOC-2',
+          state: 'waiting-permission',
+          stateSince: '2026-09-09T10:00:00.000Z',
+        }),
+      ],
+    });
+
+    expect(keysIn(view, 'needs-you')).toEqual(['DOC-1', 'DOC-2']);
+  });
+
   it('ranks a blocked card on its dialog, not on an older idle session beside it', () => {
     const rows = [
       pair('DOC-1', 'waiting-permission', '2026-09-09T10:00:00.000Z'),
