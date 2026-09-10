@@ -28,6 +28,12 @@ one real gauge. Not a page of floating cards. Concretely:
   the same five lanes with an "n of 5" indicator under it. The lane count
   never changes: a hidden lane the owner cannot see they have is worse than a
   swipe.
+- Every frame in the product clips rather than scrolls, so anything a row or a
+  header cannot fit is gone rather than reachable. What gives way is decided
+  rather than left to flex: readings shrink and ellipsise, controls never do.
+  On the session header that means the branch and the pending summary give
+  their width up and the actions keep theirs, because on a failed session
+  *Resume* is the only control that still does anything.
 - Columns are separated by 1 px hairlines, not gutters. The board reads as
   one divided surface.
 - Elevation comes from surface lightness only. Nothing is raised by a shadow:
@@ -64,8 +70,14 @@ on: the switcher panel sits on `--ink-700`, so the text there steps up to
 `--paper-dim`.
 
 Four signal colours, borrowed from indicator lamps rather than from a brand
-palette. They appear only on indicators — the lamps, the card rail, the lane
-dot, the cache gauge — and never as a surface behind content:
+palette. Their home is the indicators — the lamps, the card rail, the lane dot,
+the cache gauge — and they reach text only on short readings that are already
+saying the same thing in words: the in-progress and flag chips, the `done` and
+`unverified` markers, the lane's alert count, the checked workspace, links and
+the danger button. Exactly two surfaces are tinted, both of them small and both
+of them saying "you". The needs-you badge in the header and the alerting state
+pill sit on a dark amber ground; nothing else does, and no card, lane or panel
+is ever tinted by its state.
 
 | Token          | Value     | Meaning                                                   |
 | -------------- | --------- | --------------------------------------------------------- |
@@ -133,7 +145,12 @@ square edges because it is flush to the viewport edge.
 ## How state is signalled
 
 Colour never carries meaning alone. Every state is a shape, a word and a
-colour together.
+colour together — which is a claim about the narrowest track the row ever gets,
+not about the widest. Flex will take a label to zero width before it clips it,
+and `text-overflow` paints nothing at zero, so the state word and the playbook
+label both carry a floor in `ch`. When the two of them plus the duration no
+longer fit, the cache gauge takes a line of its own rather than any of them
+losing their words.
 
 - **Session lamp** — a 9 px indicator to the left of each session row. A
   horizontal bar = exited; a filled square = failed; everything live is a disc
@@ -142,6 +159,13 @@ colour together.
   is running. Amber is a disc for a permission prompt, which blocks on one
   answer, and a ring for a question or an idle turn, which are open-ended.
   Colour adds the urgency band, and the state word sits right next to it.
+- **Unverified marker** — a second, half-height lamp next to the first, on a
+  session whose state the server has not heard confirmed since it restarted. It
+  is a marker rather than a word because the sentence it stands for is longer
+  than the track it would sit in; the sentence is its accessible name and its
+  tooltip, so nothing about it is colour-only. The same rule decides where a
+  failed session's tmux hint goes: a tooltip on the row, and words in the
+  session panel, which has room for them.
 - **Card rail** — a 2 px vertical rule down the card's left edge, coloured by
   the card's most urgent session. This is the peripheral-vision signal that
   lets a column be scanned without reading. Cards themselves are never
@@ -184,3 +208,15 @@ snaps as it is scrolled, which is the browser's motion rather than ours.
 Focus rings are a 2 px `--lamp-cyan` outline with a 2 px offset, drawn on
 `:focus-visible`: they follow the keyboard, and a pointer click leaves no ring
 behind on the control it pressed.
+
+## Known limits
+
+**No `forced-colors` or `prefers-contrast` handling.** `prefers-reduced-motion`
+is answered — the needs-you pulse becomes a static ring — and nothing else is.
+Every surface, hairline and lamp is a hard-coded custom property, so a viewer in
+a forced-colors mode gets the design as written or nothing: the hairlines that
+divide the lanes and the lamps that carry state are exactly the elements a
+forced palette replaces or flattens. Closing this means auditing every token
+against the `forced-colors` system colours and giving the lamps a border in that
+mode so their silhouettes survive a flattened fill, which is a design pass
+rather than a fix. Recorded here so it is a decision rather than an oversight.
