@@ -586,6 +586,37 @@ describe('applyWorkspaceChange', () => {
       expect((error as ConfigError).issues.map((issue) => issue.path)).toContain(locator);
     }
   });
+
+  it.each([
+    [
+      'a workspace id that is not a usable id',
+      { id: 'Bad-Id', name: 'Shouty', epic: 'DOC-2', repo: 'app', connector: 'tracker' },
+      'id',
+      'workspace id must be lowercase letters, digits and dashes',
+    ],
+    [
+      'an inline connector id that is not a usable id',
+      {
+        name: 'Shouty',
+        epic: 'DOC-2',
+        repo: 'app',
+        newConnector: { id: 'Kentico-Jira', site: 's', emailEnv: 'E', tokenEnv: 'T' },
+      },
+      'newConnector.id',
+      'connector id must be lowercase letters, digits and dashes',
+    ],
+  ])('tells the owner what a valid id looks like for %s', (_name, request, locator, message) => {
+    // An id is validated as a record key, so the schema's own message is
+    // discarded and zod reports "Invalid key in record" — which names the
+    // problem and not the rule the dialog has to show next to the field.
+    try {
+      applyWorkspaceChange(config, request);
+      throw new Error('expected the request to be rejected');
+    } catch (error) {
+      const issues = (error as ConfigError).issues;
+      expect(issues.find((issue) => issue.path === locator)?.message).toBe(message);
+    }
+  });
 });
 
 describe('removeWorkspace', () => {
@@ -602,6 +633,50 @@ describe('removeWorkspace', () => {
     expect(Object.keys(next.workspaces)).toEqual(['ws']);
     expect(Object.keys(next.repos)).toEqual(['app']);
     expect(Object.keys(next.connectors)).toEqual(['tracker']);
+  });
+
+  it('takes an inline connector with the workspace that was its only user', () => {
+    const withInline = applyWorkspaceChange(config, {
+      id: 'third',
+      name: 'Third',
+      epic: 'DOC-10',
+      repo: 'app',
+      newConnector: { id: 'other', site: 'other.atlassian.net', emailEnv: 'E', tokenEnv: 'T' },
+    });
+
+    const next = removeWorkspace(withInline, 'third');
+
+    expect(Object.keys(next.connectors)).toEqual(['tracker']);
+  });
+
+  it('keeps a connector the removed workspace never named, even with no user left', () => {
+    // A connector written into the file by hand for a board that does not exist
+    // yet is valid, unreferenced, and none of a removal's business.
+    const document = minimal();
+    const connectors = document['connectors'] as Record<string, unknown>;
+    connectors['spare'] = {
+      type: 'jira',
+      site: 'spare.atlassian.net',
+      emailEnv: 'SPARE_EMAIL',
+      tokenEnv: 'SPARE_TOKEN',
+    };
+    const withSpare = applyWorkspaceChange(parseConfig(document, { home: HOME }), {
+      id: 'second',
+      name: 'Second',
+      epic: 'DOC-9',
+      repo: 'app',
+      connector: 'tracker',
+    });
+
+    const next = removeWorkspace(withSpare, 'second');
+
+    expect(Object.keys(next.connectors).sort()).toEqual(['spare', 'tracker']);
+  });
+
+  it('keeps the connector when another workspace still names it', () => {
+    const next = removeWorkspace(config, 'second');
+    expect(next.connectors['tracker']).toBeDefined();
+    expect(next.workspaces['ws']?.connector).toBe('tracker');
   });
 
   it('refuses an unknown id at the id path', () => {

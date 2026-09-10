@@ -167,7 +167,25 @@ const workspaceSchema = z.strictObject({
 });
 
 const idSchema = (label: string): z.ZodString =>
-  z.string().regex(/^[a-z0-9][a-z0-9-]*$/, `${label} must be lowercase letters, digits and dashes`);
+  z.string().regex(/^[a-z0-9][a-z0-9-]*$/, idRuleMessage(label));
+
+/**
+ * The message an id that fails `idSchema` is reported with.
+ *
+ * @param label - Field name the message names, e.g. `workspace id`.
+ * @returns The rule, spelled out.
+ */
+function idRuleMessage(label: string): string {
+  return `${label} must be lowercase letters, digits and dashes`;
+}
+
+/**
+ * The message zod produces for a record key its own schema rejects.
+ *
+ * A key is validated as a key, not as a value, so zod reports the generic
+ * problem and discards the rule the key schema carries.
+ */
+const RECORD_KEY_MESSAGE = 'Invalid key in record';
 
 /**
  * Builds a string schema that expands `~` into the given home directory.
@@ -464,13 +482,27 @@ export function applyWorkspaceChange(config: Config, request: CreateWorkspaceReq
     if (!(cause instanceof ConfigError)) throw cause;
     throw new ConfigError(
       'Invalid workspace request',
-      cause.issues.map((issue) => ({
-        path: requestPathOf(issue.path, id, inline?.id),
-        message: issue.message,
-      })),
+      cause.issues.map((issue) => {
+        const path = requestPathOf(issue.path, id, inline?.id);
+        return { path, message: idIssueMessage(path, issue.message) };
+      }),
       cause.duplicate,
     );
   }
+}
+
+/**
+ * Restores the id rule's own message on an id rejected as a record key.
+ *
+ * @param path - Request-relative locator the issue was rewritten to.
+ * @param message - Message the schema produced.
+ * @returns The id rule where one applies, otherwise the message unchanged.
+ */
+function idIssueMessage(path: string, message: string): string {
+  if (message !== RECORD_KEY_MESSAGE) return message;
+  if (path === 'id') return idRuleMessage('workspace id');
+  if (path === 'newConnector.id') return idRuleMessage('connector id');
+  return message;
 }
 
 /**
@@ -503,7 +535,12 @@ function requestPathOf(path: string, workspaceId: string, connectorId: string | 
 }
 
 /**
- * Removes one workspace, and with it any connector nothing else references.
+ * Removes one workspace, and with it the connector it named when no other
+ * workspace still references that connector.
+ *
+ * Only the removed workspace's own connector is a candidate: a connector the
+ * owner wrote into the file by hand for a board they have not created yet is
+ * valid, unreferenced and none of this function's business.
  *
  * @param config - Configuration to shrink; left untouched.
  * @param id - Id of the workspace to remove.
@@ -511,7 +548,8 @@ function requestPathOf(path: string, workspaceId: string, connectorId: string | 
  * @throws {ConfigError} When no workspace has that id.
  */
 export function removeWorkspace(config: Config, id: string): Config {
-  if (config.workspaces[id] === undefined) {
+  const removed = config.workspaces[id];
+  if (removed === undefined) {
     throw new ConfigError('Invalid workspace request', [
       { path: 'id', message: `no workspace has id '${id}'` },
     ]);
@@ -519,14 +557,12 @@ export function removeWorkspace(config: Config, id: string): Config {
   const document = serializeConfig(config);
   delete document.workspaces[id];
   // A connector created from the add-workspace dialog has no other way out:
-  // there is no route and no control that removes one, so a workspace nothing
-  // else references takes its connector with it.
-  const stillUsed = new Set(
-    Object.values(document.workspaces).map((workspace) => workspace.connector),
+  // there is no route and no control that removes one, so a workspace whose
+  // connector nothing else names takes it along.
+  const stillUsed = Object.values(document.workspaces).some(
+    (workspace) => workspace.connector === removed.connector,
   );
-  for (const connectorId of Object.keys(document.connectors)) {
-    if (!stillUsed.has(connectorId)) delete document.connectors[connectorId];
-  }
+  if (!stillUsed) delete document.connectors[removed.connector];
   return parseConfig(document, { home: '' });
 }
 
