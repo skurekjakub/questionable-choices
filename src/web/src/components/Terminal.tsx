@@ -97,20 +97,28 @@ export function SessionTerminal({
       theme: THEME,
     });
     const fitAddon = new FitAddon();
-    xterm.loadAddon(fitAddon);
-    xterm.loadAddon(new WebLinksAddon());
-    xterm.open(element);
-    fitAddon.fit();
-    term.current = xterm;
-    fit.current = fitAddon;
-
     const observer = new ResizeObserver(() => {
       fitAddon.fit();
       const live = socket.current;
       if (live?.readyState !== WebSocket.OPEN) return;
       live.send(JSON.stringify({ type: 'resize', cols: xterm.cols, rows: xterm.rows }));
     });
-    observer.observe(element);
+    // The cleanup below is the effect's return value, so nothing that throws
+    // before the effect returns is ever cleaned up: without this the xterm
+    // keeps its DOM and its renderer for the life of the page.
+    try {
+      xterm.loadAddon(fitAddon);
+      xterm.loadAddon(new WebLinksAddon());
+      xterm.open(element);
+      fitAddon.fit();
+      observer.observe(element);
+    } catch (cause: unknown) {
+      observer.disconnect();
+      xterm.dispose();
+      throw cause;
+    }
+    term.current = xterm;
+    fit.current = fitAddon;
 
     return () => {
       observer.disconnect();
@@ -132,9 +140,17 @@ export function SessionTerminal({
       if (closed) return;
       fit.current?.fit();
       const query = `?cols=${xterm.cols}&rows=${xterm.rows}`;
-      const next = new WebSocket(
-        socketUrl(`/ws/terminal/${encodeURIComponent(sessionId)}${query}`),
-      );
+      let next: WebSocket;
+      // Same rule as the xterm above: a throw from the constructor happens
+      // before the cleanup exists, so the socket it may already have opened is
+      // closed here or never at all.
+      try {
+        next = new WebSocket(socketUrl(`/ws/terminal/${encodeURIComponent(sessionId)}${query}`));
+      } catch (cause: unknown) {
+        socket.current?.close();
+        socket.current = null;
+        throw cause;
+      }
       next.binaryType = 'arraybuffer';
       socket.current = next;
 
@@ -182,7 +198,12 @@ export function SessionTerminal({
       live.send(new TextEncoder().encode(data));
     });
 
-    open();
+    try {
+      open();
+    } catch (cause: unknown) {
+      input.dispose();
+      throw cause;
+    }
 
     return () => {
       closed = true;

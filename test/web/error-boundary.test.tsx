@@ -81,15 +81,61 @@ describe('ErrorBoundary', () => {
   });
 
   it('keeps the failure up while the owner is still on the route that threw', () => {
-    render(
+    // The child is rendered healthy first, so clearing and re-deriving the
+    // failure would look identical without it: only a boundary that checks the
+    // pathname still has the panel up here.
+    const { rerender } = render(
       <ErrorBoundary>
         <Bomb throws={new Error('one bad frame')} />
+      </ErrorBoundary>,
+    );
+    rerender(
+      <ErrorBoundary>
+        <Bomb throws={null} />
       </ErrorBoundary>,
     );
     act(() => {
       window.dispatchEvent(new Event('popstate'));
     });
+    expect(screen.queryByText('the dashboard')).toBeNull();
     expect(screen.getByRole('alert').textContent).toContain('one bad frame');
+  });
+
+  it('shows the failure again, without looping, when the tree is still broken', () => {
+    // The realistic case for *Try again*: a chunk that 404s answers the retry
+    // with the same rejection, and the panel has to come back rather than
+    // leaving a blank page behind.
+    render(
+      <ErrorBoundary>
+        <Bomb throws={new Error('chunk 404')} />
+      </ErrorBoundary>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(screen.getByRole('alert').textContent).toContain('chunk 404');
+    expect(screen.queryByText('the dashboard')).toBeNull();
+  });
+
+  it('shows the failure again when the owner navigates back onto the route that threw', () => {
+    render(
+      <ErrorBoundary>
+        <Bomb throws={new Error('one bad frame')} />
+      </ErrorBoundary>,
+    );
+    act(() => navigate('/session/qc-DOC-1-implement'));
+    act(() => navigate('/'));
+    expect(screen.getByRole('alert').textContent).toContain('one bad frame');
+  });
+
+  it('names the route the failure happened on, which is the only trace it leaves', () => {
+    const reported = vi.mocked(console.error);
+    window.history.pushState(null, '', '/session/qc-DOC-1-implement');
+    render(
+      <ErrorBoundary>
+        <Bomb throws={new Error('one bad frame')} />
+      </ErrorBoundary>,
+    );
+    const lines = reported.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((line) => line.includes('/session/qc-DOC-1-implement'))).toBe(true);
   });
 
   it('hands the failure to a caller that renders its own, leaving the rest standing', () => {
