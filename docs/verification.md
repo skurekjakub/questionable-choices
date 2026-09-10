@@ -24,6 +24,22 @@ server on 4400, Vite on 5173. Browser driven through Playwright.
 | Open in VS Code                                       | spawned; outcome unobservable (see below)               |
 | Remove worktree                                       | first try, no `--force` needed                          |
 
+## Screenshots
+
+Captured during this run and kept in `docs/screenshots/`:
+
+| File                       | What it shows                                   |
+| -------------------------- | ----------------------------------------------- |
+| `board.png`                | The board against the real DOC-3807 epic        |
+| `board-live.png`           | The same board with a session running           |
+| `live-board-needs-you.png` | A card in the Needs you lane                    |
+| `live-bootstrapping.png`   | A session running its repo's bootstrap command  |
+| `live-starting.png`        | `claude` launched, before its first hook        |
+| `live-working.png`         | Mid-turn                                        |
+| `live-needs-you.png`       | Blocked on an `AskUserQuestion` dialog          |
+| `live-idle.png`            | Turn finished, the owner's move                 |
+| `session.png`              | The session view: terminal, header, issue panel |
+
 ## Timeline
 
 All times UTC. One session, `qc-DOC-3871-implement`, playbook `implement`,

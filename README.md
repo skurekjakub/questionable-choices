@@ -39,7 +39,9 @@ Linux or macOS with the same tools.
 Design: [`docs/spec.md`](./docs/spec.md). Build plan:
 [`docs/plan.md`](./docs/plan.md). Extending:
 [`docs/connectors.md`](./docs/connectors.md). What a real run looks like, and
-what it still gets wrong: [`docs/verification.md`](./docs/verification.md).
+what it still gets wrong: [`docs/verification.md`](./docs/verification.md),
+with screenshots of every state in
+[`docs/screenshots/`](./docs/screenshots/).
 
 ## Prerequisites
 
@@ -82,8 +84,22 @@ npm run verify         # typecheck, format, tests, build
 npm run dev            # server on 4400, UI on 5173, both with reload
 ```
 
-Production-style: `npm run build` then `npm start` serves the SPA and API
-from 4400.
+**In dev, the dashboard is on 5173, not 4400.** Vite serves the SPA and proxies
+`/api` and `/ws` through to the server; port 4400 serves the API and the
+WebSockets but has no built SPA to hand out, so it answers any page request
+with a plain message saying so.
+
+Production-style: `npm run build` then `npm start`. Now 4400 serves both the
+built SPA and the API, and 5173 is not running at all. The bookmark to use
+depends on which of the two you started.
+
+To open the UI with no server, no Jira and no tmux — for looking at the layout,
+or working on the SPA alone — run `VITE_MOCK=1 npm run dev:web` and open 5173.
+Every route is answered from fabricated data in `src/web/src/dev-mock.ts`. It
+certifies nothing: the mock is written by hand and can disagree with the server
+in any direction, so a thing that works against it may still be broken, and a
+thing that looks broken may only be the mock. It is excluded from a production
+build.
 
 ## Using it
 

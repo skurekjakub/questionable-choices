@@ -67,6 +67,7 @@ src/
     projection.ts       issues + sessions → columns/cards for the board
     cache-clock.ts      prompt-cache expiry derivation
     api.ts              wire types shared with src/web (REST + WS payloads)
+    index.ts            the package's public surface, re-exported from the above
   connectors/
     issues/jira/        IssueSource over Jira Cloud REST v3
     repos/git/          Repo over git worktrees (worktree | issue-worktree | shared)
@@ -77,13 +78,17 @@ src/
     session-manager.ts  orchestration, persistence, event fan-out
     store.ts            JSON persistence under dataDir
     config-file.ts      reads config.json off disk and hands it to the schema
+    config-check.ts     `npm run config:check`: validates the config and exits
+    connectors.ts       the server's only import of the connector package
     hooks.ts            hook ingress → state machine → broadcast
     terminal-ws.ts      WS ↔ node-pty bridge
     mutex.ts            per-key serialisation of read-modify-write sequences
     util.ts             shared JSON-body reader and error-message helper
-  web/                  Vite + React SPA (vite.config.ts, index.html, src/)
+  web/                  Vite + React SPA (vite.config.ts, index.html, src/,
+                        including dev-mock.ts, which VITE_MOCK=1 installs)
 test/                   vitest, mirrors src/core and pure parts of connectors
-docs/                   spec.md, plan.md, connectors.md
+docs/                   spec.md, plan.md, connectors.md, design-notes.md,
+                        verification.md, screenshots/
 config.example.json     the owner's real shape, minus secrets
 ```
 
@@ -166,7 +171,8 @@ repo path that is not a git checkout.
 
 Valid `effort`: low, medium, high, xhigh, max. Valid `permissionMode`:
 acceptEdits, auto, bypassPermissions, manual, dontAsk, plan, plus `default`
-meaning "pass no flag". These are the values `claude --help` 2.1.266 lists;
+meaning "pass no flag". These are the values `claude --help` listed at 2.1.266,
+which is the release every empirical claim in this document was measured on;
 the picker offers exactly these. `bypassPermissions` is launched as
 `--dangerously-skip-permissions`, not as `--permission-mode
 bypassPermissions`: only the flag skips the prompts an unattended session has
@@ -285,7 +291,10 @@ a 19-minute verification session logged 870 of them against 47 real events —
 
 Hook facts the design relies on, measured on 2026-09-09 against Claude Code
 2.1.266 with the §8.1 settings file and kept as
-`test/fixtures/hook-events.jsonl`:
+`test/fixtures/hook-events.jsonl`. The integration run in
+`docs/verification.md` was against 2.1.267 and observed the same shapes, so
+nothing below is known to have moved — but the measurements are 2.1.266's and
+the release is what they are pinned to:
 
 - Every payload carries `session_id`, `transcript_path`, `cwd`,
   `scratchpad_dir`, `hook_event_name`. `permission_mode` is on
@@ -321,22 +330,26 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
 
 ### 5.4 Actions
 
-| Action                 | Effect                                                                                                                                                                           |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| start                  | §5.5                                                                                                                                                                             |
-| resume                 | kills any tmux session with the record's id, regenerates the launcher with `--resume <claudeSessionId>`, same cwd; state → starting. Refused when `claudeSessionId` is null.     |
-| interrupt              | `tmux send-keys -t <id> Escape`                                                                                                                                                  |
-| kill                   | `tmux kill-session -t <id>`; state → exited                                                                                                                                      |
-| mark-done / unmark     | toggles `done`                                                                                                                                                                   |
-| archive                | hides the record; refused while live                                                                                                                                             |
-| remove-worktree        | `git worktree remove <path>` (plus `--force` when the caller confirms a dirty tree); refused while any live session uses that cwd                                                |
-| send-to-review / clear | per-issue flag (§6)                                                                                                                                                              |
-| open-editor            | spawns `editor.command` with `editor.args` (`{{path}}` → the issue's worktree, or the repo for `shared`), detached, stdio ignored; refused when no worktree exists for the issue |
+| Action                 | Effect                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| start                  | §5.5                                                                                                                                                                                                                                                                                                                                                                                      |
+| resume                 | probes the CLI, then kills any tmux session with the record's id, regenerates the launcher with `--resume <claudeSessionId>`, same cwd; state → starting, and the replayed transcript's `SessionStart source: resume` then moves it to idle (§5.3). Refused when `claudeSessionId` is null, and the runner is asked before the record moves, so a refusal leaves the record where it was. |
+| interrupt              | `tmux send-keys -t <id> Escape`                                                                                                                                                                                                                                                                                                                                                           |
+| kill                   | `tmux kill-session -t <id>`; state → exited                                                                                                                                                                                                                                                                                                                                               |
+| mark-done / unmark     | toggles `done`                                                                                                                                                                                                                                                                                                                                                                            |
+| archive                | hides the record; refused while live                                                                                                                                                                                                                                                                                                                                                      |
+| remove-worktree        | `git worktree remove <path>` (plus `--force` when the caller confirms a dirty tree); refused while any live session uses that cwd                                                                                                                                                                                                                                                         |
+| send-to-review / clear | per-issue flag (§6)                                                                                                                                                                                                                                                                                                                                                                       |
+| open-editor            | spawns `editor.command` with `editor.args` (`{{path}}` → the issue's worktree, or the repo for `shared`), detached, stdio ignored; refused when no worktree exists for the issue                                                                                                                                                                                                          |
 
 ### 5.5 Start sequence
 
 1. Server validates: playbook exists, no live session for (issue, playbook),
-   model/effort/permission values are in the allowed sets.
+   model/effort/permission values are in the allowed sets, and the prompt is a
+   non-empty string (400 otherwise). The whole sequence holds the lock of the
+   session name it would take _and_ a per-(repo, issue) checkout lock, so two
+   simultaneous starts cannot both pass the liveness check and a removal of the
+   checkout cannot land in the middle of preparing it.
 2. `Repo.prepare(issue, playbook, hints)` resolves `cwd` and `branch`; the
    server passes `hints.knownBranch` from the newest non-archived record for
    that issue in that repo:
@@ -519,17 +532,38 @@ claude` PreToolUse hook still rewrote `ls -la` into `rtk ls -la` while the
 
 `POST /api/hooks/:sessionId/:event` — body is the hook's stdin JSON. The
 server looks the record up, runs the state machine, persists, broadcasts.
-Unknown session ids get 404 and are logged; nothing else. The endpoint is
-unauthenticated and bound to loopback only.
+Unknown session ids get 404 and are logged. A body that is not a readable JSON
+object — unparseable, an array, a scalar, or past the 1 MB cap — gets 400 and a
+log line, because reducing it as `{}` would report a state change that never
+happened. A hook name nothing subscribes to gets 204 and a log line. The
+endpoint is unauthenticated and bound to loopback only.
+
+The boundary is **typed by assertion, not by parse**: `asHookEvent` checks the
+hook name against `HOOK_EVENT_NAMES` and then casts the body. This is
+deliberate. The payload is Claude Code's, its shape moves between releases, and
+every field the reducer reads is already narrowed at the point of use —
+`typeof message === 'string'`, `hook.prompt_id ?? null`, `questionSummary`
+walking an `unknown` `tool_input`. A schema here would add a second place to
+keep in step with the CLI and would reject payloads the reducer copes with, in
+exchange for no guarantee the use sites do not already give.
 
 ### 8.3 Terminal attach
 
-`WS /ws/terminal/:sessionId`. On connect the server spawns
-`node-pty` → `tmux attach-session -t <id>` with the client's cols/rows.
+`WS /ws/terminal/:sessionId?cols=<n>&rows=<n>`. On connect the server spawns
+`node-pty` → `tmux attach-session -t <id>` at the size the query names; a value
+that is not an integer between 1 and 1000 falls back to the server's default.
 Binary frames carry pty bytes both ways; a JSON text frame
-`{"type":"resize","cols":n,"rows":n}` resizes the pty. Close → pty kill
-(detaches that client only; tmux keeps running). Several viewers can attach;
-`window-size latest` makes tmux follow the most recent resize.
+`{"type":"resize","cols":n,"rows":n}` resizes the pty, and any other text frame
+is ignored. Close → pty kill (detaches that client only; tmux keeps running).
+Several viewers can attach; `window-size latest` makes tmux follow the most
+recent resize.
+
+Two behaviours an operator needs: an unknown session id is refused with an
+`{type:'error'}` frame and close 1008 rather than a silent empty terminal, and
+pty output is **dropped** while more than 4 MB is queued on a viewer's socket.
+A stalled viewer therefore loses output instead of back-pressuring the pty and
+growing the server's heap; a terminal repaints itself, so what it loses is
+scrollback.
 
 Both WebSocket endpoints go through `@hono/node-server` 2's own
 `upgradeWebSocket`, with a `ws` `WebSocketServer({ noServer: true })` passed
@@ -629,7 +663,8 @@ POST /api/hooks/:sessionId/launcher/:event   → 204 (launcher ingress, §5.5)
 ```
 
 The three ingress routes answer 404 for an unknown session id (§8.2) and 400
-for a body that is not a JSON object.
+for a body that is not a readable JSON object — which includes one past the
+1 MB cap, so an oversized payload is answered 400 rather than 413.
 
 WebSocket:
 
@@ -655,6 +690,15 @@ names describes carries no `reason`.
 Vite + React 19, plain CSS with custom properties (no utility framework),
 `@xterm/xterm` + fit addon. Two routes handled by a tiny hash-free history
 switch: `/` board, `/session/:id` terminal.
+
+In dev the SPA is served by Vite on 5173, which proxies `/api` and `/ws` to the
+server on 4400; 4400 itself has no built SPA and says so rather than serving
+the source `index.html`. After `npm run build` the SPA is served from 4400 and
+Vite is not running. `VITE_MOCK=1 npm run dev:web` installs the hand-written
+fixtures in `src/web/src/dev-mock.ts` in place of every request and socket, so
+the UI runs with no server, no Jira and no tmux. The mock certifies nothing —
+it is not derived from the server and can disagree with it in either
+direction — and it is tree-shaken out of a production build.
 
 Aesthetic direction (owner's pick): **dark, editorial instrument panel** —
 proper UI typeface with a mono companion for keys and timers, generous
@@ -726,10 +770,26 @@ sessions/<id>/          prompt.txt settings.json statusline.sh run.sh events.jso
   with git's stderr.
 - Hook arrives for an unknown session → 404, logged.
 - PTY spawn fails → WS closes with a reason frame; the UI shows it.
+- Bootstrap exits non-zero → `failed`, with the exit code on the record and on
+  `CardSession.lastExitCode`; the failed shell stays open in tmux.
+- The listening socket cannot be opened, for any reason → the cause is logged
+  and the process exits 1. Without a socket it serves nothing, and the signal
+  handlers keep the event loop alive, so it must not stay up.
+- An unhandled _rejection_ is logged and swallowed: it usually arrives outside
+  the request that caused it, and losing every session's state tracking is
+  worse than one lost stack trace. An uncaught _exception_ is logged and the
+  process exits 1 — it may be mid-invariant, and the reconciler picks the live
+  records up on the next boot.
 
 ## 15. Testing
 
-Vitest, unit only, no tmux and no network:
+Vitest. No tmux and no network, with one sanctioned exception:
+`test/connectors/git-repo.test.ts` builds a real repository, a real bare
+`origin` and real worktrees under a temporary directory and drives `GitRepo`
+against them. A seam there would test the seam: every behaviour the file
+covers — reuse, detached HEAD, dirty-tree refusal, fetch-before-reuse, branch
+resolution by commit date — is a fact about git, not about the connector's own
+logic.
 
 - `state-machine`: a table of (state, event) → (state, pending, extras),
   including "unknown event leaves state untouched" and "SessionEnd from
@@ -741,8 +801,12 @@ Vitest, unit only, no tmux and no network:
 - `projection`: column precedence table, ordering, union with session-only
   issues.
 - `cache-clock`: statusline payload → cache, derived fallback, cold rules.
-- `jira/map`: fixture JSON → Issue, ADF → text.
-- `git/branch-lookup`: parsing of `git branch -r` output.
+- `jira/map`: fixture JSON → Issue, ADF → text, and ADF that is not shaped like
+  ADF degrading to less text rather than to a failed fetch.
+- `connectors/git-parsers`: parsing of `git branch -r`, `for-each-ref` and
+  `git worktree list --porcelain` output.
+- `connectors/git-repo`: the integration file above.
+- `server/mutex`: ordering, a rejecting critical section, chain cleanup.
 
 Manual verification (plan task, integration): start an implement session on a
 real DOC-3807 child, watch bootstrapping → starting → working → idle, answer

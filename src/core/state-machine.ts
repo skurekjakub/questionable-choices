@@ -256,6 +256,12 @@ export function isHookEventName(name: string): name is HookEventName {
 /**
  * Tags a raw hook body with the hook name from the ingress URL.
  *
+ * Only the name is checked; the body is asserted, not parsed. The payload's
+ * shape is the CLI's and moves between its releases, and every field the
+ * reducer reads is narrowed where it is read, so a schema here would be a
+ * second thing to keep in step for no guarantee the use sites do not give.
+ * See spec §8.2.
+ *
  * @param name - Hook name taken from the ingress URL.
  * @param body - The hook's stdin JSON, already parsed.
  * @returns The typed hook event, or null when the name is not subscribed to.

@@ -469,5 +469,51 @@ describe('HTTP API', () => {
       expect(deep.status).toBe(200);
       expect(await deep.text()).toContain('shell');
     });
+
+    it.each(['/api', '/ws'])('answers a JSON 404 for the bare %s prefix', async (path) => {
+      const response = await spa.request(path);
+
+      expect(response.status).toBe(404);
+      expect(response.headers.get('content-type')).toContain('application/json');
+      expect(((await response.json()) as ErrorResponse).error).toContain(path);
+    });
+
+    it('answers the JSON 404 even when a real file shadows an API path', async () => {
+      // The asset handler matches every path, so its own guard is the only
+      // thing between a stray file and an API route.
+      await mkdir(join(dir, 'web', 'api'), { recursive: true });
+      await writeFile(join(dir, 'web', 'api', 'nothing'), 'gotcha', 'utf8');
+
+      const response = await spa.request('/api/nothing');
+
+      expect(response.status).toBe(404);
+      expect(((await response.json()) as ErrorResponse).error).toContain('/api/nothing');
+    });
+  });
+
+  describe('with no built SPA', () => {
+    it('says the SPA is not built rather than serving the Vite source tree', async () => {
+      // Under `tsx src/server/main.ts` the web root resolves to `src/web`,
+      // which has an index.html that only a dev server can load.
+      const sourceTree = join(dir, 'src-web');
+      await mkdir(sourceTree, { recursive: true });
+      await writeFile(join(sourceTree, 'index.html'), '<script src="/src/main.tsx">', 'utf8');
+      const dev = createApp({ manager, logger: new RecordingLogger(), webRoot: sourceTree });
+
+      const response = await dev.request('/');
+
+      expect(response.status).toBe(503);
+      expect(await response.text()).toContain('npm run build:web');
+    });
+
+    it('keeps serving the API', async () => {
+      const dev = createApp({
+        manager,
+        logger: new RecordingLogger(),
+        webRoot: join(dir, 'nothing-here'),
+      });
+
+      expect((await dev.request('/api/workspaces/ws/board')).status).toBe(200);
+    });
   });
 });
