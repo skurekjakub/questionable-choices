@@ -222,7 +222,10 @@ interface SessionRecord {
   // null when the state is current (§5.5). Never set from a status-line
   // payload, which carries no state.
   staleSince: string | null;
-  lastEventAt: string | null; // last accepted event that carried lifecycle information
+  // Last accepted event that carried lifecycle information. Server-only: the
+  // wire type omits it (`WireSessionRecord`), because `staleSince` is the
+  // answer a client renders and nothing else may derive that answer itself.
+  lastEventAt: string | null;
   cache: {
     expiresAt: number | null;
     ttlSeconds: number;

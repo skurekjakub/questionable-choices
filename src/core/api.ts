@@ -83,6 +83,16 @@ export const LIVE_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
 ]);
 
 /**
+ * A session record as the wire carries it.
+ *
+ * `lastEventAt` is the server's own bookkeeping for the staleness judgement
+ * and is not part of the contract: `CardSession.staleSince` is the answer a
+ * client renders, and nothing outside the server may derive that answer for
+ * itself.
+ */
+export type WireSessionRecord = Omit<SessionRecord, 'lastEventAt'>;
+
+/**
  * One reason a document was rejected, with the path that caused it.
  */
 export interface ConfigIssue {
@@ -397,7 +407,7 @@ export interface IssueDetailResponse {
   /** The issue, including its description. */
   issue: Issue;
   /** Every non-archived session for the issue, newest first. */
-  sessions: SessionRecord[];
+  sessions: WireSessionRecord[];
   /** Absolute worktree path, or null when the issue has none to open. */
   worktreePath: string | null;
   /** Owner-set flags for the issue. */
@@ -553,7 +563,7 @@ export type EventFrame =
       /** One session record changed. */
       type: 'session';
       /** The record after the change. */
-      record: SessionRecord;
+      record: WireSessionRecord;
     }
   | {
       /** A workspace was added or removed. */

@@ -1302,9 +1302,6 @@ function mockRecord(workspaceId: string, issueKey: string, entry: CardSession): 
     lastExitCode: entry.lastExitCode,
     staleSince: entry.staleSince,
     hint: entry.hint === null ? null : { summary: entry.hint, at: entry.stateSince },
-    // The state change is itself a lifecycle event, and it is the last one the
-    // card carries any trace of.
-    lastEventAt: entry.stateSince,
     cache: entry.cache,
     createdAt: ago(9600),
     endedAt: entry.live ? null : ago(600),

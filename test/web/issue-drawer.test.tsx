@@ -69,7 +69,6 @@ function record(
     lastExitCode: null,
     staleSince: null,
     hint: null,
-    lastEventAt: FIXTURE_NOW,
     cache: null,
     createdAt: FIXTURE_NOW,
     endedAt: null,

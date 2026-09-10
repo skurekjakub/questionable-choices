@@ -554,6 +554,42 @@ describe('exit codes and staleness', () => {
     expect(result.record.lastExitCode).toBe(130);
   });
 
+  it('forgets the previous run’s assistant snippet when a new run starts', () => {
+    // The snippet is what a card presents as "what this session is waiting on";
+    // carried into the next run it advertises the last one's last word.
+    const ended = reduce(
+      makeRecord({ state: 'working' }),
+      hookEvent({ hook_event_name: 'Stop', last_assistant_message: 'the previous run said this' }),
+      NOW,
+    );
+    const exited = reduce(ended.record, { type: 'claude-exit', exitCode: 0 }, NOW + 1_000);
+    expect(exited.record.lastAssistantMessage).toBe('the previous run said this');
+
+    const restarted = reduce(exited.record, { type: 'claude-start', mode: 'resume' }, NOW + 2_000);
+
+    expect(restarted.record.state).toBe('starting');
+    expect(restarted.record.lastAssistantMessage).toBeNull();
+  });
+
+  it('forgets the assistant snippet when the owner interrupts', () => {
+    const idle = reduce(
+      makeRecord({ state: 'working' }),
+      hookEvent({ hook_event_name: 'Stop', last_assistant_message: 'mid-thought' }),
+      NOW,
+    );
+    const working = reduce(
+      idle.record,
+      hookEvent({ hook_event_name: 'UserPromptSubmit' }),
+      NOW + 1_000,
+    );
+    expect(working.record.lastAssistantMessage).toBe('mid-thought');
+
+    const interrupted = reduce(working.record, { type: 'interrupt' }, NOW + 2_000);
+
+    expect(interrupted.record.state).toBe('idle');
+    expect(interrupted.record.lastAssistantMessage).toBeNull();
+  });
+
   it('forgets the previous exit code when a new run starts', () => {
     const result = reduce(
       makeRecord({ state: 'exited', lastExitCode: 1 }),
