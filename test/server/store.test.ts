@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { EVENT_STRING_MAX_LENGTH, Store } from '../../src/server/store.js';
+import { EVENT_STRING_MAX_LENGTH, Store, writeJsonAtomic } from '../../src/server/store.js';
 import { makeRecord } from '../core/helpers.js';
 
 describe('Store', () => {
@@ -84,7 +84,22 @@ describe('Store', () => {
     expect(JSON.parse(text)).toHaveLength(20);
   });
 
-  it('writes through a temporary file, so a failed serialisation keeps the old document', async () => {
+  it('replaces the document by renaming over it, never by truncating it in place', async () => {
+    // A truncate-then-write leaves a window in which a reader sees a partial
+    // document. A rename has no such window, and it is the new inode that
+    // proves one happened.
+    const path = join(dir, 'probe.json');
+    await writeJsonAtomic(path, { version: 1 });
+    const before = await stat(path);
+
+    await writeJsonAtomic(path, { version: 2 });
+
+    const after = await stat(path);
+    expect(after.ino).not.toBe(before.ino);
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ version: 2 });
+  });
+
+  it('keeps the old document when a write fails, in memory as well as on disk', async () => {
     const store = new Store(dir);
     await store.load();
     await store.saveSession(makeRecord());
