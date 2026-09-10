@@ -15,5 +15,11 @@
     "noEmit": true,
     "types": ["vite/client"]
   },
-  "include": ["./**/*.ts", "./**/*.tsx", "../core/api.ts", "../core/cache-clock.ts"]
+  "include": [
+    "./**/*.ts",
+    "./**/*.tsx",
+    "../core/api.ts",
+    "../core/cache-clock.ts",
+    "../../test/web/**/*.ts"
+  ]
 }
