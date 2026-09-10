@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -63,6 +63,7 @@ describe('Store', () => {
     ['sessions.json', '"text"', (store: Store) => store.sessions()],
     ['flags.json', '[]', (store: Store) => Object.keys(store.flagsOf('ws'))],
     ['worktrees.json', '3', (store: Store) => Object.keys(store.worktreesOf('ws'))],
+    ['checklists.json', '[]', (store: Store) => store.checklist('ws', 'DOC-1', [])],
   ])(
     'treats %s holding %s as empty, since a cast would only defer the failure',
     async (file, text, read) => {
@@ -151,6 +152,107 @@ describe('Store', () => {
     });
     expect(await store.setFlags('ws', 'DOC-1', { review: false })).toEqual({ done: true });
     expect(store.flagsOf('ws')).toEqual({ 'DOC-1': { done: true } });
+  });
+
+  it('projects the ticks onto the template and drops one it no longer names', async () => {
+    const store = new Store(dir);
+    await store.load();
+    await store.setChecklist('ws', 'DOC-1', ['Read it', 'Verify'], 'Verify', true);
+    await store.setChecklist('ws', 'DOC-1', ['Read it', 'Verify'], 'Retired', true);
+
+    expect(store.checklist('ws', 'DOC-1', ['Verify', 'Read it'])).toEqual([
+      { label: 'Verify', done: true },
+      { label: 'Read it', done: false },
+    ]);
+  });
+
+  it('leaves a dropped tick in the document, so an item that comes back keeps it', async () => {
+    const store = new Store(dir);
+    await store.load();
+    await store.setChecklist('ws', 'DOC-1', ['Retired'], 'Retired', true);
+    // A later tick rewrites the whole document, and its template no longer
+    // names the first item: pruning here would make a template edit destroy
+    // the ticks of every item it touched.
+    await store.setChecklist('ws', 'DOC-1', ['Read it'], 'Read it', true);
+
+    const reloaded = new Store(dir);
+    await reloaded.load();
+    expect(reloaded.checklist('ws', 'DOC-1', ['Retired', 'Read it'])).toEqual([
+      { label: 'Retired', done: true },
+      { label: 'Read it', done: true },
+    ]);
+  });
+
+  it('removes a tick set back to false rather than storing it', async () => {
+    const store = new Store(dir);
+    await store.load();
+    const template = ['Read it', 'Verify'];
+    await store.setChecklist('ws', 'DOC-1', template, 'Read it', true);
+    expect(await store.setChecklist('ws', 'DOC-1', template, 'Verify', true)).toEqual([
+      { label: 'Read it', done: true },
+      { label: 'Verify', done: true },
+    ]);
+    expect(await store.setChecklist('ws', 'DOC-1', template, 'Read it', false)).toEqual([
+      { label: 'Read it', done: false },
+      { label: 'Verify', done: true },
+    ]);
+
+    const persisted = JSON.parse(await readFile(join(dir, 'checklists.json'), 'utf8')) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(persisted['ws/DOC-1']).toEqual({ Verify: true });
+  });
+
+  it('keeps two issues apart under one workspace', async () => {
+    const store = new Store(dir);
+    await store.load();
+    await store.setChecklist('ws', 'DOC-1', ['Verify'], 'Verify', true);
+    expect(store.checklist('ws', 'DOC-2', ['Verify'])).toEqual([{ label: 'Verify', done: false }]);
+    expect(store.checklist('other', 'DOC-1', ['Verify'])).toEqual([
+      { label: 'Verify', done: false },
+    ]);
+  });
+
+  it('never leaves a tick on disk that the caller was told was refused', async () => {
+    const store = new Store(dir);
+    await store.load();
+    const template = ['Read it', 'Verify'];
+    await store.setChecklist('ws', 'DOC-1', template, 'Read it', true);
+
+    // A directory the store cannot write into is what makes the temporary file
+    // fail; the rollback has to leave memory saying what the file still says.
+    await chmod(dir, 0o555);
+    try {
+      await expect(store.setChecklist('ws', 'DOC-1', template, 'Verify', true)).rejects.toThrow();
+    } finally {
+      await chmod(dir, 0o755);
+    }
+
+    expect(store.checklist('ws', 'DOC-1', template)).toEqual([
+      { label: 'Read it', done: true },
+      { label: 'Verify', done: false },
+    ]);
+    const persisted = JSON.parse(await readFile(join(dir, 'checklists.json'), 'utf8')) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(persisted['ws/DOC-1']).toEqual({ 'Read it': true });
+  });
+
+  it('keeps a checklists document it refuses instead of letting the next write destroy it', async () => {
+    const warnings: string[] = [];
+    await writeFile(join(dir, 'checklists.json'), '["not the shape this file holds"]', 'utf8');
+    const store = new Store(dir, (message) => warnings.push(message));
+
+    await store.load();
+    expect(store.checklist('ws', 'DOC-1', ['Verify'])).toEqual([{ label: 'Verify', done: false }]);
+    await store.setChecklist('ws', 'DOC-1', ['Verify'], 'Verify', true);
+
+    expect(await readFile(join(dir, 'checklists.json.rejected'), 'utf8')).toBe(
+      '["not the shape this file holds"]',
+    );
+    expect(warnings.join('\n')).toContain('checklists.json.rejected');
   });
 
   it('remembers and forgets worktrees', async () => {

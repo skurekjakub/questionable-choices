@@ -17,6 +17,11 @@
  *                                                          400 when `playbook` is absent
  * POST   /api/workspaces/:id/issues/:key/sessions        → 201 SessionRecord
  * POST   /api/workspaces/:id/issues/:key/flags           → 200 IssueFlags
+ * GET    /api/workspaces/:id/issues/:key/checklist       → 200 ChecklistResponse
+ * PUT    /api/workspaces/:id/issues/:key/checklist       → 200 ChecklistResponse
+ *                                                          400 with issues for a label the
+ *                                                          template does not have, or a
+ *                                                          malformed body
  * POST   /api/workspaces/:id/issues/:key/open-editor     → 204; 409 without a checkout
  * POST   /api/sessions/:id/<SessionAction>               → 200 SessionRecord
  * POST   /api/sessions/:id/remove-worktree               → 200 RemoveWorktreeResponse
@@ -458,6 +463,38 @@ export interface SetFlagsRequest {
   review?: boolean | undefined;
   /** Force the issue into the Done column, or clear the flag. */
   done?: boolean | undefined;
+}
+
+/**
+ * One line of an issue's private checklist.
+ *
+ * The label is the identity: a tick is stored under the item's own text, so
+ * reordering the workspace's template keeps every tick, and rewording an item
+ * drops the tick that belonged to the old wording.
+ */
+export interface ChecklistItem {
+  /** Item text, exactly as the workspace's template spells it. */
+  label: string;
+  /** Whether the owner has ticked it. */
+  done: boolean;
+}
+
+/**
+ * Response of `GET` and `PUT /api/workspaces/:id/issues/:key/checklist`.
+ */
+export interface ChecklistResponse {
+  /** Every item of the workspace's template, in template order; empty when it has none. */
+  items: ChecklistItem[];
+}
+
+/**
+ * Body of `PUT /api/workspaces/:id/issues/:key/checklist`.
+ */
+export interface SetChecklistRequest {
+  /** Item to tick or untick; must be one the workspace's template names. */
+  label: string;
+  /** Whether the item is now ticked. */
+  done: boolean;
 }
 
 /**
