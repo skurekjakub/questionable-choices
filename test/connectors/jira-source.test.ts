@@ -132,6 +132,16 @@ describe('JiraIssueSource.get', () => {
 
     await expect(source.get('DOC-404')).resolves.toBeNull();
   });
+
+  it('answers null for a resource with no usable key, which would be a dead card', async () => {
+    // `get` is how a session-only issue reaches the board, so a keyless
+    // resource here becomes a card whose link 404s and whose sessions cannot
+    // be matched to it.
+    const { fetch } = constantFetch(JSON.stringify({ fields: { summary: 'keyless' } }));
+    const source = createJiraIssueSource('docs', CONNECTOR, QUERY, ENV, { fetch });
+
+    await expect(source.get('DOC-9')).resolves.toBeNull();
+  });
 });
 
 describe('createIssueSource', () => {

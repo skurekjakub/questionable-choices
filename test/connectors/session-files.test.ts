@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { spawn } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
+  BOOTSTRAP_LOG_FILE,
+  BOOTSTRAP_TAIL_LINES,
   BYPASS_PERMISSIONS_FLAG,
   HOOK_TIMEOUT_SECONDS,
   NOTIFICATION_MATCHER,
@@ -207,10 +213,12 @@ describe('buildRunScript', () => {
         '',
         "post bootstrap-start '{}'",
         '',
-        'npm ci',
-        'status=$?',
+        `qc_bootstrap_log='${DIR}/bootstrap.log'`,
+        '{ npm ci; } 2>&1 | tee "$qc_bootstrap_log"',
+        'status=${PIPESTATUS[0]}',
         'if [ "$status" -ne 0 ]; then',
-        '  post bootstrap-failed "{\\"exitCode\\":$status}"',
+        `  qc_message=$(tail -n 20 "$qc_bootstrap_log" 2>/dev/null | LC_ALL=C tr '\\011' ' ' | LC_ALL=C tr -d '\\000-\\010\\013\\014\\016-\\037\\177' | sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g' | awk '{printf "%s\\\\n", $0}')`,
+        '  post bootstrap-failed "{\\"exitCode\\":$status,\\"message\\":\\"$qc_message\\"}"',
         '  exec bash',
         'fi',
         '',
@@ -261,5 +269,121 @@ describe('buildRunScript', () => {
 
     expect(script).toContain('post claude-start \'{"mode":"resume"}\'');
     expect(script).not.toContain("post claude-start '{}'");
+  });
+
+  it('captures the bootstrap output and names the file it keeps it in', () => {
+    const script = buildRunScript(RUN_CONTEXT);
+
+    expect(script).toContain(`qc_bootstrap_log='${DIR}/${BOOTSTRAP_LOG_FILE}'`);
+    expect(script).toContain(`tail -n ${BOOTSTRAP_TAIL_LINES}`);
+    // Through tee rather than a redirect: the owner watching the tmux window
+    // must still see the bootstrap run.
+    expect(script).toContain('| tee "$qc_bootstrap_log"');
+    expect(script).toContain('post bootstrap-failed "{\\"exitCode\\":$status,\\"message\\":');
+  });
+});
+
+describe('the generated launcher, run by bash', () => {
+  let dir = '';
+
+  afterEach(async () => {
+    if (dir !== '') await rm(dir, { recursive: true, force: true });
+    dir = '';
+  });
+
+  /**
+   * Runs a generated launcher with a stub `curl` that records what it posted.
+   *
+   * @param bootstrap - Shell command the launcher runs as the bootstrap.
+   * @returns One entry per POST, in the order the launcher made them.
+   */
+  async function runLauncher(bootstrap: string): Promise<Array<{ url: string; body: string }>> {
+    dir = await mkdtemp(join(tmpdir(), 'qc-launcher-'));
+    const bin = join(dir, 'bin');
+    const log = join(dir, 'posts.tsv');
+    await writeFile(join(dir, 'prompt.txt'), 'do the thing\n', 'utf8');
+    await writeFile(
+      join(dir, 'run.sh'),
+      buildRunScript({ ...RUN_CONTEXT, dir, bootstrap }),
+      'utf8',
+    );
+    await mkdir(bin, { recursive: true });
+    await writeFile(
+      join(bin, 'curl'),
+      [
+        '#!/usr/bin/env bash',
+        'body=""',
+        'url=""',
+        'while [ $# -gt 0 ]; do',
+        '  case "$1" in',
+        '    --data-binary) body="$2"; shift 2;;',
+        '    http*) url="$1"; shift;;',
+        '    *) shift;;',
+        '  esac',
+        'done',
+        `printf '%s\\t%s\\n' "$url" "$body" >> ${JSON.stringify(log)}`,
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await chmod(join(bin, 'curl'), 0o755);
+
+    // stdin is closed, so the `exec bash` the launcher ends with reads EOF and
+    // exits instead of sitting there like the tmux window it is meant for.
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('bash', [join(dir, 'run.sh')], {
+        env: { ...process.env, PATH: `${bin}:${process.env['PATH'] ?? ''}` },
+        cwd: dir,
+        stdio: 'ignore',
+      });
+      child.on('error', reject);
+      child.on('close', () => {
+        resolve();
+      });
+    });
+
+    const recorded = await readFile(log, 'utf8');
+    return recorded
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => {
+        const tab = line.indexOf('\t');
+        return { url: line.slice(0, tab), body: line.slice(tab + 1) };
+      });
+  }
+
+  it('posts a bootstrap failure whose message is the tail of what the bootstrap said', async () => {
+    const posts = await runLauncher(
+      'printf "first line\\nnpm error code E404\\nnpm error 404 Not Found\\n" >&2; exit 3',
+    );
+
+    const failure = posts.find((post) => post.url.endsWith('/bootstrap-failed'));
+    expect(failure).toBeDefined();
+    const body = JSON.parse(failure?.body ?? '') as { exitCode: number; message: string };
+    expect(body.exitCode).toBe(3);
+    expect(body.message).toContain('npm error 404 Not Found');
+    expect(body.message).toContain('first line');
+  });
+
+  it('escapes a bootstrap message that would otherwise not be JSON', async () => {
+    const posts = await runLauncher(
+      'printf \'he said "no" \\\\ and left\\n\\tindented\\n\' >&2; exit 1',
+    );
+
+    const failure = posts.find((post) => post.url.endsWith('/bootstrap-failed'));
+    const body = JSON.parse(failure?.body ?? '') as { exitCode: number; message: string };
+    expect(body.exitCode).toBe(1);
+    expect(body.message).toContain('he said "no" \\ and left');
+    expect(body.message).toContain(' indented');
+  });
+
+  it('launches claude when the bootstrap succeeds, posting no failure', async () => {
+    const posts = await runLauncher('printf "installed\\n"');
+
+    expect(posts.map((post) => post.url.split('/').pop())).toEqual([
+      'bootstrap-start',
+      'claude-start',
+      'claude-exit',
+    ]);
   });
 });

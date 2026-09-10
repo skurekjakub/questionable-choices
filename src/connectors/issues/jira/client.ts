@@ -1,3 +1,5 @@
+import type { PermanentSourceError } from '../../../core/types.js';
+
 /**
  * Issue fields the board needs from Jira.
  */
@@ -138,7 +140,9 @@ export interface JiraClientOptions {
  * A truncated list read as complete makes the projection treat the issues it
  * never saw as gone, so the search fails instead.
  */
-export class JiraTruncatedError extends Error {
+export class JiraTruncatedError extends Error implements PermanentSourceError {
+  /** Marks the failure as one repeating the query cannot fix. */
+  readonly permanent = true;
   /** The query that matched more issues than the cap allows. */
   readonly jql: string;
   /** Issues collected before the cap was reached. */
