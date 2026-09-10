@@ -57,6 +57,34 @@ export function attachCommand(sessionId: string, reported?: string | null): stri
 }
 
 /**
+ * What a board row and a session header say about a session that failed.
+ */
+export interface FailureHint {
+  /** State word, carrying the exit code when one was reported. */
+  label: string;
+  /** Where the failed shell was left, so it can be attached to and read. */
+  shell: string;
+}
+
+/**
+ * Words a failure so the owner can see why and where without leaving the board.
+ *
+ * A failed start leaves its shell open in tmux under the session's own name, so
+ * naming both the code and the session turns a dead end into an instruction.
+ *
+ * @param sessionId - Id of the session, which is also its tmux session name.
+ * @param exitCode - Exit code the launcher reported, or null when none reached
+ * the record.
+ * @returns The state word and the pointer to the shell.
+ */
+export function failureHint(sessionId: string, exitCode: number | null): FailureHint {
+  return {
+    label: exitCode === null ? 'failed' : `failed, exit ${exitCode}`,
+    shell: `shell open in tmux ${sessionId}`,
+  };
+}
+
+/**
  * Copies text to the clipboard, falling back to a hidden textarea where the
  * async clipboard API is unavailable.
  *

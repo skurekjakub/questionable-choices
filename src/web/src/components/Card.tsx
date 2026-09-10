@@ -1,6 +1,6 @@
 import type { JSX } from 'react';
 import type { Card as CardModel, CardSession, PlaybookSummary } from '../../../core/api.js';
-import { timeInState, typeGlyph } from '../format.js';
+import { failureHint, timeInState, typeGlyph } from '../format.js';
 import { STATE_LABELS } from '../model.js';
 import { CacheReadout } from './CacheReadout.js';
 import { LabelChips, StatusChip } from './Chips.js';
@@ -44,7 +44,8 @@ function railTone(card: CardModel): LampTone | null {
  * needs-you column can be triaged without opening every card.
  *
  * A session blocked on the owner without a pending summary — an idle one — has
- * nothing specific to wait for, and shows no second line.
+ * nothing specific to wait for, and shows no second line. A failed one uses that
+ * line for the shell its failure was left open in.
  *
  * @param props - Component props.
  * @param props.session - Session to render.
@@ -64,16 +65,23 @@ function SessionRow({
   nowMs: number;
   onOpen: () => void;
 }): JSX.Element {
+  const failure = session.state === 'failed' ? failureHint(session.id, session.lastExitCode) : null;
   return (
     <button type="button" className="session-row card-open" onClick={onOpen}>
       <span className="session-line">
         <Lamp state={session.state} />
         <span className="session-playbook">{playbookLabel}</span>
-        <span className="session-state">{STATE_LABELS[session.state]}</span>
+        <span className="session-state">{failure?.label ?? STATE_LABELS[session.state]}</span>
+        {session.staleSince === null ? null : (
+          <span className="session-stale" title="No hook has been seen since the server restarted">
+            unverified since restart
+          </span>
+        )}
         {session.done ? <span className="session-done">done</span> : null}
         <span className="session-time">{timeInState(session.stateSince, nowMs)}</span>
         <CacheReadout cache={session.cache} nowMs={nowMs} />
       </span>
+      {failure !== null ? <span className="session-pending">{failure.shell}</span> : null}
       {session.needsYou && session.pending !== null ? (
         <span className="session-pending">{session.pending.summary}</span>
       ) : null}

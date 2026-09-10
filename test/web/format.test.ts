@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { attachCommand, syncedAgo, timeInState, typeGlyph } from '../../src/web/src/format.js';
+import {
+  attachCommand,
+  failureHint,
+  syncedAgo,
+  timeInState,
+  typeGlyph,
+} from '../../src/web/src/format.js';
 
 /**
  * A fixed instant the durations below are measured back from.
@@ -86,5 +92,29 @@ describe('attachCommand', () => {
   it('builds the tmux default when the server named none', () => {
     expect(attachCommand('qc-DOC-1-implement')).toBe('tmux attach -t qc-DOC-1-implement');
     expect(attachCommand('qc-DOC-1-implement', null)).toBe('tmux attach -t qc-DOC-1-implement');
+  });
+});
+
+describe('failureHint', () => {
+  it('names the exit code the launcher reported', () => {
+    expect(failureHint('qc-DOC-1-implement', 1).label).toBe('failed, exit 1');
+    expect(failureHint('qc-DOC-1-implement', 127).label).toBe('failed, exit 127');
+  });
+
+  it('says only that it failed when no code reached the record', () => {
+    expect(failureHint('qc-DOC-1-implement', null).label).toBe('failed');
+  });
+
+  it('keeps a zero code, which is a real outcome and not a missing one', () => {
+    expect(failureHint('qc-DOC-1-implement', 0).label).toBe('failed, exit 0');
+  });
+
+  it('points at the shell by the tmux name, which is the session id', () => {
+    expect(failureHint('qc-DOC-1-implement', 1).shell).toBe(
+      'shell open in tmux qc-DOC-1-implement',
+    );
+    expect(failureHint('qc-DOC-1-implement', null).shell).toBe(
+      'shell open in tmux qc-DOC-1-implement',
+    );
   });
 });

@@ -9,7 +9,7 @@ import {
   sessionAction,
 } from '../api.js';
 import { failureReason } from '../failure.js';
-import { attachCommand } from '../format.js';
+import { attachCommand, failureHint } from '../format.js';
 import { useSession } from '../hooks/useSession.js';
 import { LIVE_STATES, NEEDS_YOU_STATES, STATE_LABELS } from '../model.js';
 import { CacheReadout } from './CacheReadout.js';
@@ -112,6 +112,9 @@ export function SessionView({
   // The board names the branch before the issue detail has loaded, so the
   // header reads it from whichever source has it.
   const branch = record?.branch ?? cardSession?.branch ?? null;
+  const failedHint =
+    record?.state === 'failed' ? failureHint(sessionId, record.lastExitCode) : null;
+  const staleSince = record?.staleSince ?? cardSession?.staleSince ?? null;
 
   const runAction = (action: SessionAction): void => {
     setBusy(true);
@@ -156,10 +159,16 @@ export function SessionView({
         ) : (
           <span className="state-pill" data-alert={needsYou}>
             <Lamp state={record.state} />
-            {STATE_LABELS[record.state]}
+            {failedHint?.label ?? STATE_LABELS[record.state]}
+            {failedHint === null ? null : <span className="pending">— {failedHint.shell}</span>}
             {record.pending === null ? null : (
               <span className="pending">— {record.pending.summary}</span>
             )}
+          </span>
+        )}
+        {staleSince === null ? null : (
+          <span className="session-stale" title="No hook has been seen since the server restarted">
+            unverified since restart
           </span>
         )}
         {branch === null ? null : <span className="branch">{branch}</span>}

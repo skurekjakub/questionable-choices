@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react';
+import { restoreFocusTarget } from '../focus-restore.js';
 
 /**
  * Selector matching the controls a dialog can move focus between.
@@ -21,9 +22,29 @@ function focusable(container: HTMLElement): HTMLElement[] {
 }
 
 /**
+ * Lists an element and its ancestors, so a restore can fall back up the tree.
+ *
+ * `document.body` is left out: focusing it is what the fallback exists to
+ * avoid.
+ *
+ * @param element - Element to start from.
+ * @returns The element, then each ancestor below `<body>`.
+ */
+function ancestry(element: HTMLElement): HTMLElement[] {
+  const chain: HTMLElement[] = [];
+  let node: HTMLElement | null = element;
+  while (node !== null && node !== document.body) {
+    chain.push(node);
+    node = node.parentElement;
+  }
+  return chain;
+}
+
+/**
  * Makes a modal surface behave like one: focus moves into it on mount, Tab
  * cycles inside it, Escape dismisses it, and the previously focused element
- * gets focus back when it unmounts.
+ * gets focus back when it unmounts — or, when that element did not survive the
+ * open, the nearest surviving control above it.
  *
  * The container needs `tabIndex={-1}` so focus has somewhere to land when the
  * surface has no controls of its own yet.
@@ -42,7 +63,8 @@ export function useFocusTrap<T extends HTMLElement>(onEscape: () => void): RefOb
   useEffect(() => {
     const element = container.current;
     if (element === null) return;
-    const restoreTo = document.activeElement;
+    const opener = document.activeElement;
+    const restoreChain = opener instanceof HTMLElement ? ancestry(opener) : [];
     const items = focusable(element);
     (items[0] ?? element).focus();
 
@@ -79,7 +101,12 @@ export function useFocusTrap<T extends HTMLElement>(onEscape: () => void): RefOb
     document.addEventListener('keydown', onKeyDown, true);
     return () => {
       document.removeEventListener('keydown', onKeyDown, true);
-      if (restoreTo instanceof HTMLElement) restoreTo.focus();
+      const target = restoreFocusTarget(
+        restoreChain,
+        (node) => node.isConnected,
+        (node) => focusable(node)[0] ?? null,
+      );
+      target?.focus();
     };
   }, []);
 

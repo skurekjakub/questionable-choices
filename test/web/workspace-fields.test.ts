@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { placeIssue } from '../../src/web/src/workspace-fields.js';
+import { placeIssue, withoutField } from '../../src/web/src/workspace-fields.js';
 
 describe('placeIssue', () => {
   it('places every field the add-workspace request names', () => {
@@ -33,5 +33,40 @@ describe('placeIssue', () => {
   it('does not resurrect the document locators the route stopped sending', () => {
     expect(placeIssue('workspaces.docs.epic')).toBeNull();
     expect(placeIssue('connectors.kentico-jira.site')).toBeNull();
+  });
+});
+
+describe('withoutField', () => {
+  const issues = [
+    { path: 'epic', message: 'epic must be an issue key' },
+    { path: 'name', message: 'name must not be empty' },
+    { path: 'newConnector.site', message: 'site must not be empty' },
+  ];
+
+  it('retires the problem of the field being edited and no other', () => {
+    expect(withoutField(issues, 'epic').map((issue) => issue.path)).toEqual([
+      'name',
+      'newConnector.site',
+    ]);
+  });
+
+  it('retires a problem the field owns under a path of its own', () => {
+    const indexed = [{ path: 'reviewStatuses[2]', message: 'review status must not be empty' }];
+    expect(withoutField(indexed, 'reviewStatuses')).toEqual([]);
+    // The workspace id is shown against the name, so editing the name clears it.
+    expect(withoutField([{ path: 'id', message: 'already exists' }], 'name')).toEqual([]);
+  });
+
+  it('keeps a problem that names no field, which no edit can answer', () => {
+    const unplaced = [{ path: 'jql', message: 'jql must not be empty' }];
+    expect(withoutField(unplaced, 'epic')).toEqual(unplaced);
+    expect(withoutField(unplaced, 'name')).toEqual(unplaced);
+  });
+
+  it('leaves the order of what remains alone', () => {
+    expect(withoutField(issues, 'name').map((issue) => issue.path)).toEqual([
+      'epic',
+      'newConnector.site',
+    ]);
   });
 });

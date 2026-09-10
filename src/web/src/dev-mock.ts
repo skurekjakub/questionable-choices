@@ -92,6 +92,8 @@ function session(overrides: Partial<CardSession> & Pick<CardSession, 'id' | 'sta
       overrides.state === 'idle'
         ? 'Done. The duplicated parser is gone and verify is green.'
         : null,
+    lastExitCode: overrides.state === 'failed' ? 1 : null,
+    staleSince: null,
     cache: null,
     done: false,
     live,
@@ -272,6 +274,9 @@ function docsCards(): Card[] {
           playbookId: 'test',
           state: 'starting',
           stateSince: ago(4),
+          // Its hooks were posted at a dead port, so the state is the one the
+          // server died holding rather than the one the session is in.
+          staleSince: ago(30),
         }),
       ],
     }),
@@ -1183,6 +1188,8 @@ function mockRecord(workspaceId: string, issueKey: string, entry: CardSession): 
     pending: entry.pending,
     lastAssistantMessage:
       entry.state === 'idle' ? 'Done. The duplicated parser is gone and verify is green.' : null,
+    lastExitCode: entry.lastExitCode,
+    staleSince: entry.staleSince,
     cache: entry.cache,
     createdAt: ago(9600),
     endedAt: entry.live ? null : ago(600),

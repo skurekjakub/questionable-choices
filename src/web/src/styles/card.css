@@ -183,6 +183,16 @@
   color: var(--lamp-moss);
 }
 
+.session-stale {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid #5a4318;
+  border-radius: var(--r-chip);
+  color: var(--lamp-amber);
+  font-size: var(--fs-meta);
+  white-space: nowrap;
+}
+
 .lamp {
   flex: none;
   width: 9px;

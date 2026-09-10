@@ -50,3 +50,21 @@ export function placeIssue(path: string): WorkspaceFieldPath | null {
   if (field === 'id') return 'name';
   return null;
 }
+
+/**
+ * Drops the problems the server placed against one field.
+ *
+ * A message about a value the owner has since replaced is worse than no message
+ * at all: a screen reader keeps announcing it, and the control keeps reporting
+ * itself invalid, until the next submit.
+ *
+ * @param issues - Problems the server reported, in the order it sent them.
+ * @param field - Field whose problems should go.
+ * @returns The problems belonging to every other field, in the same order.
+ */
+export function withoutField<T extends { path: string }>(
+  issues: readonly T[],
+  field: WorkspaceFieldPath,
+): T[] {
+  return issues.filter((issue) => placeIssue(issue.path) !== field);
+}
