@@ -112,7 +112,11 @@ File: `~/.config/questionable-choices/config.json` (override with
 `QC_CONFIG=/path`). Validated with zod at boot; a bad config fails boot with
 the zod issue list. `config.example.json` in the repo is the owner's real
 shape. Credentials are never in the file: `emailEnv` / `tokenEnv` name the
-environment variables that hold them.
+environment variables that hold them. Those variables come from the shell that
+launched the server or from `.env` next to the config file (one `NAME=value`
+per line, `#` comments, optional quotes); the server loads `.env` at boot
+before it checks the environment, and a variable the shell already exports
+wins over the file. `npm run config:check` loads it the same way.
 
 Shape (see `config.example.json` for the live values):
 

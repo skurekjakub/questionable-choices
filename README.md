@@ -69,7 +69,9 @@ cp config.example.json ~/.config/questionable-choices/config.json
 Edit the config (or set `QC_CONFIG` to another path). Four blocks:
 
 - `connectors` — Jira site plus the names of the env vars holding email and
-  API token.
+  API token. Put the values in `~/.config/questionable-choices/.env`
+  (`JIRA_EMAIL_KENTICO_JIRA=you@example.com`, one per line); the server loads
+  it at boot, and a variable the shell exports wins over the file.
 - `repos` — checkout path, where worktrees go, base ref, bootstrap command,
   playbooks.
 - `workspaces` — one per epic: name, epic key, which connector, which repo, and

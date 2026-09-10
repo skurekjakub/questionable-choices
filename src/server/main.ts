@@ -1,7 +1,7 @@
 import { serve, upgradeWebSocket } from '@hono/node-server';
 import type { WebSocketServerLike } from '@hono/node-server';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import {
@@ -14,6 +14,7 @@ import type { Config } from '../core/types.js';
 import { createApp } from './app.js';
 import { loadConfig } from './config-file.js';
 import { buildConnectors, buildWorkspaceRuntime } from './connectors.js';
+import { applyEnvFile } from './env-file.js';
 import { SessionManager, consoleLogger, readDerivedCacheTtlSeconds } from './session-manager.js';
 import { Store } from './store.js';
 import { fatalExit, isProcessEntry, messageOf } from './util.js';
@@ -196,6 +197,9 @@ async function main(): Promise<void> {
   guardTheProcess();
   const home = homedir();
   const configPath = resolveConfigPath(process.env, home);
+  const envPath = join(dirname(configPath), '.env');
+  const loaded = applyEnvFile(envPath, process.env);
+  if (loaded.length > 0) console.log(`env: ${loaded.join(', ')} from ${envPath}`);
   const config = await loadOrExit(configPath, home);
   for (const warning of checkEnvironment(config, process.env)) {
     console.warn(`warning: ${warning}`);

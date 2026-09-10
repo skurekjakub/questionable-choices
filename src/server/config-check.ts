@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   ConfigError,
   checkEnvironment,
@@ -8,6 +8,7 @@ import {
   resolveConfigPath,
 } from '../core/config.js';
 import { loadConfig } from './config-file.js';
+import { applyEnvFile } from './env-file.js';
 import { fatalExit, isProcessEntry } from './util.js';
 
 /**
@@ -44,6 +45,9 @@ export function checkConfig(options: ConfigCheckOptions): number {
   const { env, home, log } = options;
   const path = resolveConfigPath(env, home);
   log(`config: ${path}`);
+  const envPath = join(dirname(path), '.env');
+  const loaded = applyEnvFile(envPath, env);
+  if (loaded.length > 0) log(`env: ${loaded.join(', ')} from ${envPath}`);
 
   let config;
   try {
