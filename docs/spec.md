@@ -439,11 +439,11 @@ the release is what they are pinned to:
    the session is alive. The one excluded event is a status-line payload; a
    `Notification` is not excluded, and stamps the marker like any other accepted
    hook even though it moves no state. An event the reducer refuses outright
-   stamps nothing. The reconciler also clears the marker when the same pass closes the
-   record, whose state is then the most certain one available and which will
-   receive no further event. An owner action that moves the record — Resume,
-   Kill, Interrupt — stamps it too, so a session the owner has just relaunched
-   is never badged as unverified.
+   stamps nothing. The reconciler also clears the marker when the same pass
+   closes the record, whose state is then the most certain one available and
+   which will receive no further event. An owner action that moves the record —
+   Resume, Kill, Interrupt — stamps it too, so a session the owner has just
+   relaunched is never badged as unverified.
 
 ## 6. Board projection (`core/projection.ts`)
 
@@ -828,8 +828,8 @@ Session view:
 
 - Terminal fills ~75 %; header, in this order: Back, key, playbook, state
   pill (carrying the ended-state label, the unverified marker and the
-  may-need-you marker), branch,
-  cache countdown, then Interrupt · Kill · Resume. Resume appears for any
+  may-need-you marker), branch, cache countdown, then Interrupt · Kill ·
+  Resume. Resume appears for any
   non-live state, `failed` included, and is disabled while the record has no
   Claude session id or the issue detail has not loaded yet.
 - Right panel: issue summary/description, status chip, labels, Jira link,
