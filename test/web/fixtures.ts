@@ -1,5 +1,5 @@
 import type { BoardView, Card, CardSession, PublicConfigResponse } from '../../src/core/api.js';
-import type { SessionState } from '../../src/web/src/model.js';
+import { LIVE_STATES, type SessionState } from '../../src/web/src/model.js';
 
 /**
  * A fixed instant the fixtures below are stamped with, so a test that reads a
@@ -30,9 +30,12 @@ export function cardSession(id: string, overrides: Partial<CardSession> = {}): C
     lastAssistantMessage: null,
     lastExitCode: null,
     staleSince: null,
+    hint: null,
     cache: null,
     done: false,
-    live: state === 'working' || state === 'bootstrapping' || state === 'starting',
+    // Read off the contract's own set rather than restated: a fixture that can
+    // disagree with the contract it claims to carry is worse than no fixture.
+    live: LIVE_STATES.has(state),
     needsYou: false,
     branch: null,
     attachCommand: `tmux attach -t ${id}`,
