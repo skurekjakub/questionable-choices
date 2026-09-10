@@ -792,7 +792,8 @@ Board:
   switcher is a dropdown of epics (workspace name, with the epic key and repo
   as secondary text), always shown, active one remembered in localStorage; a
   workspace the session route resolves is shown without being remembered, and
-  the remembered one comes back when that route is left. Its last two entries
+  the remembered one comes back when that route is left, or the first
+  configured workspace when nothing was ever remembered. Its last two entries
   are "Add workspace…" and then "Remove this workspace" (confirm; nothing but
   the workspace and its own connector goes).
   The needs-you badge also goes into `document.title` and the favicon.
