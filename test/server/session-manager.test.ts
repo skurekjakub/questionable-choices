@@ -518,7 +518,7 @@ describe('SessionManager', () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       await h.manager.killSession('qc-DOC-1-implement');
       const result = await h.manager.removeWorktree('qc-DOC-1-implement', true);
-      expect(result).toEqual({ path: '/repos/worktrees/DOC-1', removed: true });
+      expect(result).toEqual({ path: '/repos/worktrees/DOC-1' });
       expect(h.repo.removed).toEqual([{ issueKey: 'DOC-1', force: true }]);
       expect(h.store.worktree('app', 'DOC-1')).toBeUndefined();
     });

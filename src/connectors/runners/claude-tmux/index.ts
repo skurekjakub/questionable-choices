@@ -1,7 +1,6 @@
 import { accessSync, constants, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
-import type { IPty } from 'node-pty';
 import type {
   Runner,
   RunnerConfig,
@@ -141,6 +140,94 @@ export function readOwnerStatuslineCommand(home: string): string | null {
   if (typeof statusLine !== 'object' || statusLine === null) return null;
   const command = (statusLine as { command?: unknown }).command;
   return typeof command === 'string' && command !== '' ? command : null;
+}
+
+/**
+ * The part of a `node-pty` process a viewer's terminal drives.
+ */
+export interface PtyLike {
+  /**
+   * Registers a listener for bytes the pty emits.
+   *
+   * @param listener - Called with each chunk.
+   * @returns Anything; the return value is not used.
+   */
+  onData(listener: (chunk: string) => void): unknown;
+  /**
+   * Registers a listener for the pty ending.
+   *
+   * @param listener - Called once with the exit code and signal.
+   * @returns Anything; the return value is not used.
+   */
+  onExit(listener: (event: { exitCode: number }) => void): unknown;
+  /**
+   * Writes bytes into the pty.
+   *
+   * @param data - Bytes to write.
+   * @returns Nothing.
+   * @throws {Error} When the descriptor is already closed.
+   */
+  write(data: string): void;
+  /**
+   * Resizes the pty.
+   *
+   * @param cols - New column count.
+   * @param rows - New row count.
+   * @returns Nothing.
+   * @throws {Error} When the descriptor is already closed.
+   */
+  resize(cols: number, rows: number): void;
+  /**
+   * Ends the pty.
+   *
+   * @returns Nothing.
+   * @throws {Error} When the process is already gone.
+   */
+  kill(): void;
+}
+
+/**
+ * Presents one pty as the terminal a viewer socket drives.
+ *
+ * Every call is guarded: a pty's descriptor closes as soon as its tmux client
+ * exits, and node-pty reports that by throwing on the next call rather than by
+ * telling anyone, so an unguarded write or resize takes the socket down with it.
+ *
+ * @param pty - The pty to wrap.
+ * @returns The terminal.
+ */
+export function wrapPty(pty: PtyLike): RunnerTerminal {
+  return {
+    onData(listener: (chunk: string) => void): void {
+      pty.onData(listener);
+    },
+    onExit(listener: (exitCode: number) => void): void {
+      pty.onExit(({ exitCode }) => listener(exitCode));
+    },
+    write(data: string): void {
+      try {
+        pty.write(data);
+      } catch {
+        // The descriptor is closed; the bytes have nowhere to go and the
+        // viewer's socket must not be torn down over it.
+      }
+    },
+    resize(cols: number, rows: number): void {
+      try {
+        pty.resize(cols, rows);
+      } catch {
+        // Raised as `ioctl(2) failed, EBADF` when a viewer left open past a
+        // kill reflows its terminal.
+      }
+    },
+    dispose(): void {
+      try {
+        pty.kill();
+      } catch {
+        // The pty is already gone; detaching a dead viewer is not an error.
+      }
+    },
+  };
 }
 
 /**
@@ -332,43 +419,14 @@ export class ClaudeTmuxRunner implements Runner {
    */
   async attach(sessionId: string, cols: number, rows: number): Promise<RunnerTerminal> {
     const { spawn } = await import('node-pty');
-    const pty: IPty = spawn('tmux', attachArgv(sessionId), {
-      name: TMUX_TERM,
-      cols,
-      rows,
-      env: { ...process.env, TERM: TMUX_TERM },
-    });
-    return {
-      onData(listener: (chunk: string) => void): void {
-        pty.onData(listener);
-      },
-      onExit(listener: (exitCode: number) => void): void {
-        pty.onExit(({ exitCode }) => listener(exitCode));
-      },
-      write(data: string): void {
-        try {
-          pty.write(data);
-        } catch {
-          // The pty's descriptor is closed as soon as its tmux client exits,
-          // and node-pty throws on the next call rather than reporting it.
-        }
-      },
-      resize(nextCols: number, nextRows: number): void {
-        try {
-          pty.resize(nextCols, nextRows);
-        } catch {
-          // Same closed descriptor as write, raised as `ioctl(2) failed,
-          // EBADF` when a viewer left open past a kill reflows its terminal.
-        }
-      },
-      dispose(): void {
-        try {
-          pty.kill();
-        } catch {
-          // The pty is already gone; detaching a dead viewer is not an error.
-        }
-      },
-    };
+    return wrapPty(
+      spawn('tmux', attachArgv(sessionId), {
+        name: TMUX_TERM,
+        cols,
+        rows,
+        env: { ...process.env, TERM: TMUX_TERM },
+      }),
+    );
   }
 
   /**

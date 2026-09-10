@@ -366,8 +366,6 @@ export interface BoardColumn {
 export interface BoardView {
   /** Id of the workspace this board is the view of. */
   workspaceId: string;
-  /** Name of the workspace, repeated here so a board needs no config lookup. */
-  name: string;
   /** Playbooks offered on this board's cards. */
   playbooks: PlaybookSummary[];
   /** The five lanes, in display order. */
@@ -452,10 +450,8 @@ export interface RemoveWorktreeRequest {
  * Response of `POST /api/sessions/:id/remove-worktree`.
  */
 export interface RemoveWorktreeResponse {
-  /** Path that was removed. */
+  /** Path that was removed; a refusal comes back as an `ErrorResponse` instead. */
   path: string;
-  /** Always true; a refusal comes back as an `ErrorResponse` instead. */
-  removed: true;
 }
 
 /**

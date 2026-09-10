@@ -1113,7 +1113,7 @@ export class SessionManager {
       }
       await this.store.clearWorktree(record.repoId, record.issueKey);
       this.scheduleRepoBoards(record.repoId);
-      return { path, removed: true };
+      return { path };
     });
   }
 

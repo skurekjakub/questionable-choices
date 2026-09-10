@@ -260,7 +260,6 @@ export function project(input: ProjectionInput): BoardView {
 
   return {
     workspaceId: input.workspaceId,
-    name: input.workspace.name,
     playbooks,
     columns,
     sourceError: input.sourceError ?? null,

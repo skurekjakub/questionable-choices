@@ -316,7 +316,7 @@ describe('HTTP API', () => {
         await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', {})
       ).json()) as RemoveWorktreeResponse;
 
-      expect(removed).toEqual({ path: '/repos/worktrees/DOC-1', removed: true });
+      expect(removed).toEqual({ path: '/repos/worktrees/DOC-1' });
       expect(repo.removed).toEqual([{ issueKey: 'DOC-1', force: false }]);
     });
 

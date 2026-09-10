@@ -9,6 +9,8 @@ import {
   ResumeUnavailableError,
   resolveExecutable,
   readOwnerStatuslineCommand,
+  wrapPty,
+  type PtyLike,
 } from '../../src/connectors/runners/claude-tmux/index.js';
 import {
   TMUX_HEIGHT,
@@ -339,5 +341,83 @@ describe('ClaudeTmuxRunner.sessionDir', () => {
 
     expect(dir).toBe(join(dataDir, 'elsewhere', 'qc-DOC-1-implement'));
     expect(await readFile(join(dir, 'run.sh'), 'utf8')).toContain(dir);
+  });
+});
+
+describe('wrapPty', () => {
+  /**
+   * Builds a pty stand-in whose calls can be made to throw.
+   *
+   * @param throwing - Which calls raise `EBADF` instead of running.
+   * @returns The pty and the calls it recorded.
+   */
+  function fakePty(throwing: Set<'write' | 'resize' | 'kill'> = new Set()): {
+    pty: PtyLike;
+    calls: string[];
+    emitData: (chunk: string) => void;
+    emitExit: (exitCode: number) => void;
+  } {
+    const calls: string[] = [];
+    let onData = (_chunk: string): void => undefined;
+    let onExit = (_event: { exitCode: number }): void => undefined;
+    const raise = (name: 'write' | 'resize' | 'kill'): void => {
+      calls.push(name);
+      if (throwing.has(name)) throw new Error(`ioctl(2) failed, EBADF (${name})`);
+    };
+    return {
+      pty: {
+        onData: (listener) => (onData = listener),
+        onExit: (listener) => (onExit = listener),
+        write: () => raise('write'),
+        resize: () => raise('resize'),
+        kill: () => raise('kill'),
+      },
+      calls,
+      emitData: (chunk) => onData(chunk),
+      emitExit: (exitCode) => onExit({ exitCode }),
+    };
+  }
+
+  it('pipes output through and reports the exit code alone', () => {
+    const { pty, emitData, emitExit } = fakePty();
+    const terminal = wrapPty(pty);
+    const chunks: string[] = [];
+    const exits: number[] = [];
+    terminal.onData((chunk) => chunks.push(chunk));
+    terminal.onExit((exitCode) => exits.push(exitCode));
+
+    emitData('hello');
+    emitExit(130);
+
+    expect(chunks).toEqual(['hello']);
+    expect(exits).toEqual([130]);
+  });
+
+  it.each(['write', 'resize', 'kill'] as const)(
+    'swallows the EBADF a closed descriptor raises from %s',
+    (name) => {
+      // node-pty reports a descriptor closed by its tmux client by throwing on
+      // the next call, so an unguarded one takes the viewer's socket with it.
+      const { pty, calls } = fakePty(new Set([name]));
+      const terminal = wrapPty(pty);
+
+      expect(() => {
+        terminal.write('ls\r');
+        terminal.resize(80, 24);
+        terminal.dispose();
+      }).not.toThrow();
+      expect(calls).toEqual(['write', 'resize', 'kill']);
+    },
+  );
+
+  it('passes a write, a resize and a dispose straight through when the pty is healthy', () => {
+    const { pty, calls } = fakePty();
+    const terminal = wrapPty(pty);
+
+    terminal.write('ls\r');
+    terminal.resize(100, 30);
+    terminal.dispose();
+
+    expect(calls).toEqual(['write', 'resize', 'kill']);
   });
 });
