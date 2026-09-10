@@ -1,4 +1,4 @@
-import { useId, useState, type JSX } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type JSX } from 'react';
 import { ApiError, createWorkspace, errorHeadline } from '../api.js';
 import type {
   ConfigIssue,
@@ -8,6 +8,7 @@ import type {
   WorkspaceSummary,
 } from '../../../core/api.js';
 import { useFocusTrap } from '../hooks/useFocusTrap.js';
+import { placeIssue, type WorkspaceFieldPath } from '../workspace-fields.js';
 import { CloseIcon } from './Icons.js';
 
 /**
@@ -19,60 +20,6 @@ const DEFAULT_REVIEW_STATUSES = 'Ready for review';
  * Sentinel selected in the connector picker to reveal the new-connector fields.
  */
 const NEW_CONNECTOR = '__new__';
-
-/**
- * Request paths this dialog has a field for, in the order they are rendered.
- */
-const FIELD_PATHS = [
-  'name',
-  'epic',
-  'repo',
-  'connector',
-  'newConnector.id',
-  'newConnector.site',
-  'newConnector.emailEnv',
-  'newConnector.tokenEnv',
-  'reviewStatuses',
-] as const;
-
-/**
- * One request field a validation issue can be placed against.
- */
-export type WorkspaceFieldPath = (typeof FIELD_PATHS)[number];
-
-/**
- * Whether a string is one of the fields this dialog renders.
- *
- * @param path - Candidate path.
- * @returns True when a field carries that path.
- */
-function isFieldPath(path: string): path is WorkspaceFieldPath {
-  return (FIELD_PATHS as readonly string[]).includes(path);
-}
-
-/**
- * Decides which field a validation issue belongs next to.
- *
- * The server refuses a request either against the request's own fields
- * (`connector`, `newConnector.id`) or against the configuration the request
- * would produce, whose paths are dotted locators (`workspaces.docs.epic`,
- * `connectors.jira.site`). Both are placed here.
- *
- * @param path - Path the server sent with the issue.
- * @returns The field to render it against, or null when it names none.
- */
-function placeIssue(path: string): WorkspaceFieldPath | null {
-  if (isFieldPath(path)) return path;
-  // The workspace id is derived from the name, so a clash is a name to change.
-  if (path === 'id') return 'name';
-  const last = (path.split('.').pop() ?? '').replace(/\[\d+\]$/, '');
-  if (path.startsWith('connectors.')) {
-    const mapped = `newConnector.${last}`;
-    return isFieldPath(mapped) ? mapped : 'connector';
-  }
-  if (path.startsWith('workspaces.')) return isFieldPath(last) ? last : null;
-  return null;
-}
 
 /**
  * Attributes a control carries while the server holds it at fault.
@@ -106,7 +53,9 @@ function FieldNote({ id, message }: { id: string; message: string | null }): JSX
  * creating the connector inline when the owner has none yet.
  *
  * Validation problems are placed against the field their path names; anything
- * that names no field stays in the dialog's error note.
+ * that names no field stays in the dialog's error note. Once anything has been
+ * filled in, dismissing the dialog asks for confirmation rather than throwing
+ * the form away.
  *
  * @param props - Component props.
  * @param props.repos - Repos configured in the file, which the UI cannot add to.
@@ -138,8 +87,44 @@ export function AddWorkspaceDialog({
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<ConfigIssue[]>([]);
   const [saving, setSaving] = useState(false);
-  const dialog = useFocusTrap<HTMLDivElement>(onClose);
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const prefix = useId();
+  const keepEditing = useRef<HTMLButtonElement>(null);
+
+  const defaultRepo = repos[0]?.id ?? '';
+  const defaultConnector = connectors[0]?.id ?? NEW_CONNECTOR;
+  const dirty =
+    name !== '' ||
+    epic !== '' ||
+    connectorId !== '' ||
+    site !== '' ||
+    emailEnv !== '' ||
+    tokenEnv !== '' ||
+    reviewStatuses !== DEFAULT_REVIEW_STATUSES ||
+    repo !== defaultRepo ||
+    connector !== defaultConnector;
+
+  // Escape, the backdrop and Close all route here, so a stray click cannot take
+  // eight filled fields with it; while the confirmation is up they mean "keep
+  // editing" rather than repeating a question already asked.
+  const requestClose = useCallback(() => {
+    if (confirmingDiscard) {
+      setConfirmingDiscard(false);
+      return;
+    }
+    if (dirty) {
+      setConfirmingDiscard(true);
+      return;
+    }
+    onClose();
+  }, [confirmingDiscard, dirty, onClose]);
+  const dialog = useFocusTrap<HTMLDivElement>(requestClose);
+
+  // The confirmation is announced from a live region; without moving focus a
+  // keyboard user hears it with no way to reach the two buttons it offers.
+  useEffect(() => {
+    if (confirmingDiscard) keepEditing.current?.focus();
+  }, [confirmingDiscard]);
 
   const creatingConnector = connector === NEW_CONNECTOR;
   const complete =
@@ -195,7 +180,7 @@ export function AddWorkspaceDialog({
   };
 
   return (
-    <div className="scrim dialog-scrim" onMouseDown={onClose}>
+    <div className="scrim dialog-scrim" onMouseDown={requestClose}>
       <div
         className="dialog"
         role="dialog"
@@ -209,7 +194,12 @@ export function AddWorkspaceDialog({
           <div className="path-row">
             <h2>Add a workspace</h2>
             <span className="header-spacer" />
-            <button type="button" className="btn btn-icon" aria-label="Close" onClick={onClose}>
+            <button
+              type="button"
+              className="btn btn-icon"
+              aria-label="Close"
+              onClick={requestClose}
+            >
               <CloseIcon />
             </button>
           </div>
@@ -344,10 +334,31 @@ export function AddWorkspaceDialog({
         </div>
 
         <div className="dialog-foot">
+          {confirmingDiscard ? (
+            <p className="discard-note" role="alert">
+              The form has been filled in. Closing discards it.
+            </p>
+          ) : null}
           <span className="action-spacer" />
-          <button type="button" className="btn btn-quiet" onClick={onClose}>
-            Cancel
-          </button>
+          {confirmingDiscard ? (
+            <>
+              <button
+                type="button"
+                className="btn btn-quiet"
+                ref={keepEditing}
+                onClick={() => setConfirmingDiscard(false)}
+              >
+                Keep editing
+              </button>
+              <button type="button" className="btn btn-danger" onClick={onClose}>
+                Discard the form
+              </button>
+            </>
+          ) : (
+            <button type="button" className="btn btn-quiet" onClick={requestClose}>
+              Cancel
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-primary"

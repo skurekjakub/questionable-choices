@@ -1,4 +1,4 @@
-import { useState, type JSX } from 'react';
+import { useEffect, useState, type JSX } from 'react';
 import type { BoardView } from '../../../core/api.js';
 import { syncedAgo } from '../format.js';
 import type { WorkspaceSummary } from '../../../core/api.js';
@@ -49,6 +49,19 @@ export function BoardHeader({
   const [permission, setPermission] = useState(() => notificationPermission());
   const needsYou = board?.needsYouCount ?? 0;
 
+  // The permission can be granted or revoked in the browser's own settings,
+  // which fires no event; re-reading it when the tab comes back is the only
+  // moment the button can be corrected without a reload.
+  useEffect(() => {
+    const sync = (): void => setPermission(notificationPermission());
+    window.addEventListener('focus', sync);
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      window.removeEventListener('focus', sync);
+      document.removeEventListener('visibilitychange', sync);
+    };
+  }, []);
+
   return (
     <header className="board-header">
       <span className="wordmark">questionable choices</span>
@@ -89,7 +102,9 @@ export function BoardHeader({
             type="button"
             className="btn btn-quiet"
             onClick={() => {
-              void requestNotificationPermission().then(setPermission);
+              void requestNotificationPermission()
+                .then(setPermission)
+                .catch(() => setPermission('denied'));
             }}
             disabled={permission === 'denied'}
             title={

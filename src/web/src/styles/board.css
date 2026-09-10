@@ -235,10 +235,13 @@
   display: block;
 }
 
+/* The panel sits on `--ink-700`, a lighter ground than the card and column
+   surfaces `--paper-faint` is held at 4.5:1 against; on this one it falls to
+   4.17:1, so the epic key and repo id take the next step up. */
 .workspace-meta {
   display: flex;
   gap: var(--sp-3);
   font-family: var(--font-mono);
   font-size: var(--fs-meta);
-  color: var(--paper-faint);
+  color: var(--paper-dim);
 }

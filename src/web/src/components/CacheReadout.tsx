@@ -1,5 +1,5 @@
 import type { JSX } from 'react';
-import { describeCache } from '../../../core/cache-clock.js';
+import { CACHE_TTL_5M_SECONDS, describeCache } from '../../../core/cache-clock.js';
 import type { SessionCache } from '../model.js';
 
 /**
@@ -22,8 +22,11 @@ export function CacheReadout({
 }): JSX.Element | null {
   const described = describeCache(cache, nowMs);
   if (described.state === 'unknown') return null;
-  const ttl = cache?.ttlSeconds ?? 0;
-  const fraction = ttl > 0 ? Math.min(1, described.secondsLeft / ttl) : 0;
+  // A payload that named no TTL still stamped a real expiry, and the countdown
+  // beside the gauge is ticking down to it; `describeCache` bands that case off
+  // the five-minute default, so the gauge has to deplete against the same one.
+  const ttl = cache !== null && cache.ttlSeconds > 0 ? cache.ttlSeconds : CACHE_TTL_5M_SECONDS;
+  const fraction = Math.min(1, described.secondsLeft / ttl);
   return (
     <span
       className="cache"

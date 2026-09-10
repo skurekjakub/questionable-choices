@@ -5,6 +5,7 @@ import { useBoard } from './hooks/useBoard.js';
 import { useConfig } from './hooks/useConfig.js';
 import { useNeedsYouSignals } from './hooks/useNeedsYou.js';
 import { useNow } from './hooks/useNow.js';
+import { useSessionOwner } from './hooks/useSessionOwner.js';
 
 /**
  * localStorage key holding the workspace the owner last looked at.
@@ -124,12 +125,15 @@ export function App(): JSX.Element {
   useNeedsYouSignals(board.board, openSession);
 
   const sessionId = sessionIdFromPath(path);
+  const resolvingOwner = useSessionOwner(sessionId, config, board.board, selectWorkspace);
+
   if (sessionId !== null) {
     return (
       <SessionView
         sessionId={sessionId}
         board={board.board}
         nowMs={nowMs}
+        resolving={resolvingOwner}
         onBack={() => navigate('/')}
       />
     );

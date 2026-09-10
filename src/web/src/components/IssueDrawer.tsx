@@ -118,7 +118,7 @@ function SessionActions({
   onAction: (action: SessionAction) => void;
   onOpen: () => void;
 }): JSX.Element {
-  const live = LIVE_STATES.includes(session.state);
+  const live = LIVE_STATES.has(session.state);
   return (
     <div className="session-block-actions">
       <button type="button" className="btn" onClick={onOpen}>
@@ -203,17 +203,23 @@ export function IssueDrawer({
 }): JSX.Element {
   const [detail, setDetail] = useState<IssueDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [forceTarget, setForceTarget] = useState<string | null>(null);
   const drawer = useFocusTrap<HTMLElement>(onClose);
 
   const load = useCallback(() => {
+    setLoadFailed(false);
     getIssue(workspaceId, card.issue.key)
       .then((next) => {
         setDetail(next);
         setError(null);
       })
-      .catch((cause: unknown) => setError(errorMessage(cause)));
+      .catch((cause: unknown) => {
+        setError(errorMessage(cause));
+        setLoadFailed(true);
+      });
   }, [workspaceId, card.issue.key]);
 
   useEffect(load, [load]);
@@ -227,6 +233,7 @@ export function IssueDrawer({
     sessionAction(sessionId, action)
       .then(() => {
         setError(null);
+        setNotice(null);
         load();
       })
       .catch((cause: unknown) => setError(errorMessage(cause)))
@@ -236,8 +243,9 @@ export function IssueDrawer({
   const runRemoveWorktree = (sessionId: string, force: boolean): void => {
     setBusy(true);
     removeWorktree(sessionId, force)
-      .then(() => {
+      .then((removed) => {
         setError(null);
+        setNotice(`Removed ${removed.path}`);
         setForceTarget(null);
         load();
       })
@@ -284,6 +292,9 @@ export function IssueDrawer({
               {error}
             </p>
           )}
+          <div role="status">
+            {notice === null ? null : <p className="empty empty-inline">{notice}</p>}
+          </div>
 
           <div className="chip-row">
             <StatusChip status={card.issue.status} category={card.issue.statusCategory} />
@@ -295,12 +306,21 @@ export function IssueDrawer({
 
           <section className="section">
             <h3>Description</h3>
-            {detail === null ? (
-              <p className="empty">Loading the description.</p>
-            ) : (
+            {detail !== null ? (
               <pre className="description">
                 {detail.issue.description ?? 'This issue has no description.'}
               </pre>
+            ) : loadFailed ? (
+              <>
+                <p className="empty empty-inline">Could not load the description.</p>
+                <div className="session-block-actions">
+                  <button type="button" className="btn" onClick={load}>
+                    Try again
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p className="empty">Loading the description.</p>
             )}
           </section>
 

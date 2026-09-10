@@ -1,0 +1,52 @@
+/**
+ * Request paths the add-workspace dialog has a field for, in the order they are
+ * rendered.
+ */
+const FIELD_PATHS = [
+  'name',
+  'epic',
+  'repo',
+  'connector',
+  'newConnector.id',
+  'newConnector.site',
+  'newConnector.emailEnv',
+  'newConnector.tokenEnv',
+  'reviewStatuses',
+] as const;
+
+/**
+ * One request field a validation issue can be placed against.
+ */
+export type WorkspaceFieldPath = (typeof FIELD_PATHS)[number];
+
+/**
+ * Whether a string is one of the fields the add-workspace dialog renders.
+ *
+ * @param path - Candidate path.
+ * @returns True when a field carries that path.
+ */
+function isFieldPath(path: string): path is WorkspaceFieldPath {
+  return (FIELD_PATHS as readonly string[]).includes(path);
+}
+
+/**
+ * Decides which field of the add-workspace dialog a validation issue belongs
+ * next to.
+ *
+ * `POST /api/workspaces` reports every issue against the request that produced
+ * it, so the paths are the request's own field names — `epic`,
+ * `newConnector.site` — plus `id` for a workspace id derived from the name, and
+ * an index on a list field, as in `reviewStatuses[0]`.
+ *
+ * @param path - Path the server sent with the issue.
+ * @returns The field to render it against, or null when it names none.
+ */
+export function placeIssue(path: string): WorkspaceFieldPath | null {
+  // One bad entry faults the whole list: the dialog edits the statuses as one
+  // comma-separated string and has nowhere to put an index.
+  const field = path.replace(/\[\d+\]$/, '');
+  if (isFieldPath(field)) return field;
+  // The workspace id is derived from the name, so a clash is a name to change.
+  if (field === 'id') return 'name';
+  return null;
+}

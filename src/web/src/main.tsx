@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
+import { ErrorBoundary } from './components/ErrorBoundary.js';
 import './styles/tokens.css';
 import './styles/base.css';
 import './styles/board.css';
@@ -22,7 +23,9 @@ async function boot(): Promise<void> {
   if (host === null) throw new Error('index.html is missing its #root element');
   createRoot(host).render(
     <StrictMode>
-      <App />
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
     </StrictMode>,
   );
 }

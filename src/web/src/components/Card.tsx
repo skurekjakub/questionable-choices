@@ -43,8 +43,8 @@ function railTone(card: CardModel): LampTone | null {
  * while it is blocked on the owner — what it is waiting for, so a full
  * needs-you column can be triaged without opening every card.
  *
- * A board frame carries no assistant snippet, so a session waiting without a
- * pending summary (an idle one, usually) shows no second line.
+ * A session blocked on the owner without a pending summary — an idle one — has
+ * nothing specific to wait for, and shows no second line.
  *
  * @param props - Component props.
  * @param props.session - Session to render.

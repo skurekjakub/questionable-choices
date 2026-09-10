@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type JSX } from 'react';
+import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import type { Card, PlaybookSummary, PublicRunnerConfig } from '../../../core/api.js';
 import { createSession, errorMessage, getPrefill } from '../api.js';
 import { useFocusTrap } from '../hooks/useFocusTrap.js';
@@ -15,11 +15,32 @@ const ISOLATION_NOTE: Readonly<Record<PlaybookSummary['isolation'], string>> = {
 };
 
 /**
+ * What the owner asked for that would throw an edited prompt away.
+ */
+type DiscardIntent =
+  | { /** Dismissing the dialog. */ kind: 'close' }
+  | {
+      /** Loading another playbook's prefill over the edit. */
+      kind: 'playbook';
+      /** Playbook the owner picked. */
+      playbookId: string;
+    };
+
+/**
+ * Sentence explaining what the pending action would discard.
+ */
+const DISCARD_NOTE: Readonly<Record<DiscardIntent['kind'], string>> = {
+  close: 'The prompt has been edited. Closing discards it.',
+  playbook: 'The prompt has been edited. Switching playbook discards it.',
+};
+
+/**
  * Collects everything a start needs: which playbook, what prompt, and which
  * runner settings, prefilled from the server and editable before sending.
  *
- * Once the prompt differs from the prefill, dismissing the dialog asks for
- * confirmation instead of throwing the edit away.
+ * Once the prompt differs from the prefill, everything that would replace it —
+ * dismissing the dialog, and picking another playbook — asks for confirmation
+ * instead of throwing the edit away.
  *
  * @param props - Component props.
  * @param props.card - Card the start was triggered from.
@@ -51,7 +72,7 @@ export function StartDialog({
   const [playbookId, setPlaybookId] = useState(initialPlaybookId);
   const [prompt, setPrompt] = useState('');
   const [prefilled, setPrefilled] = useState('');
-  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  const [discardIntent, setDiscardIntent] = useState<DiscardIntent | null>(null);
   const [model, setModel] = useState(runner.defaults.model);
   const [effort, setEffort] = useState<Effort>(runner.defaults.effort);
   const [permissionMode, setPermissionMode] = useState<PermissionModeSetting>(
@@ -70,7 +91,7 @@ export function StartDialog({
         if (!live) return;
         setPrompt(prefill.prompt);
         setPrefilled(prefill.prompt);
-        setConfirmingDiscard(false);
+        setDiscardIntent(null);
         setModel(prefill.model);
         setEffort(prefill.effort);
         setPermissionMode(prefill.permissionMode);
@@ -89,14 +110,48 @@ export function StartDialog({
   }, [workspaceId, card.issue.key, playbookId]);
 
   const edited = prompt !== prefilled;
+  const confirming = discardIntent !== null;
+
+  // Escape and the backdrop both route here, so while the confirmation is up
+  // they mean "keep editing" rather than repeating a question already asked.
   const requestClose = useCallback(() => {
+    if (confirming) {
+      setDiscardIntent(null);
+      return;
+    }
     if (edited) {
-      setConfirmingDiscard(true);
+      setDiscardIntent({ kind: 'close' });
       return;
     }
     onClose();
-  }, [edited, onClose]);
+  }, [confirming, edited, onClose]);
   const dialog = useFocusTrap<HTMLDivElement>(requestClose);
+  const keepEditing = useRef<HTMLButtonElement>(null);
+
+  // The confirmation is announced from a live region; without moving focus a
+  // keyboard user hears it with no way to reach the two buttons it offers.
+  useEffect(() => {
+    if (confirming) keepEditing.current?.focus();
+  }, [confirming]);
+
+  const selectPlaybook = (next: string): void => {
+    if (next === playbookId) return;
+    if (edited) {
+      setDiscardIntent({ kind: 'playbook', playbookId: next });
+      return;
+    }
+    setPlaybookId(next);
+  };
+
+  const discard = (): void => {
+    if (discardIntent === null) return;
+    if (discardIntent.kind === 'close') {
+      onClose();
+      return;
+    }
+    setDiscardIntent(null);
+    setPlaybookId(discardIntent.playbookId);
+  };
 
   const selected = playbooks.find((playbook) => playbook.id === playbookId) ?? null;
 
@@ -146,7 +201,7 @@ export function StartDialog({
         <div className="dialog-body">
           <label className="field">
             <span>Playbook</span>
-            <select value={playbookId} onChange={(event) => setPlaybookId(event.target.value)}>
+            <select value={playbookId} onChange={(event) => selectPlaybook(event.target.value)}>
               {playbooks.map((playbook) => (
                 <option key={playbook.id} value={playbook.id}>
                   {playbook.label}
@@ -222,22 +277,23 @@ export function StartDialog({
         </div>
 
         <div className="dialog-foot">
-          {confirmingDiscard ? (
+          {discardIntent === null ? null : (
             <p className="discard-note" role="alert">
-              The prompt has been edited. Closing discards it.
+              {DISCARD_NOTE[discardIntent.kind]}
             </p>
-          ) : null}
+          )}
           <span className="action-spacer" />
-          {confirmingDiscard ? (
+          {discardIntent !== null ? (
             <>
               <button
                 type="button"
                 className="btn btn-quiet"
-                onClick={() => setConfirmingDiscard(false)}
+                ref={keepEditing}
+                onClick={() => setDiscardIntent(null)}
               >
                 Keep editing
               </button>
-              <button type="button" className="btn btn-danger" onClick={onClose}>
+              <button type="button" className="btn btn-danger" onClick={discard}>
                 Discard the prompt
               </button>
             </>
