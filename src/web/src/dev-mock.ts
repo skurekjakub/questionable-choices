@@ -3,6 +3,7 @@ import type {
   BoardView,
   Card,
   CardSession,
+  ChecklistResponse,
   ConfigIssue,
   ConnectorSummary,
   ErrorResponse,
@@ -582,6 +583,27 @@ const workspaces: WorkspaceSummary[] = [
 const repos: RepoSummary[] = [{ id: 'docs-workspace', path: REPO_PATH }];
 
 /**
+ * Checklist templates the mock's workspaces offer, keyed by workspace id. A
+ * workspace missing from here offers no checklist, which is the other half of
+ * the drawer's behaviour.
+ */
+const checklistTemplates: Record<string, string[]> = {
+  'docs-nextjs': [
+    'Read the issue live, not from the card',
+    'npm run verify is green in the worktree',
+    '"How to test" comment is on the issue',
+  ],
+};
+
+/**
+ * Ticked checklist items, keyed `<workspaceId>/<issueKey>` and then by the
+ * item's own text, exactly as the store keys them.
+ */
+const checklistTicks: Record<string, Record<string, true>> = {
+  'docs-nextjs/DOC-3860': { 'Read the issue live, not from the card': true },
+};
+
+/**
  * The mock's mutable connector list.
  */
 const connectors: ConnectorSummary[] = [{ id: 'kentico-jira', site: 'kentico.atlassian.net' }];
@@ -957,6 +979,60 @@ function removeWorktree(sessionId: string, force: boolean): { status: number; bo
 }
 
 /**
+ * Projects one issue's ticks onto its workspace's checklist template.
+ *
+ * @param workspaceId - Workspace the issue belongs to.
+ * @param issueKey - Key of the issue.
+ * @returns The checklist; no items when the workspace offers no template.
+ */
+function checklistOf(workspaceId: string, issueKey: string): ChecklistResponse {
+  const template = checklistTemplates[workspaceId] ?? [];
+  const ticks = checklistTicks[`${workspaceId}/${issueKey}`] ?? {};
+  return { items: template.map((label) => ({ label, done: ticks[label] === true })) };
+}
+
+/**
+ * Ticks or unticks one checklist item, refusing the way the server does.
+ *
+ * @param workspaceId - Workspace the issue belongs to.
+ * @param issueKey - Key of the issue.
+ * @param body - Parsed request body.
+ * @returns The response body and status.
+ */
+function setChecklist(
+  workspaceId: string,
+  issueKey: string,
+  body: Record<string, unknown>,
+): { status: number; body: unknown } {
+  const label = body['label'];
+  const done = body['done'];
+  const issues: ConfigIssue[] = [];
+  if (typeof label !== 'string' || label === '') {
+    issues.push({ path: 'label', message: 'label must be a non-empty string' });
+  }
+  if (typeof done !== 'boolean') {
+    issues.push({ path: 'done', message: 'done must be a boolean' });
+  }
+  const template = checklistTemplates[workspaceId] ?? [];
+  if (issues.length === 0 && !template.includes(label as string)) {
+    issues.push({
+      path: 'label',
+      message: `'${String(label)}' is not on the checklist of workspace '${workspaceId}'`,
+    });
+  }
+  if (issues.length > 0) {
+    const refusal: ErrorResponse = { error: 'Invalid checklist request', issues };
+    return { status: 400, body: refusal };
+  }
+  const key = `${workspaceId}/${issueKey}`;
+  const ticks = { ...(checklistTicks[key] ?? {}) };
+  if (done === true) ticks[label as string] = true;
+  else delete ticks[label as string];
+  checklistTicks[key] = ticks;
+  return { status: 200, body: checklistOf(workspaceId, issueKey) };
+}
+
+/**
  * Answers a mock REST request.
  *
  * @param path - Path of the request, without the origin.
@@ -1080,6 +1156,14 @@ function route(
               : ['Jira was unreachable at the last poll, so the issue text may be stale.'],
         };
         return { status: 200, body: prefill };
+      }
+
+      if (parts[5] === 'checklist' && method === 'GET') {
+        return { status: 200, body: checklistOf(workspaceId, key) };
+      }
+
+      if (parts[5] === 'checklist' && method === 'PUT') {
+        return setChecklist(workspaceId, key, body ?? {});
       }
 
       if (parts[5] === 'flags' && method === 'POST') {

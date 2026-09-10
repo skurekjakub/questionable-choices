@@ -69,6 +69,45 @@
   overflow-wrap: anywhere;
 }
 
+.checklist {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.error-note + .checklist {
+  margin-top: var(--sp-2);
+}
+
+.checklist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  cursor: pointer;
+}
+
+.checklist-item input {
+  flex: none;
+  margin: 0;
+  /* The box is taller than the text's cap height, so without the nudge it sits
+     above the first line of a wrapped item rather than on it. */
+  margin-top: 2px;
+  accent-color: var(--lamp-moss);
+}
+
+.checklist-text {
+  font-size: var(--fs-control);
+  line-height: 1.45;
+  color: var(--paper);
+}
+
+.checklist-done {
+  color: var(--paper-faint);
+}
+
 .path-row {
   display: flex;
   align-items: center;

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { IssueDetailResponse } from '../../src/core/api.js';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChecklistResponse, IssueDetailResponse } from '../../src/core/api.js';
+import { ApiError } from '../../src/web/src/api.js';
 import { drawerSessions, IssueDrawer } from '../../src/web/src/components/IssueDrawer.js';
 import { DROPPED_SENTENCE } from '../../src/web/src/model.js';
 import { card, cardSession, FIXTURE_NOW } from './fixtures.js';
@@ -9,9 +10,11 @@ import { card, cardSession, FIXTURE_NOW } from './fixtures.js';
 vi.mock('../../src/web/src/api.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/web/src/api.js')>()),
   getIssue: vi.fn(),
+  getChecklist: vi.fn(),
+  setChecklistItem: vi.fn(),
 }));
 
-const { getIssue } = await import('../../src/web/src/api.js');
+const { getChecklist, getIssue, setChecklistItem } = await import('../../src/web/src/api.js');
 
 /**
  * Builds the detail response for one card's sessions, as the drawer loads it.
@@ -78,6 +81,12 @@ function record(
     ...overrides,
   };
 }
+
+beforeEach(() => {
+  // Every drawer render loads the checklist, so a suite that never arranges one
+  // still needs an answer rather than an unmocked call.
+  vi.mocked(getChecklist).mockResolvedValue({ items: [] });
+});
 
 afterEach(() => {
   cleanup();
@@ -285,5 +294,126 @@ describe('IssueDrawer', () => {
       />,
     );
     await waitFor(() => expect(screen.getByText(DROPPED_SENTENCE)).toBeTruthy());
+  });
+});
+
+describe('the drawer’s checklist', () => {
+  const TEMPLATE: ChecklistResponse = {
+    items: [
+      { label: 'Read the issue live', done: false },
+      { label: 'npm run verify is green', done: true },
+    ],
+  };
+
+  /**
+   * Renders the drawer over one card with the checklist mocks already arranged.
+   *
+   * @returns Nothing, once the description has loaded.
+   */
+  const open = async (): Promise<void> => {
+    vi.mocked(getIssue).mockResolvedValue(detail('DOC-1', [record('qc-DOC-1-implement')]));
+    render(
+      <IssueDrawer
+        card={card('DOC-1', [cardSession('qc-DOC-1-implement')])}
+        workspaceId="docs"
+        playbooks={[]}
+        nowMs={Date.parse(FIXTURE_NOW)}
+        dropped={false}
+        onClose={() => {}}
+        onOpenSession={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText('DOC-1 description')).toBeTruthy());
+  };
+
+  /**
+   * Reads one checklist box by the item text beside it.
+   *
+   * @param label - Item text.
+   * @returns The checkbox.
+   */
+  const box = (label: string): HTMLInputElement =>
+    screen.getByRole('checkbox', { name: label }) as HTMLInputElement;
+
+  it('renders one box per item, ticked as the loaded response says', async () => {
+    vi.mocked(getChecklist).mockResolvedValue(TEMPLATE);
+    await open();
+
+    await waitFor(() => expect(box('Read the issue live').checked).toBe(false));
+    expect(box('npm run verify is green').checked).toBe(true);
+    expect(screen.getByRole('heading', { name: 'Checklist' })).toBeTruthy();
+  });
+
+  it('leaves the section out for a workspace whose response has no items', async () => {
+    vi.mocked(getChecklist).mockResolvedValue({ items: [] });
+    await open();
+
+    expect(screen.queryByRole('heading', { name: 'Checklist' })).toBeNull();
+    expect(screen.queryAllByRole('checkbox')).toEqual([]);
+  });
+
+  it('leaves the section out when the checklist cannot be loaded', async () => {
+    vi.mocked(getChecklist).mockRejectedValue(new Error('nope'));
+    await open();
+
+    expect(screen.queryByRole('heading', { name: 'Checklist' })).toBeNull();
+  });
+
+  it('ticks the box before the server answers, and keeps it when the PUT lands', async () => {
+    vi.mocked(getChecklist).mockResolvedValue(TEMPLATE);
+    let release: ((value: ChecklistResponse) => void) | null = null;
+    vi.mocked(setChecklistItem).mockImplementation(
+      () =>
+        new Promise<ChecklistResponse>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await open();
+    await waitFor(() => expect(box('Read the issue live')).toBeTruthy());
+
+    fireEvent.click(box('Read the issue live'));
+
+    // The tick is on screen while the request is still in flight, and every box
+    // is out of reach until it answers.
+    expect(box('Read the issue live').checked).toBe(true);
+    expect(box('npm run verify is green').disabled).toBe(true);
+    expect(vi.mocked(setChecklistItem).mock.calls[0]).toEqual([
+      'docs',
+      'DOC-1',
+      { label: 'Read the issue live', done: true },
+    ]);
+
+    await act(async () => {
+      release?.({
+        items: [
+          { label: 'Read the issue live', done: true },
+          { label: 'npm run verify is green', done: true },
+        ],
+      });
+    });
+    expect(box('Read the issue live').checked).toBe(true);
+    expect(box('Read the issue live').disabled).toBe(false);
+  });
+
+  it('puts the box back and says why when the PUT fails', async () => {
+    vi.mocked(getChecklist).mockResolvedValue(TEMPLATE);
+    vi.mocked(setChecklistItem).mockRejectedValue(
+      new ApiError(400, "'Read the issue live' is not on the checklist", null),
+    );
+    await open();
+    await waitFor(() => expect(box('Read the issue live')).toBeTruthy());
+
+    fireEvent.click(box('Read the issue live'));
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain(
+        "'Read the issue live' is not on the checklist",
+      ),
+    );
+    expect(box('Read the issue live').checked).toBe(false);
+    // The other item's tick came from the load, not from this toggle: a revert
+    // that replays a stale list would take it with it.
+    expect(box('npm run verify is green').checked).toBe(true);
+    expect(box('Read the issue live').disabled).toBe(false);
   });
 });
