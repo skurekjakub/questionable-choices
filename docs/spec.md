@@ -144,6 +144,11 @@ workspaces{id}             what the header dropdown switches between
   connector                connector id
   repo                     repo id
   reviewStatuses[]         Jira status names that land in the Review column; default ['Ready for review']
+  checklist[]              template of the private per-issue checklist (§12, §13); default []. Items
+                           are non-empty strings and a duplicate is refused at its own index, because
+                           a tick is stored under the item's own text: two items spelled the same
+                           would share one tick. Reordering the template therefore keeps every tick;
+                           rewording an item drops the tick that belonged to the old wording
   pollSeconds              default 120
 repos{id}
   path                     absolute path of the main checkout
@@ -718,6 +723,17 @@ GET  /api/workspaces/:id/issues/:key   → IssueDetail { issue (with description
 GET  /api/workspaces/:id/issues/:key/prefill?playbook=  → { prompt, model, effort, permissionMode, isolation, warnings[] }; `playbook` is required, 400 without it
 POST /api/workspaces/:id/issues/:key/sessions           { playbookId, prompt, model, effort, permissionMode } → 201 SessionRecord
 POST /api/workspaces/:id/issues/:key/flags              { review?: boolean, done?: boolean } → IssueFlags
+GET  /api/workspaces/:id/issues/:key/checklist          → ChecklistResponse { items: [{label, done}] };
+                                                         empty `items` when the workspace names no
+                                                         checklist; 404 for an unknown workspace
+PUT  /api/workspaces/:id/issues/:key/checklist          { label, done } → ChecklistResponse; 400 with an
+                                                         `issues` entry when the body is malformed or
+                                                         `label` is not on the workspace's template.
+                                                         Both routes answer the whole checklist, so a
+                                                         viewer never merges a partial answer into what
+                                                         it holds. Nothing about it reaches the board
+                                                         frame or `CardSession`: the checklist is the
+                                                         drawer's, and the board stays as cheap as it is
 POST /api/workspaces/:id/issues/:key/open-editor        → 204, or 409 when the issue has no worktree
 POST /api/sessions/:id/resume | interrupt | kill | mark-done | unmark-done | archive
 POST /api/sessions/:id/remove-worktree { force?: boolean } → { path }
@@ -815,10 +831,19 @@ Board:
   VS Code" icon button whenever the issue has a worktree; overflow menu with
   the other playbooks, Send to review / Clear review, Mark done / Unmark
   done, Open in Jira.
-- Clicking the card body opens the issue drawer: description, all sessions
-  with actions, worktree path, Open in VS Code, tmux attach command (copy
-  button), Remove worktree and Archive. The may-need-you marker is the card
-  row's and the session header's; the drawer does not render it.
+- Clicking the card body opens the issue drawer: description, the private
+  checklist, all sessions with actions, worktree path, Open in VS Code, tmux
+  attach command (copy button), Remove worktree and Archive. The may-need-you
+  marker is the card row's and the session header's; the drawer does not
+  render it.
+- Checklist section, between Description and Checkout, rendered only when the
+  loaded response has at least one item — so a workspace that names no template
+  gets the drawer it had, and so does a checklist that could not be loaded.
+  Native checkboxes with their labels, loaded on open through the same
+  generation token as the description. A tick is applied optimistically and the
+  boxes are out of reach until the `PUT` answers; a refusal puts the whole list
+  back and shows the server's wording in the drawer's error note. Nothing is
+  ever written to the tracker: the checklist is the owner's own, per issue key.
 - Add workspace dialog (from the switcher): name, epic key, repo (select
   from config), connector (select from config, or "new" revealing id, site,
   email env var, token env var), review statuses (comma-separated, default
@@ -862,6 +887,11 @@ session (which by definition has none), `CardSession.lastAssistantMessage`.
 ```
 sessions.json           SessionRecord[] (write-through, atomic rename)
 flags.json              { [workspaceId]: { [issueKey]: { review?, done? } } }
+checklists.json         { "<workspaceId>/<issueKey>": { "<item text>": true } }
+                        only ticks: an item set back to false is removed rather than stored,
+                        and a tick whose item the template no longer names is dropped when
+                        read and left in the document, so an item pulled out of a template
+                        and put back keeps what was ticked against it
 worktrees.json          { [repoId]: { [issueKey]: { path, branch } } }
                         worktrees only; a `shared` session's main checkout is not one
 sessions/<id>/          prompt.txt settings.json statusline.sh run.sh events.jsonl
@@ -878,7 +908,8 @@ a file:
   one session that reads a few hundred large files writes a log no reader can
   hold. `GET /api/sessions/:id/events` therefore serves an edited transcript.
 - **A document the store cannot use is set aside, never silently replaced.**
-  `sessions.json`, `flags.json` and `worktrees.json` are checked on load; one
+  `sessions.json`, `flags.json`, `checklists.json` and `worktrees.json` are
+  checked on load; one
   that is unparseable or the wrong shape is renamed to `<name>.rejected`,
   reported, and treated as empty, because the next write renames a fresh
   document over that path. A **missing** document is simply empty and nothing
