@@ -17,13 +17,3 @@ export function createRunner(options: CreateRunnerOptions): Runner {
   if (options.config.type === 'claude-tmux') return new ClaudeTmuxRunner(options);
   throw new Error(`unknown runner type '${(options.config as { type: string }).type}'`);
 }
-
-export {
-  ClaudeTmuxRunner,
-  MissingExecutableError,
-  ResumeUnavailableError,
-  TmuxError,
-  readOwnerStatuslineCommand,
-  resolveExecutable,
-} from './claude-tmux/index.js';
-export type { ClaudeTmuxRunnerOptions } from './claude-tmux/index.js';

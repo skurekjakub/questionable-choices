@@ -333,7 +333,10 @@ export function buildRunScript(context: RunScriptContext): string {
       '',
       `qc_bootstrap_log=${shellQuote(`${context.dir}/${BOOTSTRAP_LOG_FILE}`)}`,
       // Piped through tee, not redirected: the owner watching the tmux window
-      // must still see the bootstrap run, and the dashboard needs a copy.
+      // must still see the bootstrap run, and the dashboard needs a copy. The
+      // cost is that the bootstrap's stdout is a pipe rather than the tmux tty,
+      // so anything that probes `isatty(1)` — progress bars, colour, a
+      // credential prompt, a pager — behaves as it would under a redirect.
       `{ ${context.bootstrap}; } 2>&1 | tee "$qc_bootstrap_log"`,
       'status=${PIPESTATUS[0]}',
       'if [ "$status" -ne 0 ]; then',
@@ -341,6 +344,10 @@ export function buildRunScript(context: RunScriptContext): string {
       '  post bootstrap-failed "{\\"exitCode\\":$status,\\"message\\":\\"$qc_message\\"}"',
       '  exec bash',
       'fi',
+      // Nothing prunes <dataDir>/sessions/, so a bootstrap that worked would
+      // otherwise leave a full transcript of it there for the life of the data
+      // directory. Only a failure has anything to say.
+      'rm -f "$qc_bootstrap_log"',
     );
   }
 

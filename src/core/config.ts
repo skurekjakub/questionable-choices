@@ -180,12 +180,23 @@ function idRuleMessage(label: string): string {
 }
 
 /**
- * The message zod produces for a record key its own schema rejects.
+ * Restores the id rule's own message on a record key zod rejected.
  *
- * A key is validated as a key, not as a value, so zod reports the generic
- * problem and discards the rule the key schema carries.
+ * A key is validated as a key, not as a value, so zod discards the rule the key
+ * schema carries and reports a generic problem. The case is recognised by the
+ * issue's `code`, never by its message text: a message a library rewords in a
+ * patch release turns a repair keyed on it into a silent no-op.
+ *
+ * @param issue - One issue from a failed parse.
+ * @returns The id rule for a rejected id key, or null for anything else.
  */
-const RECORD_KEY_MESSAGE = 'Invalid key in record';
+function recordKeyMessage(issue: { code: string; path: readonly PropertyKey[] }): string | null {
+  if (issue.code !== 'invalid_key' || issue.path.length !== 2) return null;
+  if (issue.path[0] === 'workspaces') return idRuleMessage('workspace id');
+  if (issue.path[0] === 'connectors') return idRuleMessage('connector id');
+  if (issue.path[0] === 'repos') return idRuleMessage('repo id');
+  return null;
+}
 
 /**
  * Builds a string schema that expands `~` into the given home directory.
@@ -354,7 +365,7 @@ export function parseConfig(input: unknown, options: ParseConfigOptions = {}): C
   if (!result.success) {
     const issues = result.error.issues.map((issue) => ({
       path: formatPath(issue.path),
-      message: issue.message,
+      message: recordKeyMessage(issue) ?? issue.message,
     }));
     throw new ConfigError('Invalid configuration', issues);
   }
@@ -482,27 +493,13 @@ export function applyWorkspaceChange(config: Config, request: CreateWorkspaceReq
     if (!(cause instanceof ConfigError)) throw cause;
     throw new ConfigError(
       'Invalid workspace request',
-      cause.issues.map((issue) => {
-        const path = requestPathOf(issue.path, id, inline?.id);
-        return { path, message: idIssueMessage(path, issue.message) };
-      }),
+      cause.issues.map((issue) => ({
+        path: requestPathOf(issue.path, id, inline?.id),
+        message: issue.message,
+      })),
       cause.duplicate,
     );
   }
-}
-
-/**
- * Restores the id rule's own message on an id rejected as a record key.
- *
- * @param path - Request-relative locator the issue was rewritten to.
- * @param message - Message the schema produced.
- * @returns The id rule where one applies, otherwise the message unchanged.
- */
-function idIssueMessage(path: string, message: string): string {
-  if (message !== RECORD_KEY_MESSAGE) return message;
-  if (path === 'id') return idRuleMessage('workspace id');
-  if (path === 'newConnector.id') return idRuleMessage('connector id');
-  return message;
 }
 
 /**

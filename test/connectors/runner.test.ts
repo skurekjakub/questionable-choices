@@ -360,16 +360,18 @@ describe('wrapPty', () => {
     const calls: string[] = [];
     let onData = (_chunk: string): void => undefined;
     let onExit = (_event: { exitCode: number }): void => undefined;
-    const raise = (name: 'write' | 'resize' | 'kill'): void => {
-      calls.push(name);
+    const raise = (name: 'write' | 'resize' | 'kill', args: unknown[] = []): void => {
+      // The arguments, not just the name: a wrapper that dropped a payload or
+      // transposed a reflow would otherwise leave every assertion here green.
+      calls.push(args.length === 0 ? name : `${name}(${args.map(String).join(',')})`);
       if (throwing.has(name)) throw new Error(`ioctl(2) failed, EBADF (${name})`);
     };
     return {
       pty: {
         onData: (listener) => (onData = listener),
         onExit: (listener) => (onExit = listener),
-        write: () => raise('write'),
-        resize: () => raise('resize'),
+        write: (data: string) => raise('write', [JSON.stringify(data)]),
+        resize: (cols: number, rows: number) => raise('resize', [cols, rows]),
         kill: () => raise('kill'),
       },
       calls,
@@ -406,7 +408,7 @@ describe('wrapPty', () => {
         terminal.resize(80, 24);
         terminal.dispose();
       }).not.toThrow();
-      expect(calls).toEqual(['write', 'resize', 'kill']);
+      expect(calls).toEqual(['write("ls\\r")', 'resize(80,24)', 'kill']);
     },
   );
 
@@ -418,6 +420,9 @@ describe('wrapPty', () => {
     terminal.resize(100, 30);
     terminal.dispose();
 
-    expect(calls).toEqual(['write', 'resize', 'kill']);
+    // Columns before rows: node-pty takes (cols, rows) and a terminal takes
+    // (rows, cols) in half the APIs that touch it, so a transposed reflow is
+    // the mistake this pins.
+    expect(calls).toEqual(['write("ls\\r")', 'resize(100,30)', 'kill']);
   });
 });
