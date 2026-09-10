@@ -389,6 +389,9 @@ function docsCards(): Card[] {
 /**
  * Cards for the second mock workspace, so the switcher has somewhere to go.
  *
+ * One of them runs a session, so a session URL that belongs to a workspace the
+ * owner is not looking at is reachable without a second server.
+ *
  * @returns The cards.
  */
 function migrationCards(): Card[] {
@@ -404,6 +407,35 @@ function migrationCards(): Card[] {
         labels: ['migration'],
         url: 'https://kentico.atlassian.net/browse/DOC-2791',
       },
+    }),
+    card('DOC-2804', 'Rewrite the include shims as MDX components', {
+      column: 'working',
+      issue: {
+        key: 'DOC-2804',
+        summary: 'Rewrite the include shims as MDX components',
+        type: 'Task',
+        status: 'In Progress',
+        statusCategory: 'inprogress',
+        labels: ['migration'],
+        url: 'https://kentico.atlassian.net/browse/DOC-2804',
+      },
+      worktreePath: '/home/jakubs/repositories/worktrees/DOC-2804',
+      sessions: [
+        session({
+          id: 'qc-DOC-2804-implement',
+          state: 'working',
+          stateSince: ago(320),
+          // A status line that named no TTL still stamps a real expiry, which
+          // is the case the countdown and the gauge have to agree on.
+          cache: {
+            expiresAt: Math.floor(Date.now() / 1000) + 247,
+            ttlSeconds: 0,
+            warm: true,
+            source: 'statusline',
+          },
+          branch: 'DOC-2804-include-shims',
+        }),
+      ],
     }),
   ];
 }

@@ -191,7 +191,9 @@ describe('subscribeEvents', () => {
     FakeSocket.opened[0]?.deliver(configFrame(['docs']));
     const late: EventFrame[] = [];
     subscribeEvents({ onFrame: (frame) => late.push(frame) });
-    expect(late.map((frame) => (frame.type === 'board' ? frame.workspaceId : ''))).toEqual(['docs']);
+    expect(late.map((frame) => (frame.type === 'board' ? frame.workspaceId : ''))).toEqual([
+      'docs',
+    ]);
   });
 
   it('ignores a frame that is not JSON rather than tearing the socket down', async () => {
