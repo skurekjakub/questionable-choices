@@ -20,6 +20,7 @@
     "./**/*.tsx",
     "../core/api.ts",
     "../core/cache-clock.ts",
-    "../../test/web/**/*.ts"
+    "../../test/web/**/*.ts",
+    "../../test/web/**/*.tsx"
   ]
 }
