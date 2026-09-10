@@ -40,6 +40,36 @@ const TMUX_LESS_SESSION = 'qc-DOC-3858-test';
 const NO_TMUX_SERVER = 'no server running on /tmp/tmux-1000/default';
 
 /**
+ * Issue whose repo has no branch to work from, so a start on it is refused
+ * with `no-branch`.
+ */
+const NO_BRANCH_ISSUE_KEY = 'DOC-3871';
+
+/**
+ * Issue whose runner cannot find the CLI, so both a start and a resume on it
+ * are refused with `missing-executable`.
+ */
+const NO_CLI_ISSUE_KEY = 'DOC-3874';
+
+/**
+ * Session whose worktree has a detached HEAD, so removing it is refused with
+ * `detached-worktree` and forcing changes nothing.
+ */
+const DETACHED_WORKTREE_SESSION = 'qc-DOC-3833-implement';
+
+/**
+ * Session whose event log is on disk but cannot be opened, so the events route
+ * answers 409 rather than the 404 it answers for a session it does not know.
+ */
+const UNREADABLE_LOG_SESSION = 'qc-DOC-3862-test';
+
+/**
+ * Session the runner cannot resume because it cannot find the CLI, so the
+ * refusal carries `missing-executable` on a resume as well as on a start.
+ */
+const NO_CLI_RESUME_SESSION = 'qc-DOC-3841-test';
+
+/**
  * Builds an ISO timestamp a number of seconds in the past.
  *
  * @param secondsAgo - How far back the timestamp should sit.
@@ -94,6 +124,7 @@ function session(overrides: Partial<CardSession> & Pick<CardSession, 'id' | 'sta
         : null,
     lastExitCode: overrides.state === 'failed' ? 1 : null,
     staleSince: null,
+    hint: null,
     cache: null,
     done: false,
     live,
@@ -231,6 +262,10 @@ function docsCards(): Card[] {
           stateSince: ago(38),
           cache: warmCache(2840, 3600),
           branch: 'DOC-3841-verify-indexes',
+          // A `Notification` that arrived after the turn it describes: it does
+          // not move the session out of `working` and raises no desktop
+          // notification, so the card carries it as a hint and nothing else.
+          hint: 'Claude is waiting for your input',
         }),
         session({
           id: 'qc-DOC-3841-test',
@@ -296,6 +331,13 @@ function docsCards(): Card[] {
           id: 'qc-DOC-3862-implement',
           state: 'failed',
           stateSince: ago(7200),
+          branch: null,
+        }),
+        session({
+          id: UNREADABLE_LOG_SESSION,
+          playbookId: 'test',
+          state: 'failed',
+          stateSince: ago(6400),
           branch: null,
         }),
       ],
@@ -890,6 +932,13 @@ function removeWorktree(sessionId: string, force: boolean): { status: number; bo
         };
         return { status: 409, body: refusal };
       }
+      if (session.id === DETACHED_WORKTREE_SESSION) {
+        const refusal: ErrorResponse = {
+          error: `the worktree for ${card.issue.key} at ${card.worktreePath} has a detached HEAD; check a branch out there or remove it`,
+          reason: 'detached-worktree',
+        };
+        return { status: 409, body: refusal };
+      }
       if (!force) {
         const refusal: ErrorResponse = {
           error: `cannot remove ${card.worktreePath}`,
@@ -901,7 +950,7 @@ function removeWorktree(sessionId: string, force: boolean): { status: number; bo
       const path = card.worktreePath;
       card.worktreePath = null;
       broadcast({ type: 'board', workspaceId: board.workspaceId, view: board });
-      return { status: 200, body: { path, removed: true } };
+      return { status: 200, body: { path } };
     }
   }
   return { status: 404, body: { error: `No session ${sessionId}` } };
@@ -1047,6 +1096,21 @@ function route(
       }
 
       if (parts[5] === 'sessions' && method === 'POST') {
+        if (found.issue.key === NO_BRANCH_ISSUE_KEY) {
+          const refusal: ErrorResponse = {
+            error: `no branch found for ${found.issue.key}; searched origin/${found.issue.key}-*, refs/heads/${found.issue.key}-*`,
+            reason: 'no-branch',
+          };
+          return { status: 409, body: refusal };
+        }
+        if (found.issue.key === NO_CLI_ISSUE_KEY) {
+          const refusal: ErrorResponse = {
+            error: 'claude is not an executable on PATH',
+            detail: 'claude --version',
+            reason: 'missing-executable',
+          };
+          return { status: 409, body: refusal };
+        }
         const id = `qc-${found.issue.key}-${String(body?.['playbookId'] ?? 'implement')}`;
         const started = session({
           id,
@@ -1134,6 +1198,13 @@ function refuseAction(entry: CardSession, action: string): ErrorResponse | null 
   if (action === 'resume' && entry.state === 'failed') {
     return { error: `${entry.id} never reported a Claude session id, so it cannot be resumed` };
   }
+  if (action === 'resume' && entry.id === NO_CLI_RESUME_SESSION) {
+    return {
+      error: 'claude is not an executable on PATH',
+      detail: 'claude --version',
+      reason: 'missing-executable',
+    };
+  }
   if ((action === 'interrupt' || action === 'kill') && entry.id === failingActionSession) {
     return { error: `cannot ${action} ${entry.id}`, detail: NO_TMUX_SERVER };
   }
@@ -1147,13 +1218,21 @@ function refuseAction(entry: CardSession, action: string): ErrorResponse | null 
  * the only surviving record of why it failed.
  *
  * @param sessionId - Session whose log to read.
- * @returns The log, or the 404 the server answers for an unknown session.
+ * @returns The log, the 409 the server answers for a log it cannot open, or the
+ * 404 it answers for a session it does not know.
  */
 function sessionEvents(sessionId: string): { status: number; body: unknown } {
   for (const board of boards.values()) {
     for (const entry of board.columns.flatMap((column) => column.cards)) {
       const found = entry.sessions.find((candidate) => candidate.id === sessionId);
       if (found === undefined) continue;
+      if (sessionId === UNREADABLE_LOG_SESSION) {
+        const refusal: ErrorResponse = {
+          error: `cannot read the event log for ${sessionId}`,
+          detail: `EACCES: permission denied, open '/home/jakubs/.local/share/questionable-choices/events/${sessionId}.jsonl'`,
+        };
+        return { status: 409, body: refusal };
+      }
       const events: SessionEventsResponse['events'] = [
         { at: ago(9600), event: { launcher: 'bootstrap-start', body: {} }, state: 'bootstrapping' },
       ];
@@ -1222,6 +1301,7 @@ function mockRecord(workspaceId: string, issueKey: string, entry: CardSession): 
       entry.state === 'idle' ? 'Done. The duplicated parser is gone and verify is green.' : null,
     lastExitCode: entry.lastExitCode,
     staleSince: entry.staleSince,
+    hint: entry.hint === null ? null : { summary: entry.hint, at: entry.stateSince },
     // The state change is itself a lifecycle event, and it is the last one the
     // card carries any trace of.
     lastEventAt: entry.stateSince,
