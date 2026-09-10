@@ -956,7 +956,10 @@ function route(
     // A connector no remaining workspace references goes with it: nothing else
     // can remove one, so an inline connector created from the dialog would
     // otherwise be permanent.
-    if (removed !== undefined && !workspaces.some((entry) => entry.connector === removed.connector)) {
+    if (
+      removed !== undefined &&
+      !workspaces.some((entry) => entry.connector === removed.connector)
+    ) {
       const orphan = connectors.findIndex((entry) => entry.id === removed.connector);
       if (orphan >= 0) connectors.splice(orphan, 1);
     }

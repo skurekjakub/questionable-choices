@@ -72,9 +72,9 @@ describe('findSessionOwner', () => {
 
   it('keeps going past a workspace whose source is unreachable', async () => {
     const { read, asked } = reader({ archive: boardListing('archive', ['qc-DOC-7-implement']) });
-    await expect(
-      findSessionOwner('qc-DOC-7-implement', ['down', 'archive'], read),
-    ).resolves.toBe('archive');
+    await expect(findSessionOwner('qc-DOC-7-implement', ['down', 'archive'], read)).resolves.toBe(
+      'archive',
+    );
     expect(asked).toEqual(['down', 'archive']);
   });
 

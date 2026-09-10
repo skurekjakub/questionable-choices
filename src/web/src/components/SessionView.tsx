@@ -187,7 +187,9 @@ export function SessionView({
           <span className="state-pill" data-alert={needsYou}>
             <Lamp state={shown.state} />
             {ended?.label ?? STATE_LABELS[shown.state]}
-            {shown.pending === null ? null : <span className="pending">— {shown.pending.summary}</span>}
+            {shown.pending === null ? null : (
+              <span className="pending">— {shown.pending.summary}</span>
+            )}
           </span>
         )}
         {shown?.staleSince == null ? null : <StaleMarker />}
@@ -238,7 +240,9 @@ export function SessionView({
       <div className="session-main">
         <div className="terminal-pane">
           {absent ? (
-            <p className="empty">No board lists this session, so there is no terminal to attach to.</p>
+            <p className="empty">
+              No board lists this session, so there is no terminal to attach to.
+            </p>
           ) : (
             <>
               <div role="status">

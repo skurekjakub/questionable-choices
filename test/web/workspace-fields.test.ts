@@ -94,6 +94,8 @@ describe('NEW_CONNECTOR_FIELDS', () => {
       { path: 'newConnector.tokenEnv', message: 'tokenEnv must not be empty' },
       { path: 'epic', message: 'epic must be an issue key' },
     ];
-    expect(withoutFields(hidden, NEW_CONNECTOR_FIELDS).map((issue) => issue.path)).toEqual(['epic']);
+    expect(withoutFields(hidden, NEW_CONNECTOR_FIELDS).map((issue) => issue.path)).toEqual([
+      'epic',
+    ]);
   });
 });

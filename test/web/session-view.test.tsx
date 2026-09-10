@@ -130,9 +130,7 @@ describe('SessionView', () => {
       />,
     );
 
-    await waitFor(() =>
-      expect(screen.getByText(/The event log could not be read/)).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByText(/The event log could not be read/)).toBeTruthy());
     expect(screen.queryByText(/records no reason/)).toBeNull();
   });
 

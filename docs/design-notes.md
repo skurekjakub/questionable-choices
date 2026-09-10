@@ -33,7 +33,7 @@ one real gauge. Not a page of floating cards. Concretely:
   rather than left to flex: readings shrink and ellipsise, controls never do.
   On the session header that means the branch and the pending summary give
   their width up and the actions keep theirs, because on a failed session
-  *Resume* is the only control that still does anything.
+  _Resume_ is the only control that still does anything.
 - Columns are separated by 1 px hairlines, not gutters. The board reads as
   one divided surface.
 - Elevation comes from surface lightness only. Nothing is raised by a shadow:
