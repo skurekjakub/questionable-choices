@@ -94,7 +94,9 @@ async function readBody(response: Response): Promise<unknown> {
 async function request(path: string, init?: RequestInit): Promise<unknown> {
   const response = await fetch(path, {
     ...init,
-    headers: init?.body === undefined ? undefined : { 'content-type': 'application/json' },
+    ...(init?.body === undefined
+      ? {}
+      : { headers: { 'content-type': 'application/json' } as const }),
   });
   return readBody(response);
 }
@@ -110,7 +112,7 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
 async function post(path: string, body?: unknown): Promise<unknown> {
   return request(path, {
     method: 'POST',
-    body: body === undefined ? undefined : JSON.stringify(body),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
 
