@@ -1,11 +1,7 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import {
-  DetachedWorktreeError,
-  DirtyWorktreeError,
-  NoBranchError,
-} from '../connectors/repos/git/index.js';
+import { DetachedWorktreeError, DirtyWorktreeError } from '../connectors/repos/git/index.js';
 import { MissingExecutableError } from '../connectors/runners/claude-tmux/index.js';
 import type {
   BoardView,
@@ -337,7 +333,6 @@ export async function restoreGlobalModel(
  * @returns The matching `ErrorReason`, or undefined when none describes it.
  */
 export function checkoutRefusalReason(cause: unknown): ErrorReason | undefined {
-  if (cause instanceof NoBranchError) return 'no-branch';
   if (cause instanceof DetachedWorktreeError) return 'detached-worktree';
   if (cause instanceof MissingExecutableError) return 'missing-executable';
   return undefined;
@@ -996,13 +991,11 @@ export class SessionManager {
           messageOf(cause),
         );
       }
-      branch =
-        playbook.isolation === 'worktree'
-          ? branchName(runtime.repoConfig.branchPattern, issue)
-          : null;
+      const fresh = branchName(runtime.repoConfig.branchPattern, issue);
+      branch = playbook.isolation === 'worktree' ? fresh : null;
       if (playbook.isolation === 'issue-worktree') {
         warnings.push(
-          `no worktree is registered for ${issueKey}; its branch is resolved when the session starts`,
+          `no worktree is registered for ${issueKey}; its branch is resolved when the session starts, and a fresh one named ${fresh} is created from ${runtime.repoConfig.baseRef} when none is found`,
         );
       }
     }

@@ -685,6 +685,18 @@ describe('SessionManager', () => {
       ]);
     });
 
+    it('warns which fresh branch an unregistered issue-worktree start falls back to', async () => {
+      const playbook = h.config.repos['app']?.playbooks[1];
+      if (playbook === undefined) throw new Error('the fake repo has no second playbook');
+      playbook.isolation = 'issue-worktree';
+
+      const prefill = await h.manager.prefill('ws', 'DOC-1', 'test');
+
+      expect(prefill.warnings).toEqual([
+        'no worktree is registered for DOC-1; its branch is resolved when the session starts, and a fresh one named DOC-1-document-the-thing is created from origin/main when none is found',
+      ]);
+    });
+
     it('refuses to prefill an issue key that is not a usable path segment', async () => {
       h.source.extra.set('../../etc', makeIssue({ key: '../../etc' }));
       h.repo.rejectedKeys.add('../../etc');

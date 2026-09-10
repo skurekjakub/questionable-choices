@@ -41,12 +41,6 @@ const TMUX_LESS_SESSION = 'qc-DOC-3858-test';
 const NO_TMUX_SERVER = 'no server running on /tmp/tmux-1000/default';
 
 /**
- * Issue whose repo has no branch to work from, so a start on it is refused
- * with `no-branch`.
- */
-const NO_BRANCH_ISSUE_KEY = 'DOC-3871';
-
-/**
  * Issue whose runner cannot find the CLI, so both a start and a resume on it
  * are refused with `missing-executable`.
  */
@@ -1238,13 +1232,6 @@ function route(
       }
 
       if (parts[5] === 'sessions' && method === 'POST') {
-        if (found.issue.key === NO_BRANCH_ISSUE_KEY) {
-          const refusal: ErrorResponse = {
-            error: `no branch found for ${found.issue.key}; searched origin/${found.issue.key}-*, refs/heads/${found.issue.key}-*`,
-            reason: 'no-branch',
-          };
-          return { status: 409, body: refusal };
-        }
         if (found.issue.key === NO_CLI_ISSUE_KEY) {
           const refusal: ErrorResponse = {
             error: 'claude is not an executable on PATH',

@@ -22,29 +22,6 @@ import { GIT_NETWORK_TIMEOUT_MS, GitError, git, gitAttempt } from './git.js';
 import { parseWorktreeList } from './worktrees.js';
 
 /**
- * Thrown when `issue-worktree` isolation finds no branch to check out.
- */
-export class NoBranchError extends Error {
-  /** Key of the issue no branch was found for. */
-  readonly issueKey: string;
-  /** Human-readable list of the places that were searched. */
-  readonly searched: string[];
-
-  /**
-   * Builds a no-branch error naming everything that was searched.
-   *
-   * @param issueKey - Key of the issue no branch was found for.
-   * @param searched - Descriptions of the places that were searched.
-   */
-  constructor(issueKey: string, searched: string[]) {
-    super(`no branch found for ${issueKey}; searched ${searched.join(', ')}`);
-    this.name = 'NoBranchError';
-    this.issueKey = issueKey;
-    this.searched = searched;
-  }
-}
-
-/**
  * Thrown when a worktree removal is refused because the tree has changes.
  */
 export class DirtyWorktreeError extends Error {
@@ -269,7 +246,6 @@ export class GitRepo implements Repo {
    * @throws {InvalidIssueKeyError} When the issue key is not a safe segment.
    * @throws {DetachedWorktreeError} When the registered worktree has no branch.
    * @throws {GitError} When git refuses to create the worktree.
-   * @throws {NoBranchError} When `issue-worktree` finds no branch.
    */
   async prepare(
     issue: Issue,
@@ -295,20 +271,14 @@ export class GitRepo implements Repo {
       return { cwd: existing.path, branch: existing.branch, needsBootstrap: false };
     }
 
-    if (playbook.isolation === 'issue-worktree') {
-      const branch = await this.findIssueBranch(issue.key, hints.knownBranch);
-      if (branch === null) {
-        throw new NoBranchError(issue.key, [
-          `the worktree ${path}`,
-          'the branch on the newest session record for the issue',
-          `remote branches matching ${remoteBranchPattern(this.remote, issue.key)}`,
-        ]);
-      }
-      await this.addWorktree(path, branch);
-      return { cwd: path, branch, needsBootstrap: true };
-    }
-
-    const branch = branchName(this.config.branchPattern, issue);
+    // An issue with no branch anywhere gets the fresh-worktree treatment
+    // instead of a refusal: the owner would rather work on a new branch off the
+    // base ref than be told to make one by hand.
+    const issueBranch =
+      playbook.isolation === 'issue-worktree'
+        ? await this.findIssueBranch(issue.key, hints.knownBranch)
+        : null;
+    const branch = issueBranch ?? branchName(this.config.branchPattern, issue);
     await this.addWorktree(path, branch);
     return { cwd: path, branch, needsBootstrap: true };
   }

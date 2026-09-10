@@ -126,7 +126,6 @@ export type ErrorReason =
   | 'session-live'
   | 'main-checkout'
   | 'duplicate-id'
-  | 'no-branch'
   | 'missing-executable'
   | 'detached-worktree'
   | 'not-idle'

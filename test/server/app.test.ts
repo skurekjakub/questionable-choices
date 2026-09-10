@@ -14,11 +14,7 @@ import type {
   RemoveWorktreeResponse,
 } from '../../src/core/api.js';
 import type { Config, SessionRecord } from '../../src/core/types.js';
-import {
-  DetachedWorktreeError,
-  DirtyWorktreeError,
-  NoBranchError,
-} from '../../src/connectors/repos/git/index.js';
+import { DetachedWorktreeError, DirtyWorktreeError } from '../../src/connectors/repos/git/index.js';
 import { MissingExecutableError } from '../../src/connectors/runners/claude-tmux/index.js';
 import { createApp } from '../../src/server/app.js';
 import { SessionManager } from '../../src/server/session-manager.js';
@@ -609,15 +605,6 @@ describe('HTTP API', () => {
 
       expect(response.status).toBe(409);
       expect(((await response.json()) as ErrorResponse).reason).toBe('session-live');
-    });
-
-    it('names the branch a checkout could not be prepared from', async () => {
-      repo.prepareError = new NoBranchError('DOC-1', ['origin/DOC-1-*']);
-
-      const response = await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
-
-      expect(response.status).toBe(409);
-      expect(((await response.json()) as ErrorResponse).reason).toBe('no-branch');
     });
 
     it('names a detached worktree a checkout could not be prepared from', async () => {

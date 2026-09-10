@@ -106,8 +106,8 @@ A playbook is a named kickoff recipe on a repo. Add an entry to that repo's
 - `id` is lowercase letters, digits and dashes, unique within the repo.
 - `isolation` is `worktree` (fresh branch off `baseRef`), `issue-worktree`
   (the issue's existing branch, found from the newest session record for that
-  issue in that repo, else from `origin/<KEY>-*`) or `shared` (the main
-  checkout, no branch). Both non-shared isolations attempt a fetch of the base
+  issue in that repo, else from `origin/<KEY>-*`, else the `worktree` rule as
+  a fallback) or `shared` (the main checkout, no branch). Both non-shared isolations attempt a fetch of the base
   ref's remote before anything else — a failure only makes the refs stale — and
   both reuse an already-registered `<worktreeDir>/<KEY>` unless its HEAD is
   detached, which is refused: there is no branch to work on.

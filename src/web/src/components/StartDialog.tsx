@@ -10,7 +10,8 @@ import { CloseIcon } from './Icons.js';
  */
 const ISOLATION_NOTE: Readonly<Record<PlaybookSummary['isolation'], string>> = {
   worktree: 'Runs in a fresh worktree on a new branch.',
-  'issue-worktree': "Runs in the worktree of the issue's existing branch.",
+  'issue-worktree':
+    "Runs in the worktree of the issue's existing branch, or a fresh one off the base ref when none exists.",
   shared: 'Runs in the main checkout, on whatever is checked out there.',
 };
 

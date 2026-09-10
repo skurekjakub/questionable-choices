@@ -460,8 +460,10 @@ and is kept as `test/fixtures/compaction-events.jsonl`:
    - `issue-worktree`: reuse `<worktreeDir>/<KEY>` if registered. Otherwise
      find the branch: the newest session record for the issue, else
      `git branch -r --list 'origin/<KEY>-*'`. Recreate the worktree from it
-     (`needsBootstrap` true). No branch → start refused with a message that
-     names what was searched.
+     (`needsBootstrap` true). No branch → fall back to the `worktree` rule: a
+     fresh branch from `branchPattern` off `baseRef`, in the same path. The
+     prefill warning names that branch and base ref so the owner sees it before
+     Start.
    - `shared`: cwd = the repo's `path`, branch = null, no bootstrap.
 3. Runner writes `<dataDir>/sessions/<id>/`: `prompt.txt`, `settings.json`
    (§8), `statusline.sh` (§9), `run.sh`, then
@@ -931,20 +933,20 @@ WS /ws/terminal/:sessionId?cols=&rows=   see §8.3
 
 Errors: JSON
 `{ error: string, detail?: string, issues?: [{path, message}], reason?: ErrorReason }`
-with 4xx for refusals (no live session, no branch found, dirty worktree, an
+with 4xx for refusals (no live session, detached worktree, dirty worktree, an
 issue the tracker would not hand over) so the UI can place them against fields
 without parsing prose. `issues` carries the zod problems of a rejected
 workspace request, each `path` request-relative — `epic`, `newConnector.site`,
 `reviewStatuses[0]` — so a dialog can put a problem next to the input that
 caused it. `reason` is
 the closed set `dirty-worktree | session-live | main-checkout | duplicate-id |
-no-branch | missing-executable | detached-worktree | not-idle | compacting`;
+missing-executable | detached-worktree | not-idle | compacting`;
 it is the only thing a UI
 may branch on, so `error` and `detail` stay free text. A refusal none of those
 names describes carries no `reason`. Every member is reachable: `session-live`
 on a start that clashes with a live session and on a removal blocked by one,
 `missing-executable` when the runner cannot find the CLI on a start or a
-resume, `no-branch` / `detached-worktree` / `dirty-worktree` / `main-checkout`
+resume, `detached-worktree` / `dirty-worktree` / `main-checkout`
 from the checkout, `duplicate-id` from a workspace request, `not-idle` and
 `compacting` from a compaction (§5.6).
 

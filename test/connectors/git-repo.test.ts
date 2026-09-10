@@ -11,7 +11,6 @@ import {
   GitRepo,
   InvalidIssueKeyError,
   NO_FETCH_YET_MESSAGE,
-  NoBranchError,
   WorktreeNotFoundError,
   git,
   gitAttempt,
@@ -153,15 +152,17 @@ describe('GitRepo.prepare', () => {
     expect(prepared.needsBootstrap).toBe(true);
   });
 
-  it('refuses issue-worktree isolation when nothing names a branch', async () => {
+  it('falls back to a fresh branch off the base ref when nothing names an issue branch', async () => {
     const issue = makeIssue({ key: 'DOC-404', summary: 'Nothing here' });
 
-    await expect(subject.prepare(issue, playbooks.issueWorktree)).rejects.toBeInstanceOf(
-      NoBranchError,
-    );
-    await expect(subject.prepare(issue, playbooks.issueWorktree)).rejects.toThrow(
-      /origin\/DOC-404-\*/,
-    );
+    const prepared = await subject.prepare(issue, playbooks.issueWorktree);
+
+    expect(prepared.cwd).toBe(join(worktreeDir, 'DOC-404'));
+    expect(prepared.branch).toBe('DOC-404-nothing-here');
+    expect(prepared.needsBootstrap).toBe(true);
+    const head = await run(['rev-parse', 'HEAD'], join(worktreeDir, 'DOC-404'));
+    const base = await run(['rev-parse', 'origin/main'], repo);
+    expect(head).toBe(base);
   });
 
   it('refuses a key that would escape the worktree directory', async () => {
