@@ -214,6 +214,17 @@
   background: none;
 }
 
+/* The same family as the marker above and for the same reason: what a lagging
+   notification said is a sentence, and the track has room for a dot. Half the
+   lamp's diameter, so it never reads as the state lamp of its own row. */
+.session-hint {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--lamp-amber);
+}
+
 .lamp {
   flex: none;
   width: 9px;

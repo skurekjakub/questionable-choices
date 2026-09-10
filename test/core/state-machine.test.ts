@@ -170,30 +170,6 @@ describe('reduce transition table', () => {
       notify: true,
     },
     {
-      name: 'Notification opens a permission when nothing else did',
-      from: 'working',
-      event: hookEvent({
-        hook_event_name: 'Notification',
-        notification_type: 'permission_prompt',
-        message: 'Claude needs your permission',
-      }),
-      to: 'waiting-permission',
-      pending: 'Claude needs your permission',
-      notify: true,
-    },
-    {
-      name: 'Notification for an elicitation dialog',
-      from: 'working',
-      event: hookEvent({
-        hook_event_name: 'Notification',
-        notification_type: 'elicitation_dialog',
-        message: 'Claude wants input',
-      }),
-      to: 'waiting-question',
-      pending: 'Claude wants input',
-      notify: true,
-    },
-    {
       name: 'Stop ends the turn',
       from: 'working',
       event: hookEvent({ hook_event_name: 'Stop', last_assistant_message: 'done' }),
@@ -281,24 +257,63 @@ describe('reduce refusals', () => {
     }
   });
 
-  it('leaves the record untouched when nothing moved', () => {
-    const before = makeRecord({ state: 'working', pending: null, toolCallOpen: false });
+  it('leaves the record untouched for a status-line payload that moved nothing', () => {
+    const before = makeRecord({
+      state: 'working',
+      cache: { expiresAt: 999, ttlSeconds: CACHE_TTL_1H_SECONDS, warm: true, source: 'statusline' },
+    });
     const result = reduce(
       before,
-      hookEvent({ hook_event_name: 'PostToolUse', tool_name: 'Bash' }),
+      { type: 'statusline', payload: { prompt_cache: { ttl: '1h', expires_at: 999, warm: true } } },
       NOW,
     );
     expect(result.changed).toBe(false);
     expect(result.record).toBe(before);
   });
 
-  it('records that a tool call is waiting, which is when a dialog can appear', () => {
+  it('stamps lastEventAt for an accepted event that moves nothing else', () => {
+    // The stamp is the evidence the session is being heard from, and an event
+    // that leaves every other field alone is evidence too: without it a record
+    // flagged at a restart stays flagged while its log fills with proof of life.
+    const before = makeRecord({
+      state: 'working',
+      pending: null,
+      staleSince: '2026-09-09T11:00:00.000Z',
+      lastEventAt: '2026-09-09T09:00:00.000Z',
+    });
+
     const result = reduce(
-      makeRecord({ state: 'working', pending: null, toolCallOpen: false }),
-      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash' }),
+      before,
+      hookEvent({ hook_event_name: 'PostToolUse', tool_name: 'Bash' }),
       NOW,
     );
-    expect(result.record.toolCallOpen).toBe(true);
+
+    expect(result.record.state).toBe('working');
+    expect(result.record.lastEventAt).toBe(NOW_ISO);
+    expect(result.record.staleSince).toBeNull();
+    expect(result.changed).toBe(true);
+  });
+
+  it('never stamps lastEventAt for a status-line payload, which reports no state', () => {
+    const before = makeRecord({ state: 'working', lastEventAt: '2026-09-09T09:00:00.000Z' });
+
+    const result = reduce(
+      before,
+      { type: 'statusline', payload: { prompt_cache: { ttl: '1h', expires_at: 999, warm: true } } },
+      NOW,
+    );
+
+    expect(result.changed).toBe(true);
+    expect(result.record.lastEventAt).toBe('2026-09-09T09:00:00.000Z');
+  });
+
+  it('never stamps lastEventAt for an event it refuses outright', () => {
+    const before = makeRecord({ state: 'exited', lastEventAt: '2026-09-09T09:00:00.000Z' });
+
+    const result = reduce(before, hookEvent({ hook_event_name: 'Stop' }), NOW);
+
+    expect(result.changed).toBe(false);
+    expect(result.record.lastEventAt).toBe('2026-09-09T09:00:00.000Z');
   });
 
   it('never notifies twice for the same demand', () => {
@@ -325,231 +340,190 @@ describe('reduce refusals', () => {
   });
 });
 
-describe('a Notification that lags the dialog it describes', () => {
+describe('a Notification never moves the session', () => {
   const PROMPT = 'prompt-1';
-
-  /**
-   * Replays a turn whose tool returned before the notification arrived.
-   *
-   * @param notificationType - Notification type the late payload carries.
-   * @returns The state the record ended in.
-   */
-  function answeredBeforeTheNotification(notificationType: string): SessionState {
-    const asked = reduce(
-      makeRecord({ state: 'working' }),
-      hookEvent({
-        hook_event_name: 'PreToolUse',
-        tool_name: 'AskUserQuestion',
-        prompt_id: PROMPT,
-        tool_input: { questions: [{ question: 'Which format?' }] },
-      }),
-      NOW,
-    );
-    const answered = reduce(
-      asked.record,
-      hookEvent({
-        hook_event_name: 'PostToolUse',
-        tool_name: 'AskUserQuestion',
-        prompt_id: PROMPT,
-      }),
-      NOW + 3_000,
-    );
-    expect(answered.record.state).toBe('working');
-    const late = reduce(
-      answered.record,
-      hookEvent({
-        hook_event_name: 'Notification',
-        notification_type: notificationType,
-        prompt_id: PROMPT,
-        message: 'Claude needs your permission',
-      }),
-      NOW + 6_000,
-    );
-    expect(late.notify).toBe(false);
-    return late.record.state;
-  }
-
-  it('ignores a permission prompt for a tool that already returned', () => {
-    expect(answeredBeforeTheNotification('permission_prompt')).toBe('working');
+  const LATE = hookEvent({
+    hook_event_name: 'Notification',
+    notification_type: 'permission_prompt',
+    prompt_id: PROMPT,
+    message: 'Claude needs your permission',
   });
 
-  it('ignores an elicitation dialog for a tool that already returned', () => {
-    expect(answeredBeforeTheNotification('elicitation_dialog')).toBe('working');
+  it('records a hint and leaves the state where it was', () => {
+    const before = makeRecord({ state: 'working', pending: null });
+
+    const result = reduce(before, LATE, NOW);
+
+    expect(result.record.state).toBe('working');
+    expect(result.record.stateSince).toBe(before.stateSince);
+    expect(result.record.pending).toBeNull();
+    expect(result.record.hint).toEqual({ summary: 'Claude needs your permission', at: NOW_ISO });
+    expect(result.notify).toBe(false);
+    expect(result.changed).toBe(true);
   });
 
-  it('still opens a permission for a tool that has not returned', () => {
-    const running = reduce(
-      makeRecord({
-        state: 'working',
-        answeredDialog: { promptId: 'prompt-0', summary: 'Bash: ls' },
-      }),
+  it.each(['waiting-permission', 'waiting-question', 'idle'] as SessionState[])(
+    'says nothing on a session already waiting for the owner in %s',
+    (state) => {
+      const before = makeRecord({ state, pending: { kind: 'permission', summary: 'Bash: ls' } });
+
+      const result = reduce(before, LATE, NOW);
+
+      expect(result.changed).toBe(false);
+      expect(result.record).toBe(before);
+    },
+  );
+
+  it.each(['exited', 'failed'] as SessionState[])('is ignored on a %s session', (state) => {
+    expect(reduce(makeRecord({ state }), LATE, NOW).changed).toBe(false);
+  });
+
+  it('cannot open a dialog on the turn after the one it belongs to', () => {
+    // The notification lags the dialog by ~6 s, so the owner answering and
+    // typing the next prompt inside that window used to land a false "needs
+    // you" — with a desktop notification — on a session that is mid-turn.
+    let record = makeRecord({ state: 'working', pending: null });
+    const steps: SessionEvent[] = [
+      hookEvent({ hook_event_name: 'UserPromptSubmit', prompt_id: PROMPT }),
       hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash', prompt_id: PROMPT }),
-      NOW,
-    );
-    const late = reduce(
-      running.record,
-      hookEvent({
-        hook_event_name: 'Notification',
-        notification_type: 'permission_prompt',
-        prompt_id: PROMPT,
-        message: 'Claude needs your permission',
-      }),
-      NOW + 6_000,
-    );
-    expect(late.record.state).toBe('waiting-permission');
-    expect(late.notify).toBe(true);
-  });
-
-  it('opens a second dialog of the same turn whose PermissionRequest was dropped', () => {
-    // A turn can raise two dialogs. Answering the first must not blind the
-    // fallback for the second, which is exactly the case the fallback exists
-    // for: its PermissionRequest never reached the server.
-    const asked = reduce(
-      makeRecord({ state: 'working' }),
-      hookEvent({
-        hook_event_name: 'PreToolUse',
-        tool_name: 'AskUserQuestion',
-        prompt_id: PROMPT,
-        tool_input: { questions: [{ question: 'Which format?' }] },
-      }),
-      NOW,
-    );
-    const answered = reduce(
-      asked.record,
-      hookEvent({
-        hook_event_name: 'PostToolUse',
-        tool_name: 'AskUserQuestion',
-        prompt_id: PROMPT,
-      }),
-      NOW + 1_000,
-    );
-    const running = reduce(
-      answered.record,
-      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash', prompt_id: PROMPT }),
-      NOW + 2_000,
-    );
-
-    const late = reduce(
-      running.record,
-      hookEvent({
-        hook_event_name: 'Notification',
-        notification_type: 'permission_prompt',
-        prompt_id: PROMPT,
-        message: 'Claude needs your permission to run Bash',
-      }),
-      NOW + 8_000,
-    );
-
-    expect(late.record.state).toBe('waiting-permission');
-    expect(late.record.pending).toEqual({
-      kind: 'permission',
-      summary: 'Claude needs your permission to run Bash',
-    });
-    expect(late.notify).toBe(true);
-  });
-
-  it('still drops the answered dialog after a second tool of the same turn returned', () => {
-    // The memory of an answered dialog survives tool results that closed
-    // nothing; forgetting on the next one readmits the dialog's own echo.
-    const running = reduce(
-      makeRecord({ state: 'working' }),
-      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash', prompt_id: PROMPT }),
-      NOW,
-    );
-    const asked = reduce(
-      running.record,
       hookEvent({
         hook_event_name: 'PermissionRequest',
         tool_name: 'Bash',
         prompt_id: PROMPT,
         tool_input: { command: 'rm -rf x' },
       }),
-      NOW + 1_000,
-    );
-    expect(asked.record.pending?.summary).toBe('Bash: rm -rf x');
-    const answered = reduce(
-      asked.record,
       hookEvent({ hook_event_name: 'PostToolUse', tool_name: 'Bash', prompt_id: PROMPT }),
-      NOW + 2_000,
-    );
-    const second = reduce(
-      reduce(
-        answered.record,
-        hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Read', prompt_id: PROMPT }),
-        NOW + 3_000,
-      ).record,
-      hookEvent({ hook_event_name: 'PostToolUse', tool_name: 'Read', prompt_id: PROMPT }),
-      NOW + 4_000,
-    );
+      hookEvent({ hook_event_name: 'Stop', prompt_id: PROMPT }),
+      hookEvent({ hook_event_name: 'UserPromptSubmit', prompt_id: 'prompt-2' }),
+    ];
+    for (const [index, step] of steps.entries()) record = reduce(record, step, NOW + index).record;
+    expect(record.state).toBe('working');
 
-    const late = reduce(
-      second.record,
-      hookEvent({
-        hook_event_name: 'Notification',
-        notification_type: 'permission_prompt',
-        prompt_id: PROMPT,
-        message: 'Claude needs your permission',
-      }),
-      NOW + 8_000,
-    );
+    const late = reduce(record, LATE, NOW + 10_000);
 
     expect(late.record.state).toBe('working');
     expect(late.record.pending).toBeNull();
     expect(late.notify).toBe(false);
+    expect(late.record.hint?.summary).toBe('Claude needs your permission');
   });
 
-  it('drops a notification that carries no prompt id once a dialog has been answered', () => {
-    // An unidentifiable payload cannot be placed in a turn, and the record is
-    // known to have answered a dialog in the turn it is in.
-    const answered = makeRecord({
-      state: 'working',
-      answeredDialog: { promptId: PROMPT, summary: 'Bash: rm -rf x' },
-    });
-
-    const late = reduce(
-      answered,
-      hookEvent({
-        hook_event_name: 'Notification',
-        notification_type: 'permission_prompt',
-        message: 'Claude needs your permission',
-      }),
+  it('cannot open a dialog on a run that has only just started', () => {
+    // `starting` means the launcher has posted `claude-start` and no hook has
+    // arrived; a dead run's notification landing there reported a dialog
+    // belonging to a process that no longer exists.
+    const exited = reduce(
+      makeRecord({ state: 'working', pending: null }),
+      { type: 'claude-exit', exitCode: 0 },
       NOW,
     );
+    const restarted = reduce(exited.record, { type: 'claude-start', mode: 'start' }, NOW + 1_000);
+    expect(restarted.record.state).toBe('starting');
+
+    const late = reduce(restarted.record, LATE, NOW + 2_000);
+
+    expect(late.record.state).toBe('starting');
+    expect(late.record.pending).toBeNull();
+    expect(late.notify).toBe(false);
+    expect(late.record.hint?.summary).toBe('Claude needs your permission');
+  });
+
+  it('survives two tool calls running at once without losing either of them', () => {
+    // Two PreToolUse events before either result is the shape that made a
+    // boolean "a tool call is open" wrong; nothing is keyed on it now, so the
+    // record follows the dialogs the server was actually told about.
+    let record = makeRecord({ state: 'working', pending: null });
+    const steps: SessionEvent[] = [
+      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_use_id: 'a' }),
+      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'b' }),
+      hookEvent({
+        hook_event_name: 'PermissionRequest',
+        tool_name: 'Bash',
+        tool_input: { command: 'rm -rf x' },
+      }),
+    ];
+    for (const [index, step] of steps.entries()) record = reduce(record, step, NOW + index).record;
+    expect(record.state).toBe('waiting-permission');
+
+    const late = reduce(record, LATE, NOW + 6_000);
 
     expect(late.changed).toBe(false);
+    expect(late.record.state).toBe('waiting-permission');
+    expect(late.record.pending?.summary).toBe('Bash: rm -rf x');
+  });
+
+  it('leaves a dropped PermissionRequest showing as a hint, not as a dialog', () => {
+    // The hook is `curl … || true`, so a lost PermissionRequest is real. The
+    // notification is the only trace of it, and it is reported as one.
+    let record = makeRecord({ state: 'working', pending: null });
+    const steps: SessionEvent[] = [
+      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_use_id: 'a' }),
+      hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'b' }),
+      hookEvent({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_use_id: 'a' }),
+    ];
+    for (const [index, step] of steps.entries()) record = reduce(record, step, NOW + index).record;
+
+    const late = reduce(record, LATE, NOW + 6_000);
+
     expect(late.record.state).toBe('working');
+    expect(late.record.pending).toBeNull();
+    expect(needsYou(late.record.state)).toBe(false);
+    expect(late.record.hint?.summary).toBe('Claude needs your permission');
+    expect(late.notify).toBe(false);
   });
 
   it.each([
-    ['claude-exit', 'working' as const, { type: 'claude-exit', exitCode: 0 } as const],
-    ['claude-start', 'exited' as const, { type: 'claude-start', mode: 'resume' } as const],
-  ])('forgets the answered dialog across a %s run boundary', (_name, state, event) => {
-    // The dialog belongs to a turn of one run; carrying it into the next one
-    // leaves the guard resting on prompt ids never repeating.
-    const answered = makeRecord({
-      state,
+    ['UserPromptSubmit', hookEvent({ hook_event_name: 'UserPromptSubmit' })],
+    ['PreToolUse', hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash' })],
+    ['Stop', hookEvent({ hook_event_name: 'Stop' })],
+    ['claude-exit', { type: 'claude-exit', exitCode: 0 } as SessionEvent],
+  ])('is cleared by the next %s', (_name, event) => {
+    const hinted = makeRecord({
+      state: 'working',
       pending: null,
-      answeredDialog: { promptId: PROMPT, summary: 'Bash: rm -rf x' },
-      toolCallOpen: true,
+      hint: { summary: 'Claude needs your permission', at: NOW_ISO },
     });
 
-    const next = reduce(answered, event, NOW);
+    const next = reduce(hinted, event, NOW + 1_000);
 
-    expect(next.record.answeredDialog ?? null).toBeNull();
-    expect(next.record.toolCallOpen).toBe(false);
+    expect(next.changed).toBe(true);
+    expect(next.record.hint).toBeNull();
   });
 
-  it('forgets the answered dialog when the owner submits the next prompt', () => {
-    const answered = makeRecord({
-      state: 'idle',
-      answeredDialog: { promptId: PROMPT, summary: 'Bash: rm -rf x' },
-      toolCallOpen: true,
-    });
+  it('is left alone by a status-line payload, which is not a lifecycle event', () => {
+    const hint = { summary: 'Claude needs your permission', at: NOW_ISO };
+    const hinted = makeRecord({ state: 'working', hint });
 
-    const next = reduce(answered, hookEvent({ hook_event_name: 'UserPromptSubmit' }), NOW);
+    const next = reduce(
+      hinted,
+      { type: 'statusline', payload: { prompt_cache: { ttl: '1h', expires_at: 999, warm: true } } },
+      NOW + 1_000,
+    );
 
-    expect(next.record.answeredDialog ?? null).toBeNull();
-    expect(next.record.toolCallOpen).toBe(false);
+    expect(next.changed).toBe(true);
+    expect(next.record.hint).toEqual(hint);
+  });
+
+  it('caps the hint the way an assistant snippet is capped', () => {
+    const message = `noise  ${'x'.repeat(600)}`;
+
+    const result = reduce(
+      makeRecord({ state: 'working' }),
+      hookEvent({ hook_event_name: 'Notification', message }),
+      NOW,
+    );
+
+    expect(result.record.hint?.summary.length).toBe(SNIPPET_MAX_LENGTH);
+    expect(result.record.hint?.summary.endsWith('…')).toBe(true);
+  });
+
+  it('stands a payload with no message in for one, so the hint is never blank', () => {
+    const result = reduce(
+      makeRecord({ state: 'working' }),
+      hookEvent({ hook_event_name: 'Notification', notification_type: 'permission_prompt' }),
+      NOW,
+    );
+
+    expect(result.record.hint?.summary).toBe('Claude sent a notification');
   });
 });
 
@@ -580,6 +554,42 @@ describe('exit codes and staleness', () => {
     expect(result.record.lastExitCode).toBe(130);
   });
 
+  it('forgets the previous run’s assistant snippet when a new run starts', () => {
+    // The snippet is what a card presents as "what this session is waiting on";
+    // carried into the next run it advertises the last one's last word.
+    const ended = reduce(
+      makeRecord({ state: 'working' }),
+      hookEvent({ hook_event_name: 'Stop', last_assistant_message: 'the previous run said this' }),
+      NOW,
+    );
+    const exited = reduce(ended.record, { type: 'claude-exit', exitCode: 0 }, NOW + 1_000);
+    expect(exited.record.lastAssistantMessage).toBe('the previous run said this');
+
+    const restarted = reduce(exited.record, { type: 'claude-start', mode: 'resume' }, NOW + 2_000);
+
+    expect(restarted.record.state).toBe('starting');
+    expect(restarted.record.lastAssistantMessage).toBeNull();
+  });
+
+  it('forgets the assistant snippet when the owner interrupts', () => {
+    const idle = reduce(
+      makeRecord({ state: 'working' }),
+      hookEvent({ hook_event_name: 'Stop', last_assistant_message: 'mid-thought' }),
+      NOW,
+    );
+    const working = reduce(
+      idle.record,
+      hookEvent({ hook_event_name: 'UserPromptSubmit' }),
+      NOW + 1_000,
+    );
+    expect(working.record.lastAssistantMessage).toBe('mid-thought');
+
+    const interrupted = reduce(working.record, { type: 'interrupt' }, NOW + 2_000);
+
+    expect(interrupted.record.state).toBe('idle');
+    expect(interrupted.record.lastAssistantMessage).toBeNull();
+  });
+
   it('forgets the previous exit code when a new run starts', () => {
     const result = reduce(
       makeRecord({ state: 'exited', lastExitCode: 1 }),
@@ -599,7 +609,7 @@ describe('exit codes and staleness', () => {
     expect(result.record.staleSince).toBeNull();
   });
 
-  it('leaves the marker alone when the event changed nothing', () => {
+  it('leaves the marker alone for an event the reducer refuses outright', () => {
     const stale = makeRecord({ state: 'exited', staleSince: '2026-09-09T12:00:00.000Z' });
 
     const result = reduce(stale, hookEvent({ hook_event_name: 'Stop' }), NOW);
@@ -616,16 +626,16 @@ describe('SessionEnd', () => {
     expect(result.record.endedAt).toBe(NOW_ISO);
   });
 
-  it('forgets the answered dialog, which belongs to a run that has ended', () => {
+  it('forgets the hint, which belongs to a run that has ended', () => {
     const result = reduce(
       makeRecord({
         state: 'working',
-        answeredDialog: { promptId: 'prompt-1', summary: 'Bash: ls' },
+        hint: { summary: 'Claude needs your permission', at: NOW_ISO },
       }),
       hookEvent({ hook_event_name: 'SessionEnd' }),
       NOW,
     );
-    expect(result.record.answeredDialog ?? null).toBeNull();
+    expect(result.record.hint).toBeNull();
   });
 });
 
@@ -890,15 +900,17 @@ describe('replaying a recorded session', () => {
     expect(record.claudeSessionId).toBe('00000000-0000-0000-0000-000000000000');
   });
 
-  it('reaches waiting-permission on the notification when the Bash PermissionRequest is lost', () => {
-    // The hook is `curl … || true`, so a dropped hook is the case the
-    // Notification fallback exists for — and the recorded turn raises two
-    // dialogs, the first of which is answered before the second opens.
+  it('reports a lost Bash PermissionRequest as a hint and keeps the session working', () => {
+    // The hook is `curl … || true`, so a dropped hook is real. The Notification
+    // that follows is the only trace of the dialog, and it is recorded as a
+    // hint: it cannot say which turn it belongs to, so it may not move a card
+    // into Needs you and stay there.
     const dropped = lines.filter((_line, index) => index !== 7);
     expect(lines[7]?.event).toBe('PermissionRequest');
 
     let record = makeRecord({ state: 'starting' });
     const states: SessionState[] = [];
+    const hints: Array<string | null> = [];
     for (const line of dropped) {
       record = reduce(
         record,
@@ -906,10 +918,14 @@ describe('replaying a recorded session', () => {
         line.ts * 1000,
       ).record;
       states.push(record.state);
+      hints.push(record.hint?.summary ?? null);
     }
 
     // Index 7 is the Notification that now stands alone for the Bash dialog.
-    expect(states[7]).toBe('waiting-permission');
+    expect(states[7]).toBe('working');
+    expect(hints[7]).toBe('Claude needs your permission');
+    // The tool result that follows it clears the hint again.
+    expect(hints[8]).toBeNull();
     expect(states).toEqual([
       'starting',
       'working',
@@ -918,7 +934,7 @@ describe('replaying a recorded session', () => {
       'waiting-question',
       'working',
       'working',
-      'waiting-permission',
+      'working',
       'working',
       'idle',
       'working',
@@ -932,5 +948,22 @@ describe('replaying a recorded session', () => {
       'waiting-permission',
       'exited',
     ]);
+  });
+
+  it('never lets a notification set a hint on a session already waiting', () => {
+    // Every notification in the recorded session lands on a record that is
+    // already in a needs-you state, which is the case the rule refuses.
+    let record = makeRecord({ state: 'starting' });
+    for (const line of lines) {
+      const before = record;
+      record = reduce(
+        record,
+        hookEvent(asHookEvent(line.event, line.payload) as HookEvent),
+        line.ts * 1000,
+      ).record;
+      if (line.event !== 'Notification') continue;
+      expect(needsYou(before.state)).toBe(true);
+      expect(record).toBe(before);
+    }
   });
 });

@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 
 /**
  * Largest amount of git output that is captured, in bytes.
@@ -111,37 +111,98 @@ export function gitAttempt(
   cwd: string,
   options: GitRunOptions = {},
 ): Promise<GitAttempt> {
+  const timeoutMs = options.timeoutMs ?? 0;
   return new Promise((resolve) => {
-    execFile(
-      'git',
-      args,
-      {
-        cwd,
-        encoding: 'utf8',
-        maxBuffer: GIT_MAX_BUFFER,
-        timeout: options.timeoutMs ?? 0,
-        killSignal: 'SIGKILL',
-      },
-      (error, stdout, stderr) => {
-        if (error === null) {
-          resolve({ ok: true, exitCode: 0, stdout, stderr });
-          return;
-        }
-        const failure = error as ExecFailure;
-        const exitCode = typeof failure.code === 'number' ? failure.code : null;
-        // A killed invocation reports no exit code and often no stderr, so the
-        // deadline has to be named here or the failure reads as "git said
-        // nothing at all".
-        const killed = failure.killed === true;
-        const detail = killed
-          ? `timed out after ${String(options.timeoutMs ?? 0)} ms`
-          : stderr === ''
-            ? error.message
-            : stderr;
-        resolve({ ok: false, exitCode, stdout, stderr: detail });
-      },
-    );
+    // `spawn`, not `execFile`: `execFile` passes only a fixed set of options
+    // through to `spawn`, and `detached` is not one of them — which is what
+    // gives the invocation a process group of its own to kill.
+    const child = spawn('git', args, {
+      cwd,
+      detached: timeoutMs > 0,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let overflowed = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const finish = (attempt: GitAttempt): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      resolve(attempt);
+    };
+    const collect = (chunk: string, into: 'out' | 'err'): void => {
+      if (into === 'out') stdout += chunk;
+      else stderr += chunk;
+      if (stdout.length + stderr.length <= GIT_MAX_BUFFER) return;
+      overflowed = true;
+      killProcessGroup(child);
+    };
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      collect(chunk, 'out');
+    });
+    child.stderr.on('data', (chunk: string) => {
+      collect(chunk, 'err');
+    });
+    child.on('error', (cause: Error) => {
+      finish({ ok: false, exitCode: null, stdout, stderr: cause.message });
+    });
+    child.on('close', (code: number | null) => {
+      if (overflowed) {
+        finish({
+          ok: false,
+          exitCode: null,
+          stdout,
+          stderr: `produced more than ${String(GIT_MAX_BUFFER)} bytes of output`,
+        });
+        return;
+      }
+      if (code === 0) {
+        finish({ ok: true, exitCode: 0, stdout, stderr });
+        return;
+      }
+      finish({ ok: false, exitCode: code, stdout, stderr: stderr === '' ? 'git failed' : stderr });
+    });
+
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        killProcessGroup(child);
+        // Answered on the deadline rather than on `close`: a transport helper
+        // that outlives the signal holds the pipes open, and the caller is
+        // holding a checkout lock for as long as this takes.
+        child.unref();
+        finish({
+          ok: false,
+          exitCode: null,
+          stdout,
+          stderr: `timed out after ${String(timeoutMs)} ms`,
+        });
+      }, timeoutMs);
+    }
   });
+}
+
+/**
+ * Kills a child and, when it has a group of its own, everything it started.
+ *
+ * @param child - The child process.
+ * @returns Nothing; a process that has already gone is not an error.
+ */
+function killProcessGroup(child: ChildProcess): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  try {
+    // A negative pid signals the whole process group, which is the only way to
+    // reach a transport helper git spawned and left holding the pipes.
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    child.kill('SIGKILL');
+  }
 }
 
 /**

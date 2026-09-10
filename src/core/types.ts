@@ -126,15 +126,17 @@ export interface Pending {
 }
 
 /**
- * The dialog a tool result closed, kept so a `Notification` describing a dialog
- * that is already gone can be told from one describing a dialog the server was
- * never told about.
+ * What the most recent `Notification` said about a session.
+ *
+ * A notification lags the dialog it describes by seconds and carries only a
+ * generic message, so it is kept as a hint the owner may act on rather than as
+ * a state anything derives from.
  */
-export interface AnsweredDialog {
-  /** Prompt id of the turn the dialog belonged to, or null when none was sent. */
-  promptId: string | null;
-  /** Summary the dialog was showing when the tool result closed it. */
+export interface SessionHint {
+  /** The notification's message as one line, or a generic stand-in. */
   summary: string;
+  /** ISO timestamp at which the notification was accepted. */
+  at: string;
 }
 
 /**
@@ -209,18 +211,14 @@ export interface SessionRecord {
   /** What the session is waiting for, or null when it is not waiting. */
   pending: Pending | null;
   /**
-   * The dialog a tool result most recently closed, or null when the record has
-   * no answered dialog outstanding. A `Notification` naming that dialog's turn
-   * describes it — and is therefore stale — unless `toolCallOpen` says a tool is
-   * still waiting, in which case a newer dialog whose `PermissionRequest` never
-   * arrived may be on screen. Cleared at every run and turn boundary.
+   * What the last `Notification` said, or null when none is outstanding.
+   *
+   * A notification never moves `state`: it lags the dialog it describes and
+   * carries no way of placing itself in a turn, so acting on it produces a
+   * needs-you state that no later event is guaranteed to clear. Every accepted
+   * lifecycle event other than a status-line payload clears the hint.
    */
-  answeredDialog?: AnsweredDialog | null | undefined;
-  /**
-   * Whether a tool call has announced itself with `PreToolUse` and not yet
-   * reported a result. Only an open tool call can have a dialog on screen.
-   */
-  toolCallOpen?: boolean | undefined;
+  hint: SessionHint | null;
   /** Snippet of the last assistant message, when the Stop payload carried one. */
   lastAssistantMessage: string | null;
   /**

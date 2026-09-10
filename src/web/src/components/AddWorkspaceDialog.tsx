@@ -115,6 +115,10 @@ export function AddWorkspaceDialog({
   // eight filled fields with it; while the confirmation is up they mean "keep
   // editing" rather than repeating a question already asked.
   const requestClose = useCallback(() => {
+    // The workspace is created whether or not this dialog is on screen, so
+    // closing over the request in flight loses the 201 that would select it and
+    // the 400 that would name the field to fix.
+    if (saving) return;
     if (confirmingDiscard) {
       setConfirmingDiscard(false);
       return;
@@ -124,7 +128,7 @@ export function AddWorkspaceDialog({
       return;
     }
     onClose();
-  }, [confirmingDiscard, dirty, onClose]);
+  }, [saving, confirmingDiscard, dirty, onClose]);
   const dialog = useFocusTrap<HTMLDivElement>(requestClose);
 
   // The confirmation is announced from a live region; without moving focus a

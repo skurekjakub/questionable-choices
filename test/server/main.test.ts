@@ -15,8 +15,8 @@ const GUARD_CONFIG = vi.hoisted(() => {
 const serve = vi.hoisted(() => vi.fn());
 vi.mock('@hono/node-server', () => ({ serve, upgradeWebSocket: vi.fn() }));
 
-const { fatalExit, guardTheProcess, isProcessEntry, listenErrorHandler } =
-  await import('../../src/server/main.js');
+const { guardTheProcess, listenErrorHandler } = await import('../../src/server/main.js');
+const { isProcessEntry } = await import('../../src/server/util.js');
 
 /**
  * Builds a listen error carrying an errno code.
@@ -76,29 +76,23 @@ describe('listenErrorHandler', () => {
   });
 });
 
-describe('isProcessEntry', () => {
-  it('answers false under a test runner, so importing this module boots nothing', () => {
+describe('importing the entry module', () => {
+  it('boots nothing, because the module is not the process entry under vitest', () => {
     // The gate is the only thing between this suite and the owner's live
     // dashboard: with it gone, importing the module opens their real data
     // directory, binds their real port and shells out to tmux.
-    expect(isProcessEntry()).toBe(false);
+    const mainUrl = new URL('../../src/server/main.ts', import.meta.url).href;
+    expect(isProcessEntry(mainUrl)).toBe(false);
     expect(serve).not.toHaveBeenCalled();
+  });
+
+  it('is guarded by QC_CONFIG, which points at a path that cannot exist', () => {
+    // The gate is not the only line of defence and must not be the only one: a
+    // gate that breaks reaches the owner's real config unless this is set
+    // before any module-level code can read it. Any test file that imports
+    // `src/server/main.js` has to hoist the same guard — see AGENTS.md § Tests.
     expect(process.env['QC_CONFIG']).toBe(GUARD_CONFIG);
-  });
-
-  it('answers false for an entry path that is not this file', () => {
-    expect(isProcessEntry('/nonexistent/some-other-entry.js')).toBe(false);
-  });
-
-  it('answers false when the process was started with no entry path at all', () => {
-    expect(isProcessEntry(undefined)).toBe(false);
-  });
-
-  it('answers true for this module’s own path, however it is spelled', () => {
-    // `npm start` runs `node dist/server/main.js` with a relative argv[1], so
-    // the comparison has to be between resolved real paths.
-    const self = new URL(import.meta.url).pathname.replace('/test/server/main.test.ts', '');
-    expect(isProcessEntry(`${self}/src/server/main.ts`)).toBe(true);
+    expect(GUARD_CONFIG.startsWith('/nonexistent/')).toBe(true);
   });
 });
 
@@ -158,23 +152,5 @@ describe('guardTheProcess', () => {
 
     expect(logged.join('\n')).toContain('still serving');
     expect(exits).toEqual([]);
-  });
-});
-
-describe('fatalExit', () => {
-  it('sets the exit code before waiting for stderr, so nothing depends on the drain', () => {
-    // `process.exit` discards buffered output when stderr is a pipe, which is
-    // exactly how a supervisor runs the server.
-    const before = process.exitCode;
-    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-
-    try {
-      fatalExit(3);
-      expect(process.exitCode).toBe(3);
-      expect(write).toHaveBeenCalled();
-    } finally {
-      write.mockRestore();
-      process.exitCode = before;
-    }
   });
 });

@@ -114,7 +114,12 @@ commit body.
   `test/connectors/git-repo.test.ts`).
 - `src/server/main.ts` boots only when it is the process entry. The test that
   proves that is the one thing standing between the suite and the owner's live
-  dashboard.
+  dashboard — and it is not the only line of defence, because it cannot be:
+  **any test file that imports `src/server/main.js` must hoist a `QC_CONFIG`
+  pointing at a path that cannot exist**, before the import, the way
+  `test/server/main.test.ts` does. The gate stops a boot; the guard is what
+  stops a gate that has broken from reaching the owner's real config, real data
+  directory and port 4400.
 - `.claude/agents/rubber-duk-tests.md` is the auditor for all of this; run it
   in AUDIT mode before claiming coverage.
 

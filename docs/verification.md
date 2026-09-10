@@ -190,12 +190,31 @@ left alone, referenced or not.
 
 ## What still does not work
 
-**A live session blocks Remove worktree, but the UI offers the force escape
-anyway.** The refusal is correct — "qc-DOC-3871-implement is still idle in
-`<path>`, kill the session before removing its worktree" — but the panel then
-shows "Remove anyway, discarding changes" / "Keep it". `force` only overrides a
-dirty tree; it cannot override a live session, so "Remove anyway" just earns a
-second 409. The force confirmation belongs on the dirty-tree refusal only.
+**A dialog the server was never told about is reported, not acted on.** A
+`PermissionRequest` hook is posted with `curl … || true`, so it can be lost; the
+`Notification` that follows is the only trace of the dialog. It lags by ~6 s and
+carries nothing that places it in a turn or a run, so it never moves the session
+(spec §5.3): the card stays `working` with a "may need you" marker rather than
+moving into Needs you. The consequence is stated rather than hidden — a lost
+`PermissionRequest` means no lane change and no desktop notification, and the
+owner finds the session by its marker or by attaching to it.
+
+**A tool result cannot be matched to the dialog it answers.** The recorded
+`PermissionRequest` payloads in `test/fixtures/hook-events.jsonl` carry no
+`tool_use_id` — `PreToolUse` and `PostToolUse` do, `PermissionRequest` does not
+— so with two tools running at once there is no way to tell the dialog's own
+result from the other tool's. Every tool result therefore clears `pending`. The
+failure this buys: a parallel tool returning while a dialog is on screen clears
+the pending early, and the card reads `working` until the dialog's own result
+or the next `Notification` arrives. Keying the clear on `tool_use_id` needs a
+payload that carries one.
+
+**The bootstrap's stdout is a pipe, not the tmux tty.** `run.sh` pipes the
+bootstrap through `tee` so the owner sees it and the dashboard keeps a copy, so
+anything that probes `isatty(1)` behaves as it would under a redirect: `npm ci`
+drops its progress bar, colour goes away, and a bootstrap that needs a
+controlling terminal on stdout — a credential prompt, a pager, an interactive
+installer — will not get one.
 
 **"Open in VS Code" cannot report whether it worked.** `cmd.exe /c code
 --remote wsl+Ubuntu <path>` was spawned detached with `stdio: 'ignore'` and
@@ -231,10 +250,6 @@ No `PermissionRequest` for a non-question tool was observed in this run, so the
 playbook, state and time in state; the pending summary appears only in the
 session header and the drawer. With several sessions waiting, the Needs you
 column cannot be triaged without opening each one.
-
-**A card with a live session still offers to start another one.** The primary
-button stays "Start Implement" while an `implement` session is live; the server
-answers 409. It should open the session instead.
 
 **Vite dev logs two WebSocket warnings on load.** React StrictMode mounts the
 effect twice, so the first socket is closed before its handshake completes.

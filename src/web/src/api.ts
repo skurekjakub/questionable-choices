@@ -289,7 +289,8 @@ export async function removeWorktree(
  *
  * @param sessionId - Id of the session whose log to read.
  * @returns The accepted events, oldest first.
- * @throws {ApiError} With status 404 when no session has that id.
+ * @throws {ApiError} With status 404 when no session has that id, and 409 when
+ * the session exists but its log could not be read.
  */
 export async function getSessionEvents(sessionId: string): Promise<SessionEventsResponse> {
   const path = `/api/sessions/${encodeURIComponent(sessionId)}/events`;

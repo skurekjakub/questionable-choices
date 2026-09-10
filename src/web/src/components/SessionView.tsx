@@ -1,6 +1,15 @@
-import { lazy, Suspense, useEffect, useState, type JSX } from 'react';
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useState,
+  type JSX,
+  type LazyExoticComponent,
+} from 'react';
 import type { BoardView, SessionAction } from '../../../core/api.js';
 import {
+  ApiError,
   errorMessage,
   getSessionEvents,
   isForceableRemoval,
@@ -17,30 +26,51 @@ import { LabelChips, StatusChip } from './Chips.js';
 import { CopyButton } from './CopyButton.js';
 import { ErrorBoundary } from './ErrorBoundary.js';
 import { EditorIcon, ExternalIcon } from './Icons.js';
-import { Lamp, StaleMarker } from './Lamp.js';
+import { HintMarker, Lamp, StaleMarker } from './Lamp.js';
+import type { SessionTerminal as SessionTerminalComponent } from './Terminal.js';
 
 /**
- * The terminal and the xterm bundle behind it, which is the largest dependency
- * in the app and is reachable only from this route.
+ * Loads the terminal and the xterm bundle behind it, which is the largest
+ * dependency in the app and is reachable only from this route.
+ *
+ * @returns A component that resolves to the session terminal.
  */
-const SessionTerminal = lazy(() =>
-  import('./Terminal.js').then((module) => ({ default: module.SessionTerminal })),
-);
+function loadTerminal(): LazyExoticComponent<typeof SessionTerminalComponent> {
+  return lazy(() =>
+    import('./Terminal.js').then((module) => ({ default: module.SessionTerminal })),
+  );
+}
 
 /**
  * What the event log had to say about a failed session.
  *
- * "The log names no reason" and "the log could not be read" are different
- * answers to the owner's question, and collapsing them hides an outage behind
- * a shrug.
+ * "The log names no reason", "the log could not be read" and "there is no such
+ * session any more" are different answers to the owner's question, and
+ * collapsing them hides an outage — or a pruned session — behind a shrug.
  */
 type FailureRead =
   | { /** The log named a reason. */ kind: 'reason'; /** What it said. */ text: string }
   | { /** The log was read and named nothing. */ kind: 'none' }
+  | { /** The server knows no session with this id. */ kind: 'gone' }
   | {
       /** The log could not be read. */ kind: 'unreadable';
       /** Why the read failed. */ message: string;
     };
+
+/**
+ * Reduces a failed events read to the answer it is.
+ *
+ * The events route separates the two failures the owner would act on
+ * differently: 404 is a session the server no longer has, 409 is a log on disk
+ * it could not open.
+ *
+ * @param cause - Value caught from the events call.
+ * @returns What to tell the owner about the log.
+ */
+function failureRead(cause: unknown): FailureRead {
+  if (cause instanceof ApiError && cause.status === 404) return { kind: 'gone' };
+  return { kind: 'unreadable', message: errorMessage(cause) };
+}
 
 /**
  * Shows one session: its terminal, its lifecycle controls, and the issue it is
@@ -91,6 +121,12 @@ export function SessionView({
   const [forceRemove, setForceRemove] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<FailureRead | null>(null);
+  const [terminalAttempt, setTerminalAttempt] = useState(0);
+
+  // React caches a rejected lazy payload for the life of the component, so the
+  // chunk-404 this boundary exists for can only be retried by handing Suspense
+  // a different `lazy()` — re-rendering the same one throws the same rejection.
+  const SessionTerminal = useMemo(() => loadTerminal(), [terminalAttempt]);
 
   const cardSession =
     board?.columns
@@ -102,6 +138,9 @@ export function SessionView({
   // it on a null would resurrect a pending prompt or a staleness marker the
   // server has just cleared. Before the record loads the card is all there is.
   const shown = record ?? cardSession;
+  // The record carries the whole notification and the card only its summary, so
+  // the two shapes of the same field are reduced here rather than at the marker.
+  const hint = record !== null ? (record.hint?.summary ?? null) : (cardSession?.hint ?? null);
 
   const ended = shown === null ? null : endedHint(sessionId, shown.state, shown.lastExitCode);
 
@@ -125,7 +164,7 @@ export function SessionView({
         setFailure(reason === null ? { kind: 'none' } : { kind: 'reason', text: reason });
       })
       .catch((cause: unknown) => {
-        if (live) setFailure({ kind: 'unreadable', message: errorMessage(cause) });
+        if (live) setFailure(failureRead(cause));
       });
     return () => {
       live = false;
@@ -135,6 +174,12 @@ export function SessionView({
   // No board lists the session and nothing is still looking, so the terminal,
   // the checkout and the attach command have nothing to describe.
   const absent = missing && !loading;
+  // Attaching is only honest once a board has ruled the session in: before the
+  // first frame nothing has confirmed the id, and opening a socket for one that
+  // exists nowhere is a request the server can only refuse. The issue detail is
+  // deliberately not part of this — a tracker outage says nothing about whether
+  // the session is running.
+  const answered = board !== null && !resolving;
   const live = shown !== null && LIVE_STATES.has(shown.state);
   const needsYou = shown !== null && NEEDS_YOU_STATES.has(shown.state);
   const playbookLabel =
@@ -187,12 +232,13 @@ export function SessionView({
           <span className="state-pill" data-alert={needsYou}>
             <Lamp state={shown.state} />
             {ended?.label ?? STATE_LABELS[shown.state]}
+            {shown.staleSince == null ? null : <StaleMarker />}
+            {hint === null ? null : <HintMarker summary={hint} />}
             {shown.pending === null ? null : (
               <span className="pending">— {shown.pending.summary}</span>
             )}
           </span>
         )}
-        {shown?.staleSince == null ? null : <StaleMarker />}
         {shown?.branch == null ? null : <span className="branch">{shown.branch}</span>}
         <CacheReadout cache={shown?.cache ?? null} nowMs={nowMs} />
         <span className="header-spacer" />
@@ -243,6 +289,10 @@ export function SessionView({
             <p className="empty">
               No board lists this session, so there is no terminal to attach to.
             </p>
+          ) : !answered ? (
+            <p className="empty" role="status">
+              Waiting for the board to say whether this session exists.
+            </p>
           ) : (
             <>
               <div role="status">
@@ -273,7 +323,14 @@ export function SessionView({
                       Attach to it from a shell instead: <code className="path">{attach}</code>
                     </p>
                     <div className="session-block-actions">
-                      <button type="button" className="btn" onClick={retry}>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => {
+                          setTerminalAttempt((value) => value + 1);
+                          retry();
+                        }}
+                      >
                         Try again
                       </button>
                     </div>
@@ -351,6 +408,10 @@ export function SessionView({
               ) : failure.kind === 'none' ? (
                 <p className="empty empty-inline">
                   The event log records no reason beyond the exit code.
+                </p>
+              ) : failure.kind === 'gone' ? (
+                <p className="empty empty-inline">
+                  The server has no session with this id any more, so its event log is gone.
                 </p>
               ) : (
                 <p className="empty empty-inline">

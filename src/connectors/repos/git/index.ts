@@ -447,22 +447,4 @@ async function canonicalPath(path: string): Promise<string> {
   }
 }
 
-export {
-  GIT_MAX_BUFFER,
-  GIT_NETWORK_TIMEOUT_MS,
-  GitError,
-  git,
-  gitAttempt,
-  gitCommandLine,
-} from './git.js';
-export type { GitAttempt, GitOutput, GitRunOptions } from './git.js';
-export { parseWorktreeList, shortBranch } from './worktrees.js';
-export {
-  newestBranch,
-  parseRefNames,
-  parseRemoteBranches,
-  remoteBranchPattern,
-  remoteOf,
-  remoteRefPattern,
-  stripRemote,
-} from './branches.js';
+export { GitError, git, gitAttempt, gitCommandLine } from './git.js';

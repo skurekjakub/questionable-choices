@@ -84,7 +84,9 @@ src/
     hooks.ts            hook ingress → state machine → broadcast
     terminal-ws.ts      WS ↔ node-pty bridge
     mutex.ts            per-key serialisation of read-modify-write sequences
-    util.ts             shared JSON-body reader and error-message helper
+    util.ts             shared JSON-body reader, error-message helper, and the
+                        process-entry gate and drain-safe exit both entry
+                        points use
   web/                  Vite + React SPA (vite.config.ts, index.html, src/,
                         including dev-mock.ts, which VITE_MOCK=1 installs)
 test/                   vitest: core/, connectors/, server/ and web/, plus
@@ -211,18 +213,19 @@ interface SessionRecord {
   state: SessionState;
   stateSince: string; // ISO
   pending: { kind: 'permission' | 'question'; summary: string } | null;
-  // The dialog a tool result closed, and whether a tool call is still
-  // outstanding: together they decide whether a lagging Notification describes
-  // a dialog that is gone or one the server was never told about (§5.3).
-  answeredDialog?: { promptId: string | null; summary: string } | null;
-  toolCallOpen?: boolean;
+  // What the last Notification said. It never moves `state` (§5.3); the next
+  // lifecycle event clears it.
+  hint: { summary: string; at: string } | null;
   lastAssistantMessage: string | null; // snippet, from Stop hook when present
   lastExitCode: number | null; // bootstrap's or the CLI's, whichever ended last
   // Server start that found this live record already older than itself, or
   // null when the state is current (§5.5). Never set from a status-line
   // payload, which carries no state.
   staleSince: string | null;
-  lastEventAt: string | null; // last accepted event that carried lifecycle information
+  // Last accepted event that carried lifecycle information. Server-only: the
+  // wire type omits it (`WireSessionRecord`), because `staleSince` is the
+  // answer a client renders and nothing else may derive that answer itself.
+  lastEventAt: string | null;
   cache: {
     expiresAt: number | null;
     ttlSeconds: number;
@@ -263,57 +266,48 @@ failed          bootstrap or launch failed; tmux window holds the failed shell
 
 Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 
-| Event                                           | From                                    | To                 | Side data                                                                             |
-| ----------------------------------------------- | --------------------------------------- | ------------------ | ------------------------------------------------------------------------------------- |
-| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                                       |
-| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                                       |
-| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended; `lastAssistantMessage` and `lastExitCode` cleared                   |
-| hook SessionStart (source ≠ resume)             | any                                     | unchanged          | record `claudeSessionId`; an empty id never overwrites a known one                    |
-| hook SessionStart (source = resume)             | starting                                | idle               | the only signal that a resumed session is back at the prompt; never notifies          |
-| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                                         |
-| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                                         |
-| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                                       |
-| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                                         |
-| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                         |
-| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict               |
-| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, under the notification guard                  |
-| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message, under the notification guard                  |
-| hook PermissionDenied                           | any live                                | working            | clear pending                                                                         |
-| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl           |
-| action interrupt                                | working, waiting-*                      | idle               | the runner sent Escape; no hook reports an interrupt; `lastAssistantMessage` cleared  |
-| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                               |
-| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                             |
-| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9); never stamps `lastEventAt`, never clears `staleSince` |
+| Event                                           | From                                    | To                 | Side data                                                                                          |
+| ----------------------------------------------- | --------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------- |
+| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                                                    |
+| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                                                    |
+| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended; `pending`, `endedAt`, `lastAssistantMessage` and `lastExitCode` cleared          |
+| hook SessionStart (source ≠ resume)             | any                                     | unchanged          | record `claudeSessionId`; an empty id never overwrites a known one                                 |
+| hook SessionStart (source = resume)             | starting                                | idle               | the only signal that a resumed session is back at the prompt; never notifies                       |
+| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                                                      |
+| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                                                      |
+| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                                                    |
+| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                                                      |
+| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                                      |
+| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict                            |
+| hook Notification (any type)                    | any live not already needs-you          | unchanged          | `hint` = the message, capped at 280 chars, plus the time it arrived; never notifies                |
+| hook Notification (any type)                    | any needs-you, exited, failed           | unchanged          | nothing at all                                                                                     |
+| hook PermissionDenied                           | any live                                | working            | clear pending                                                                                      |
+| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl                        |
+| action interrupt                                | working, waiting-\*                     | idle               | the runner sent Escape; no hook reports an interrupt; `pending` and `lastAssistantMessage` cleared |
+| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                                            |
+| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                                          |
+| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9); never stamps `lastEventAt`, never clears `staleSince`              |
 
-The notification guard, shared by both Notification rows: a Notification only
-ever opens a pending, never redescribes or reclassifies one, so it is dropped
-when the record already needs the owner or already carries a `pending`.
+**A Notification never changes `state`.** It lags the dialog it describes by
+~6 s, carries only `notification_type` and a generic message, and nothing on it
+places it in a turn or a run: a state derived from one can therefore outlive the
+dialog with no later event guaranteed to clear it, which is a card stuck in
+Needs you on a session that is working. Converged, slightly inaccurate reporting
+beats a state machine that is right most of the time and wrong unrecoverably.
 
-Past that, the guard is keyed on the **dialog**, not on the turn. A
-Notification carries only `notification_type` and a generic message and lags
-the dialog by ~6 s, so it can never identify itself; what decides is the
-record's own memory:
+So the record keeps it as a `hint` instead — the message, capped like an
+assistant snippet, and the time it arrived. `CardSession.hint` carries the
+summary alone, for a UI to render as "this session may need you"; `needsYou`,
+the lane and the desktop notification are all untouched by it. A Notification
+that arrives while the record is already in a needs-you state, or is not live,
+does nothing at all. Every accepted lifecycle event other than a status-line
+payload clears the hint, so a hint never outlives the turn it arrived in by
+more than one event.
 
-- `answeredDialog` holds the `prompt_id` and the summary of the dialog a tool
-  result most recently closed. It is written by PostToolUse /
-  PostToolUseFailure / PermissionDenied **only when the record had a `pending`
-  to close** — a result that closed nothing leaves the previous answer
-  standing, or a second tool of the same turn would forget it. Opening a new
-  dialog clears it, and so does every turn boundary (UserPromptSubmit) and
-  every run boundary (`claude-start`, `claude-exit`, SessionEnd), so the guard
-  never depends on prompt ids being unique across runs.
-- `toolCallOpen` is set by PreToolUse and cleared by the tool's result. A
-  dialog can only be on screen while a tool call is waiting.
-
-A Notification is therefore dropped when the record has an answered dialog and
-either the payload carries no `prompt_id` at all (it cannot be placed, and the
-last resort must fail closed), or it names that dialog's turn and no tool call
-is outstanding — which makes it that dialog's own lagging echo. A Notification
-of the same turn **with** a tool call outstanding is admitted: it may describe
-a second dialog whose PermissionRequest hook never reached the server, which is
-exactly the case the Notification is the fallback for, and the one recorded
-session in `test/fixtures/hook-events.jsonl` opens two dialogs in its first
-turn.
+The consequences are stated rather than hidden: a `PermissionRequest` the hook
+transport drops (`curl … || true`) leaves the session `working` with a hint,
+and no card moves to Needs you for it. The events log still holds the
+Notification, and `docs/verification.md` records the limitation.
 
 Unknown events are ignored and logged. Every hook and launcher signal is
 appended to `<dataDir>/sessions/<id>/events.jsonl` (the payload as it arrived,
@@ -380,9 +374,11 @@ the release is what they are pinned to:
 1. Server validates: playbook exists, no live session for (issue, playbook),
    model/effort/permission values are in the allowed sets, and the prompt is a
    non-empty string (400 otherwise). The whole sequence holds the lock of the
-   session name it would take _and_ a per-(repo, issue) checkout lock, so two
-   simultaneous starts cannot both pass the liveness check and a removal of the
-   checkout cannot land in the middle of preparing it.
+   **base** session name — the name a first run of that playbook takes, which is
+   what makes the liveness check safe — _and_ a per-(repo, issue) checkout lock,
+   so two simultaneous starts cannot both pass the liveness check and a removal
+   of the checkout cannot land in the middle of preparing it. A second run takes
+   a suffixed id, whose own lock is held only around the launch.
 2. `Repo.prepare(issue, playbook, hints)` resolves `cwd` and `branch`; the
    server passes `hints.knownBranch` from the newest non-archived record for
    that issue in that repo:
@@ -419,9 +415,10 @@ the release is what they are pinned to:
 5. Reconciler on server boot and every 10 s: for each live record whose
    `stateSince` is older than one interval — a younger one is still in the
    launcher's hands, and a resume kills and recreates the tmux session —
-   `tmux has-session -t <id>`; missing → `exited` (or `failed` if it never
-   reached `starting`). A probe that throws is logged and the record is left
-   alone; a pass that is already running is skipped rather than overlapped.
+   `tmux has-session -t <id>`; missing → `exited`, or `failed` when the record
+   has no run at all, which means the launcher never posted `claude-start`. A
+   probe that throws is logged and the record is left alone; a pass that is
+   already running is skipped rather than overlapped.
 
    The reconciler answers liveness and nothing else. A live record this server
    has never heard from — `lastEventAt`, falling back to `stateSince` for a
@@ -434,11 +431,17 @@ the release is what they are pinned to:
 
    The judgement is on `lastEventAt`, not on `stateSince`: a session that has
    been `working` since before the restart and is still posting hooks is being
-   told about, and `stateSince` only moves when the state changes. The next
-   lifecycle event the reducer accepts clears the marker — a status-line
-   payload is not one, because it carries no state at all — and so does the
-   reconciler when the same pass closes the record, whose state is then the
-   most certain one available and which will receive no further event.
+   told about, and `stateSince` only moves when the state changes. Every
+   lifecycle event the reducer accepts stamps `lastEventAt` and clears the
+   marker, whether or not it changes anything else — a turn's worth of tool
+   results that each reduce to the state the record is already in is still proof
+   the session is alive. A status-line payload is not a lifecycle event, because
+   it carries no state at all, and an event the reducer refuses outright stamps
+   nothing. The reconciler also clears the marker when the same pass closes the
+   record, whose state is then the most certain one available and which will
+   receive no further event. An owner action that moves the record — Resume,
+   Kill, Interrupt — stamps it too, so a session the owner has just relaunched
+   is never badged as unverified.
 
 ## 6. Board projection (`core/projection.ts`)
 
@@ -466,11 +469,16 @@ the same sessions.
 
 Card payload: issue (key, summary, type, status, statusCategory, labels, url),
 column, sessions (each: id, playbookId, state, stateSince, pending,
-lastAssistantMessage, lastExitCode, staleSince, cache, done, live, needsYou,
-branch, attachCommand —
+lastAssistantMessage, lastExitCode, staleSince, hint, cache, done, live,
+needsYou, branch, attachCommand —
 the attach command is per session, not per card), primary playbook for the
 column (`primaryFor` match; falls back to the first playbook), and the worktree
 path when known.
+
+`hint` is the last `Notification`'s message (§5.3) and is decoration: it never
+changes `state`, never sets `needsYou`, never moves a card between columns and
+never raises a desktop notification. The column is chosen from session states
+alone, exactly as above.
 
 ## 7. Prompts and playbooks
 
@@ -780,19 +788,24 @@ Board:
 - Header, in this order: wordmark, needs-you badge, synced-ago,
   stream-offline indicator, rule, refresh, notifications. The workspace
   switcher is a dropdown of epics (workspace name, with the epic key and repo
-  as secondary text), always shown, active one remembered in localStorage,
-  with "Add workspace…" and then "Remove this workspace" as its last two
-  entries (confirm; nothing but the workspace and its own connector goes).
+  as secondary text), always shown, active one remembered in localStorage; a
+  workspace the session route resolves is shown without being remembered, and
+  the remembered one comes back when that route is left. Its last two entries
+  are "Add workspace…" and then "Remove this workspace" (confirm; nothing but
+  the workspace and its own connector goes).
   The needs-you badge also goes into `document.title` and the favicon.
 - Five columns, each scrollable, counts in the heading; the lane strip is one
   tab stop.
 - Card: type glyph then key (mono) — glyph first, everywhere — summary (two
   lines max), Jira status chip, labels (max 3 + "+n"), then one row per
   non-archived session: playbook, state, `time in state`, a done marker, an
-  unverified-since-restart marker, and the cache gauge. The state reads
+  unverified-since-restart marker, a may-need-you marker, and the cache gauge.
+  The state reads
   `failed, exit N` and `exited, code N` for a non-zero code, with the tmux
-  hint in its `title`. The unverified marker is a lamp-style dot whose whole
-  sentence lives in its `aria-label` and `title`. On a narrow track the cache
+  hint in its `title`. The unverified and may-need-you markers are lamp-style
+  dots whose whole sentence lives in their `aria-label` and `title`; the
+  may-need-you marker renders `CardSession.hint` (§5.3) and never changes the
+  state word, the lamp or the lane. On a narrow track the cache
   gauge moves to a second line. Primary action button for the column's
   playbook, which reads "Open <label> session" and navigates instead of
   starting when a live session for that playbook already exists; an "Open in
@@ -801,7 +814,8 @@ Board:
   done, Open in Jira.
 - Clicking the card body opens the issue drawer: description, all sessions
   with actions, worktree path, Open in VS Code, tmux attach command (copy
-  button), Remove worktree and Archive.
+  button), Remove worktree and Archive. The may-need-you marker is the card
+  row's and the session header's; the drawer does not render it.
 - Add workspace dialog (from the switcher): name, epic key, repo (select
   from config), connector (select from config, or "new" revealing id, site,
   email env var, token env var), review statuses (comma-separated, default
@@ -811,13 +825,16 @@ Board:
 Session view:
 
 - Terminal fills ~75 %; header, in this order: Back, key, playbook, state
-  pill (carrying the ended-state label and the unverified marker), branch,
+  pill (carrying the ended-state label), the unverified marker and the
+  may-need-you marker as its siblings, branch,
   cache countdown, then Interrupt · Kill · Resume. Resume appears for any
   non-live state, `failed` included, and is disabled while the record has no
   Claude session id or the issue detail has not loaded yet.
 - Right panel: issue summary/description, status chip, labels, Jira link,
-  worktree path, Open in VS Code, `tmux attach -t <id>` copy and the shell
-  hint that goes with it, Remove worktree.
+  worktree path, Open in VS Code, `tmux attach -t <id>` copy, a "Why it
+  failed" / "Why it ended" section — the reason the events route exists (§11)
+  — and inside it the shell hint that goes with the attach command, then
+  Remove worktree.
 - Remove worktree has no confirmation dialog: a refusal carrying
   `reason: 'dirty-worktree'` relabels the button to say it will force, and
   the second click executes. The message text is never parsed.
@@ -859,12 +876,22 @@ a file:
   hold. `GET /api/sessions/:id/events` therefore serves an edited transcript.
 - **A document the store cannot use is set aside, never silently replaced.**
   `sessions.json`, `flags.json` and `worktrees.json` are checked on load; one
-  that is missing, unparseable or the wrong shape is renamed to
-  `<name>.rejected`, reported, and treated as empty, because the next write
-  renames a fresh document over that path. A `sessions.json` that parses as an
-  array keeps the members that carry an `id`, `issueKey`, `repoId`, `state`
-  and `stateSince`, and drops the rest with a count: one bad member must not
-  cost the others, and an unchecked one reaches the projection.
+  that is unparseable or the wrong shape is renamed to `<name>.rejected`,
+  reported, and treated as empty, because the next write renames a fresh
+  document over that path. A **missing** document is simply empty and nothing
+  is renamed. An existing `<name>.rejected` is never overwritten: a second
+  rejection is kept under a timestamped name, so the copy of the owner's
+  original file survives their second attempt at fixing it.
+- **A `sessions.json` whose members are not all usable is set aside too.** It
+  keeps the members that carry an `id`, `issueKey`, `repoId`, `stateSince` and
+  a `state` the state machine has, drops the rest, and names the dropped ids in
+  the warning: one bad member must not cost the others, an unchecked one
+  reaches the projection, and the drop is irreversible unless the whole
+  document is kept.
+- **Temporary files are swept on load.** `writeJsonAtomic` removes its own
+  temporary file when a rename fails, but a process killed between the write
+  and the rename cannot; `Store.load` deletes any `*.tmp` sibling, because
+  nothing else ever cleans `dataDir`.
 
 An atomic write means a reader always sees one whole document, the old one or
 the new one. It is not durability: nothing is fsynced.
@@ -887,10 +914,12 @@ the new one. It is not durability: nothing is fsynced.
 - PTY spawn fails → WS closes with a reason frame; the SPA writes the reason
   into the xterm buffer as a red line and shows "Detached from the terminal.";
   the buffer is discarded on the next reconnect.
-- Bootstrap exits non-zero → `failed`, with the exit code on the record and on
-  `CardSession.lastExitCode`, and the tail of the bootstrap's own output posted
-  as `message` on the `bootstrap-failed` signal, which survives in the event
-  log; the failed shell stays open in tmux.
+- Bootstrap exits non-zero → `failed`, and the tail of the bootstrap's own
+  output is posted as `message` on the `bootstrap-failed` signal, which
+  survives in the event log; the failed shell stays open in tmux. The exit code
+  reaches the record and `CardSession.lastExitCode` only while the record is
+  still `bootstrapping`: a signal that arrives after the reconciler has already
+  closed the record is refused, so its code lives in the log alone.
 - The listening socket cannot be opened, for any reason → the cause is logged
   and the process exits 1. Without a socket it serves nothing, and the signal
   handlers keep the event loop alive, so it must not stay up.
@@ -919,9 +948,18 @@ What the SPA degrades to rather than failing:
 
 ## 15. Testing
 
-Vitest. Every module gets a suite next to it under `test/<layer>/`, so the rule
-rather than a list: `test/core`, `test/connectors`, `test/server` and
-`test/web` mirror `src/`, and a new module arrives with its suite.
+Vitest. `test/core`, `test/connectors`, `test/server` and `test/web` mirror
+`src/`. Every module whose behaviour a caller depends on gets a suite next to
+it, and a new one arrives with its suite; a module that is only a factory over
+another module's behaviour — `server/connectors.ts` — is covered through the
+suites of what it builds, which is stated here so the absence is a decision
+rather than a gap.
+
+Any test file that imports `src/server/main.js` must hoist a `QC_CONFIG`
+pointing at a path that cannot exist, before the import. The entry gate is what
+stops a boot; the guard is what stops a broken gate from reaching the owner's
+real configuration, data directory and port. `test/server/main.test.ts` sets it
+and asserts it.
 
 **No tmux, no tracker and no listening socket.** Three things a test may still
 really do, because a seam there would test the seam rather than the behaviour:
@@ -934,8 +972,10 @@ really do, because a seam there would test the seam rather than the behaviour:
   so nothing opens a socket, and the fetch deadline is measured rather than
   asserted from an option.
 - `test/connectors/session-files.test.ts` runs the generated launcher under
-  `bash` with a stub `curl` on `PATH`, which is the only way to prove the
-  bootstrap-failure body it posts is JSON a server can parse.
+  `bash` with stub `curl` and `claude` executables on `PATH`, which is the only
+  way to prove the bootstrap-failure body it posts is JSON a server can parse.
+  Both stubs are mandatory: without the second the launcher's own command line
+  resolves whatever `claude` is installed, which § Tests forbids.
 - `test/server/session-manager.test.ts` spawns a real child process for the
   editor launcher, whose failure arrives as an asynchronous `error` event and
   nowhere else.
@@ -946,8 +986,9 @@ line it exists for is theatre. Suites that carry a claim worth naming here:
 
 - `state-machine`: a table of (state, event) → (state, pending, extras);
   "unknown event leaves state untouched"; "SessionEnd from anywhere"; the
-  notification guard in both directions, replayed against
-  `test/fixtures/hook-events.jsonl` with one hook dropped.
+  notification rule — the state never moves, the hint sets and clears —
+  replayed against `test/fixtures/hook-events.jsonl` whole and with the
+  `PermissionRequest` of its second dialog dropped.
 - `config`: example config validates; missing env name, bad effort, unknown
   workspace reference, duplicate playbook ids fail with a locator; the
   connector cascade takes the removed workspace's own connector and nothing
@@ -956,9 +997,12 @@ line it exists for is theatre. Suites that carry a claim worth naming here:
   asserting the other has not proceeded; the poll suspension in all three
   directions; the staleness marker.
 - `server/store`: the atomic write, asserted by reading the document
-  throughout a run of writes rather than by its inode; the rejection path.
-- `server/main`: `isProcessEntry` answers false under the runner, and
-  importing the module performs no listen.
+  throughout a run of writes rather than by its inode; the rejection path,
+  including a second rejection and a dropped member.
+- `server/main`: importing the module performs no listen, and the `QC_CONFIG`
+  guard is set. `server/util`: `isProcessEntry` answers false for a path that
+  is not the module and true through a symlink, which is the case the realpath
+  pair exists for.
 
 Manual verification (plan task, integration): start an implement session on a
 real DOC-3807 child, watch bootstrapping → starting → working → idle, answer

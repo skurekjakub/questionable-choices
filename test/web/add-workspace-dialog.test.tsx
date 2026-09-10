@@ -86,11 +86,11 @@ describe('AddWorkspaceDialog', () => {
       { path: 'name', message: 'name is already taken' },
       { path: 'epic', message: 'epic must be an issue key' },
     ]);
-    expect(document.querySelectorAll('[aria-invalid]')).toHaveLength(2);
+    expect(document.querySelectorAll('[aria-invalid="true"]')).toHaveLength(2);
 
     type('Name', 'Docs Next');
     type('Epic key', 'DOC-3807');
-    expect(document.querySelectorAll('[aria-invalid]')).toHaveLength(0);
+    expect(document.querySelectorAll('[aria-invalid="true"]')).toHaveLength(0);
     expect(screen.queryByText(/Invalid workspace request/)).toBeNull();
   });
 
@@ -123,11 +123,11 @@ describe('AddWorkspaceDialog', () => {
     await waitFor(() => expect(screen.getByText('site must not be empty')).toBeTruthy());
 
     fireEvent.change(control('Issue source'), { target: { value: 'jira' } });
-    // The four fields unmount, so a problem left on one of them is neither
-    // shown nor retired until the next submit.
+    // The four fields unmount, so a problem left on one of them can never be
+    // answered: it is retired with them rather than kept as an invisible one.
     expect(screen.queryByText('site must not be empty')).toBeNull();
     expect(screen.queryByText(/Invalid workspace request/)).toBeNull();
-    expect(document.querySelectorAll('[aria-invalid]')).toHaveLength(0);
+    expect(document.querySelectorAll('[aria-invalid="true"]')).toHaveLength(0);
   });
 
   it('does not count a changed select as work worth confirming away', () => {
@@ -164,6 +164,26 @@ describe('AddWorkspaceDialog', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.getByText(/Closing discards it/)).toBeTruthy();
     expect(closed).toBe(0);
+  });
+
+  it('refuses to be dismissed over the request that creates the workspace', async () => {
+    // The workspace is created whether or not the dialog is on screen, so a
+    // dismissal here loses the 201 that selects it and the 400 that names the
+    // field to fix.
+    let closed = 0;
+    vi.mocked(createWorkspace).mockImplementation(() => new Promise(() => {}));
+    open(() => {
+      closed += 1;
+    });
+    type('Name', 'Docs Next');
+    type('Epic key', 'DOC-3807');
+    fireEvent.click(screen.getByRole('button', { name: 'Add workspace' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Adding' })).toBeTruthy());
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(closed).toBe(0);
+    expect(screen.queryByText(/Closing discards it/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Adding' })).toBeTruthy();
   });
 
   it('hands focus on when the button holding it unmounts itself', () => {

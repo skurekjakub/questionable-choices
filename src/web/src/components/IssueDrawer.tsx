@@ -16,6 +16,7 @@ import {
 import { attachCommand, timeInState, typeGlyph } from '../format.js';
 import { useFocusTrap } from '../hooks/useFocusTrap.js';
 import {
+  DROPPED_SENTENCE,
   LIVE_STATES,
   STATE_LABELS,
   type Pending,
@@ -57,53 +58,53 @@ interface DrawerSession {
  * Merges the board's live sessions over the records the detail load returned,
  * so the rows keep ticking while the drawer stays open.
  *
- * The board's copy of a session replaces the snapshot's wholesale rather than
- * field by field. Falling through on a null would mean the two fields a
- * session clears when it stops needing the owner — `pending` and `cache` — are
- * the two the row keeps showing from the snapshot, so a killed session goes on
- * advertising a permission request nobody can answer.
+ * The board is the authority on which sessions the issue still has and on
+ * every field they carry; the loaded detail only adds the Claude session id,
+ * which the board does not send. A record the board has stopped listing has
+ * been archived, so it leaves with its actions rather than staying behind as a
+ * frozen row still offering Kill and Resume.
  *
  * @param card - Card the drawer was opened from, carrying the live sessions.
  * @param detail - Loaded issue detail, or null before it arrives.
- * @returns One row per session, newest first.
+ * @returns One row per session the board lists, in the board's own order, with
+ * the ones the detail has never seen first.
  */
 export function drawerSessions(card: Card, detail: IssueDetailResponse | null): DrawerSession[] {
   const live = new Map(card.sessions.map((session) => [session.id, session]));
-  const rows: DrawerSession[] = [];
+  const known: DrawerSession[] = [];
   for (const record of detail?.sessions ?? []) {
     const current = live.get(record.id);
+    if (current === undefined) continue;
     live.delete(record.id);
-    const shown = current ?? record;
-    rows.push({
+    known.push({
       id: record.id,
       playbookId: record.playbookId,
-      state: shown.state,
-      stateSince: shown.stateSince,
-      pending: shown.pending,
-      cache: shown.cache,
-      attachCommand: attachCommand(record.id, current?.attachCommand),
-      done: shown.done,
+      state: current.state,
+      stateSince: current.stateSince,
+      pending: current.pending,
+      cache: current.cache,
+      attachCommand: attachCommand(record.id, current.attachCommand),
+      done: current.done,
       // The board carries no Claude session id, so this is the one field the
       // snapshot answers even while the board still lists the session.
       claudeSessionId: record.claudeSessionId,
     });
   }
   // A session started after the detail loaded is on the board and nowhere else;
-  // it has no Claude session id yet, so resuming it stays disabled.
-  for (const session of live.values()) {
-    rows.unshift({
-      id: session.id,
-      playbookId: session.playbookId,
-      state: session.state,
-      stateSince: session.stateSince,
-      pending: session.pending,
-      cache: session.cache,
-      attachCommand: attachCommand(session.id, session.attachCommand),
-      done: session.done,
-      claudeSessionId: null,
-    });
-  }
-  return rows;
+  // it has no Claude session id yet, so resuming it stays disabled. The board
+  // already orders its sessions most relevant first, so they keep that order.
+  const unseen = [...live.values()].map((session) => ({
+    id: session.id,
+    playbookId: session.playbookId,
+    state: session.state,
+    stateSince: session.stateSince,
+    pending: session.pending,
+    cache: session.cache,
+    attachCommand: attachCommand(session.id, session.attachCommand),
+    done: session.done,
+    claudeSessionId: null,
+  }));
+  return [...unseen, ...known];
 }
 
 /**
@@ -191,6 +192,8 @@ function SessionActions({
  * @param props.workspaceId - Id of the workspace the issue belongs to.
  * @param props.playbooks - Playbooks the workspace offers, for session labels.
  * @param props.nowMs - Current time in epoch milliseconds.
+ * @param props.dropped - Whether the board has stopped listing the card, so
+ * what is on screen is the card as the drawer opened it.
  * @param props.onClose - Called when the drawer should close.
  * @param props.onOpenSession - Called with a session id to show its terminal.
  * @returns The drawer element.
@@ -200,6 +203,7 @@ export function IssueDrawer({
   workspaceId,
   playbooks,
   nowMs,
+  dropped,
   onClose,
   onOpenSession,
 }: {
@@ -207,6 +211,7 @@ export function IssueDrawer({
   workspaceId: string;
   playbooks: PlaybookSummary[];
   nowMs: number;
+  dropped: boolean;
   onClose: () => void;
   onOpenSession: (sessionId: string) => void;
 }): JSX.Element {
@@ -304,10 +309,10 @@ export function IssueDrawer({
         <div className="drawer-head">
           <div>
             <div className="card-ident">
-              <span className="card-key">{card.issue.key}</span>
               <span className="type-glyph" title={card.issue.type}>
                 {typeGlyph(card.issue.type)}
               </span>
+              <span className="card-key">{card.issue.key}</span>
             </div>
             <h2>{card.issue.summary}</h2>
           </div>
@@ -324,6 +329,7 @@ export function IssueDrawer({
             </p>
           )}
           <div role="status">
+            {dropped ? <p className="empty empty-inline">{DROPPED_SENTENCE}</p> : null}
             {notice === null ? null : <p className="empty empty-inline">{notice}</p>}
           </div>
 
@@ -413,8 +419,8 @@ export function IssueDrawer({
                     <Lamp state={session.state} />
                     <span className="session-playbook">{labelFor(session.playbookId)}</span>
                     <span>{STATE_LABELS[session.state]}</span>
-                    {session.done ? <span className="session-done">done</span> : null}
                     <span className="session-time">{timeInState(session.stateSince, nowMs)}</span>
+                    {session.done ? <span className="session-done">done</span> : null}
                     <CacheReadout cache={session.cache} nowMs={nowMs} />
                   </div>
                   {session.pending === null ? null : (

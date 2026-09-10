@@ -156,9 +156,11 @@ Throw an error carrying `permanent: true` — the marker `PermanentSourceError`
 in `src/core/types.ts` describes and `isPermanentSourceError` recognises, as
 `JiraTruncatedError` does. The server suspends that workspace's poll timer
 until the owner asks for a refresh, so the same rejected query does not cost
-its full request budget every `pollSeconds` for as long as the server runs.
-Nothing about the marker is Jira's, and the server never names a connector's
-own error classes.
+its full request budget every `pollSeconds` for as long as the server runs, and
+it logs the class that raised the marker so a suspension can be traced back to
+its source. `permanent` must be exactly `true`: `permanent: false` is the
+natural way to say "transient" and is treated as one. Nothing about the marker
+is Jira's, and the server never names a connector's own error classes.
 
 A resource the tracker returns without a usable key is dropped from `list`
 and reported as "no such issue" by `get`: the key is what the projection

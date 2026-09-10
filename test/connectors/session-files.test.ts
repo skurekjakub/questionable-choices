@@ -221,6 +221,7 @@ describe('buildRunScript', () => {
         '  post bootstrap-failed "{\\"exitCode\\":$status,\\"message\\":\\"$qc_message\\"}"',
         '  exec bash',
         'fi',
+        'rm -f "$qc_bootstrap_log"',
         '',
         "post claude-start '{}'",
         '',
@@ -292,22 +293,41 @@ describe('the generated launcher, run by bash', () => {
   });
 
   /**
-   * Runs a generated launcher with a stub `curl` that records what it posted.
+   * Runs a generated launcher with stub `curl` and `claude` executables.
+   *
+   * The stub `claude` is not a convenience: `AGENTS.md` § Tests forbids a test
+   * from starting a real one, and the launcher's own command line would resolve
+   * whatever is on the developer's PATH.
    *
    * @param bootstrap - Shell command the launcher runs as the bootstrap.
+   * @param claudeExit - Exit status the stub `claude` ends with.
    * @returns One entry per POST, in the order the launcher made them.
    */
-  async function runLauncher(bootstrap: string): Promise<Array<{ url: string; body: string }>> {
+  async function runLauncher(
+    bootstrap: string,
+    claudeExit = 0,
+  ): Promise<Array<{ url: string; body: string }>> {
     dir = await mkdtemp(join(tmpdir(), 'qc-launcher-'));
     const bin = join(dir, 'bin');
     const log = join(dir, 'posts.tsv');
     await writeFile(join(dir, 'prompt.txt'), 'do the thing\n', 'utf8');
     await writeFile(
       join(dir, 'run.sh'),
-      buildRunScript({ ...RUN_CONTEXT, dir, bootstrap }),
+      buildRunScript({ ...RUN_CONTEXT, dir, bootstrap, claudeBin: join(bin, 'claude') }),
       'utf8',
     );
     await mkdir(bin, { recursive: true });
+    await writeFile(
+      join(bin, 'claude'),
+      [
+        '#!/usr/bin/env bash',
+        `printf '%s\\n' "$*" > ${JSON.stringify(join(dir, 'claude-argv.txt'))}`,
+        `exit ${String(claudeExit)}`,
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await chmod(join(bin, 'claude'), 0o755);
     await writeFile(
       join(bin, 'curl'),
       [
@@ -358,7 +378,7 @@ describe('the generated launcher, run by bash', () => {
     );
 
     const failure = posts.find((post) => post.url.endsWith('/bootstrap-failed'));
-    expect(failure).toBeDefined();
+    expect(failure?.url).toContain('/launcher/bootstrap-failed');
     const body = JSON.parse(failure?.body ?? '') as { exitCode: number; message: string };
     expect(body.exitCode).toBe(3);
     expect(body.message).toContain('npm error 404 Not Found');
@@ -378,12 +398,31 @@ describe('the generated launcher, run by bash', () => {
   });
 
   it('launches claude when the bootstrap succeeds, posting no failure', async () => {
-    const posts = await runLauncher('printf "installed\\n"');
+    const posts = await runLauncher('printf "installed\\n"', 7);
 
     expect(posts.map((post) => post.url.split('/').pop())).toEqual([
       'bootstrap-start',
       'claude-start',
       'claude-exit',
     ]);
+    // The status, not just the sequence: without it the stub is decorative and
+    // nothing notices that the line ran whatever `claude` was on PATH.
+    const exit = posts.find((post) => post.url.endsWith('/claude-exit'));
+    expect(JSON.parse(exit?.body ?? '')).toEqual({ exitCode: 7 });
+    expect(await readFile(join(dir, 'claude-argv.txt'), 'utf8')).toContain('do the thing');
+  });
+
+  it('removes the bootstrap log when the bootstrap succeeded', async () => {
+    // Nothing prunes <dataDir>/sessions/, so a kept transcript of every
+    // successful `npm ci` is there for the life of the data directory.
+    await runLauncher('printf "installed\\n"');
+
+    await expect(readFile(join(dir, 'bootstrap.log'), 'utf8')).rejects.toThrow();
+  });
+
+  it('keeps the bootstrap log when the bootstrap failed', async () => {
+    await runLauncher('printf "boom\\n" >&2; exit 2');
+
+    expect(await readFile(join(dir, 'bootstrap.log'), 'utf8')).toContain('boom');
   });
 });

@@ -14,13 +14,3 @@ import { GitRepo } from './git/index.js';
 export function createRepo(id: string, config: RepoConfig): Repo {
   return new GitRepo(id, config);
 }
-
-export {
-  DetachedWorktreeError,
-  DirtyWorktreeError,
-  GitError,
-  GitRepo,
-  InvalidIssueKeyError,
-  NoBranchError,
-  WorktreeNotFoundError,
-} from './git/index.js';

@@ -159,13 +159,26 @@ losing their words.
   is running. Amber is a disc for a permission prompt, which blocks on one
   answer, and a ring for a question or an idle turn, which are open-ended.
   Colour adds the urgency band, and the state word sits right next to it.
-- **Unverified marker** — a second, half-height lamp next to the first, on a
-  session whose state the server has not heard confirmed since it restarted. It
-  is a marker rather than a word because the sentence it stands for is longer
-  than the track it would sit in; the sentence is its accessible name and its
-  tooltip, so nothing about it is colour-only. The same rule decides where a
-  failed session's tmux hint goes: a tooltip on the row, and words in the
-  session panel, which has room for them.
+- **Unverified marker** — a second, half-height lamp on a session whose state
+  the server has not heard confirmed since it restarted. On the card row it sits
+  at the right-hand end, with the duration and the done marker rather than next
+  to the state lamp, because the row reads left to right as the spec's sentence
+  does: playbook, state, time in state, done, unverified, gauge. In the session
+  header it sits inside the state pill, which is the one thing the header says
+  about state. It is a marker rather than a word because the sentence it stands
+  for is longer than the track it would sit in; the sentence is its accessible
+  name and its tooltip, so nothing about it is colour-only. The same rule
+  decides where a failed session's tmux hint goes: a tooltip on the row, and
+  words in the session panel, which has room for them.
+- **May-need-you marker** — a 5 px amber dot, half the lamp's diameter, on a
+  session whose last `Notification` suggests it is waiting on the owner. A
+  notification lags the dialog it describes by seconds and cannot be placed in a
+  turn, so what it says is a hint and not a state: the marker never moves the
+  card to _Needs you_, never tints the card rail, and never raises a desktop
+  notification. It is the same family as the unverified marker and for the same
+  reason — the sentence lives in the accessible name and the tooltip — and it
+  sits next to it, at the right of the row and inside the state pill. The next
+  real lifecycle event clears it.
 - **Card rail** — a 2 px vertical rule down the card's left edge, coloured by
   the card's most urgent session. This is the peripheral-vision signal that
   lets a column be scanned without reading. Cards themselves are never
@@ -177,11 +190,14 @@ losing their words.
   animation is replaced by a static outer ring, so the distinction survives
   without motion.
 - **Cache gauge** — the one gauge in the product, and the only decorative
-  flourish that survives. Under the `⏳ m:ss` countdown sits a 28 px hairline
-  that depletes with `secondsLeft / ttlSeconds`, falling back to the
-  five-minute default when the payload named no TTL, so the bar and the label
-  never disagree. Nothing else in the UI gets a gauge, so it reads as the
-  instrument's needle rather than as chrome.
+  flourish that survives. A 28 px hairline depletes with
+  `secondsLeft / ttlSeconds`, falling back to the five-minute default when the
+  payload named no TTL, so the bar and the label never disagree. It sits under
+  the `⏳ m:ss` countdown wherever the two have a column to themselves; on the
+  card row below 1200 px the gauge is the reading that takes a line of its own
+  — see the paragraph above — and there the hairline sits beside the countdown
+  instead. Nothing else in the UI gets a gauge, so it reads as the instrument's
+  needle rather than as chrome.
 
 ## The workspace switcher
 

@@ -10,7 +10,8 @@ import { findSessionOwner, lists } from '../session-owner.js';
  * Notifications are deduped by session id and outlive a workspace switch, so a
  * notification clicked after switching lands on a session the current board has
  * never heard of; the owning workspace is found by reading the other boards.
- * Each session id is searched at most once.
+ * Each session id is searched at most once, and a search that has started
+ * always answers: nothing cancels it, so the view cannot be left loading.
  *
  * @param sessionId - Id of the session being shown, or null off the session route.
  * @param config - Public configuration naming every workspace, or null before it loads.
@@ -27,30 +28,46 @@ export function useSessionOwner(
 ): boolean {
   const [searching, setSearching] = useState(false);
   const searched = useRef<string | null>(null);
+  const pending = useRef<string | null>(null);
+  const boardRef = useRef(board);
+  boardRef.current = board;
+  const select = useRef(onSelectWorkspace);
+  select.current = onSelectWorkspace;
+
+  // The board is read through the ref rather than watched, because the board
+  // frame is debounced and arrives repeatedly while a search is in flight. The
+  // one thing the effect branches on is whether a loaded board has ruled the
+  // session out, which is stable across those frames.
+  const unlisted = sessionId !== null && board !== null && !lists(board, sessionId);
 
   useEffect(() => {
-    if (sessionId === null || board === null || config === null) return;
-    if (lists(board, sessionId)) {
-      setSearching(false);
+    const current = boardRef.current;
+    if (sessionId === null || config === null || current === null || !unlisted) return;
+    if (searched.current === sessionId) {
+      // A re-run must report the search this session already started rather
+      // than returning with `searching` stuck at whatever the last run left.
+      setSearching(pending.current === sessionId);
       return;
     }
-    if (searched.current === sessionId) return;
     searched.current = sessionId;
     const others = config.workspaces
-      .filter((workspace) => workspace.id !== board.workspaceId)
+      .filter((workspace) => workspace.id !== current.workspaceId)
       .map((workspace) => workspace.id);
     if (others.length === 0) return;
-    let live = true;
+    pending.current = sessionId;
     setSearching(true);
     void findSessionOwner(sessionId, others, getBoard).then((owner) => {
-      if (!live) return;
-      if (owner !== null) onSelectWorkspace(owner);
+      // A newer session's search owns the flag; this one's answer is stale and
+      // must not clear a search that is still running.
+      if (pending.current !== sessionId) return;
+      pending.current = null;
+      if (owner !== null) select.current(owner);
       setSearching(false);
     });
-    return () => {
-      live = false;
-    };
-  }, [sessionId, config, board, onSelectWorkspace]);
+  }, [sessionId, config, unlisted]);
 
-  return searching;
+  // A board that has come to list the session answers the question the search
+  // was asking, so the view stops waiting for the search whether or not it has
+  // returned yet.
+  return searching && unlisted;
 }

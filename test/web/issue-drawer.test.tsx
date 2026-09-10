@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { IssueDetailResponse } from '../../src/core/api.js';
 import { drawerSessions, IssueDrawer } from '../../src/web/src/components/IssueDrawer.js';
+import { DROPPED_SENTENCE } from '../../src/web/src/model.js';
 import { card, cardSession, FIXTURE_NOW } from './fixtures.js';
 
 vi.mock('../../src/web/src/api.js', async (importOriginal) => ({
@@ -29,7 +30,7 @@ function detail(key: string, sessions: IssueDetailResponse['sessions']): IssueDe
       statusCategory: 'inprogress',
       labels: [],
       url: `https://example.atlassian.net/browse/${key}`,
-      description: 'the description',
+      description: `${key} description`,
       updated: FIXTURE_NOW,
     },
     sessions,
@@ -67,7 +68,7 @@ function record(
     lastAssistantMessage: null,
     lastExitCode: null,
     staleSince: null,
-    lastEventAt: FIXTURE_NOW,
+    hint: null,
     cache: null,
     createdAt: FIXTURE_NOW,
     endedAt: null,
@@ -103,7 +104,9 @@ describe('drawerSessions', () => {
       detail('DOC-1', [
         record('qc-DOC-1-implement', {
           cache: {
-            expiresAt: Date.parse(FIXTURE_NOW),
+            // Epoch seconds, as `SessionCache` says; a fixture in milliseconds
+            // passes here only because nothing reads it, and is then copied.
+            expiresAt: Math.floor(Date.parse(FIXTURE_NOW) / 1000),
             ttlSeconds: 300,
             source: 'statusline',
             warm: true,
@@ -122,22 +125,61 @@ describe('drawerSessions', () => {
     expect(rows[0]?.claudeSessionId).toBe('claude-9');
   });
 
-  it('falls back to the snapshot for a session the board no longer lists', () => {
+  it('drops a session the board has stopped listing, rather than freezing its row', () => {
+    // A session archived from anywhere else leaves `card.sessions` and stays in
+    // the loaded detail; keeping it offers Kill and Resume against a record the
+    // server will refuse.
     const rows = drawerSessions(
       card('DOC-1', []),
       detail('DOC-1', [record('qc-DOC-1-implement', { state: 'exited' })]),
     );
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.state).toBe('exited');
+    expect(rows).toHaveLength(0);
+  });
+
+  it('shows every session the board lists before the detail has loaded', () => {
+    const rows = drawerSessions(card('DOC-1', [cardSession('qc-DOC-1-implement')]), null);
+    expect(rows.map((row) => row.id)).toEqual(['qc-DOC-1-implement']);
   });
 
   it('puts a session started after the load at the top, with no id to resume from', () => {
     const rows = drawerSessions(
-      card('DOC-1', [cardSession('qc-DOC-1-verify')]),
+      card('DOC-1', [cardSession('qc-DOC-1-verify'), cardSession('qc-DOC-1-implement')]),
       detail('DOC-1', [record('qc-DOC-1-implement')]),
     );
     expect(rows.map((row) => row.id)).toEqual(['qc-DOC-1-verify', 'qc-DOC-1-implement']);
     expect(rows[0]?.claudeSessionId).toBeNull();
+  });
+
+  it('keeps the board’s order for the sessions the detail has never seen', () => {
+    // `Card.sessions` is ordered most relevant first; reversing it puts the
+    // stale one above the session the owner just started.
+    const rows = drawerSessions(
+      card('DOC-1', [
+        cardSession('qc-DOC-1-verify'),
+        cardSession('qc-DOC-1-review'),
+        cardSession('qc-DOC-1-implement'),
+      ]),
+      detail('DOC-1', [record('qc-DOC-1-implement')]),
+    );
+    expect(rows.map((row) => row.id)).toEqual([
+      'qc-DOC-1-verify',
+      'qc-DOC-1-review',
+      'qc-DOC-1-implement',
+    ]);
+  });
+
+  it('takes the attach command the board sends, not one derived from the id', () => {
+    // The server builds it from the runner's own tmux invocation, which a
+    // socket path or a `-L` label makes different from the plain form.
+    const rows = drawerSessions(
+      card('DOC-1', [
+        cardSession('qc-DOC-1-implement', {
+          attachCommand: 'tmux -L qc attach -t qc-DOC-1-implement',
+        }),
+      ]),
+      detail('DOC-1', [record('qc-DOC-1-implement')]),
+    );
+    expect(rows[0]?.attachCommand).toBe('tmux -L qc attach -t qc-DOC-1-implement');
   });
 });
 
@@ -155,6 +197,7 @@ describe('IssueDrawer', () => {
         workspaceId="docs"
         playbooks={[]}
         nowMs={Date.parse(FIXTURE_NOW)}
+        dropped={false}
         onClose={() => {}}
         onOpenSession={() => {}}
       />,
@@ -168,6 +211,7 @@ describe('IssueDrawer', () => {
         workspaceId="docs"
         playbooks={[]}
         nowMs={Date.parse(FIXTURE_NOW)}
+        dropped={false}
         onClose={() => {}}
         onOpenSession={() => {}}
       />,
@@ -193,17 +237,53 @@ describe('IssueDrawer', () => {
       workspaceId: 'docs',
       playbooks: [],
       nowMs: Date.parse(FIXTURE_NOW),
+      dropped: false,
       onClose: () => {},
       onOpenSession: () => {},
     };
     const { rerender } = render(<IssueDrawer card={card('DOC-1', [])} {...props} />);
     rerender(<IssueDrawer card={card('DOC-2', [])} {...props} />);
-    await waitFor(() => expect(screen.getByText('the description')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('DOC-2 description')).toBeTruthy());
 
     await act(async () => {
       releaseFirst?.(detail('DOC-1', [record('qc-DOC-1-implement')]));
     });
-    // The first card's session must not appear under the second card's key.
-    expect(screen.queryByText('Bash: rm -rf .next/cache')).toBeNull();
+    // The first card's detail must not land under the second card's key.
+    expect(screen.queryByText('DOC-1 description')).toBeNull();
+    expect(screen.getByText('DOC-2 description')).toBeTruthy();
+  });
+
+  it('puts the glyph before the key, as every other surface does', async () => {
+    vi.mocked(getIssue).mockResolvedValue(detail('DOC-1', [record('qc-DOC-1-implement')]));
+    render(
+      <IssueDrawer
+        card={card('DOC-1', [cardSession('qc-DOC-1-implement')])}
+        workspaceId="docs"
+        playbooks={[]}
+        nowMs={Date.parse(FIXTURE_NOW)}
+        dropped={false}
+        onClose={() => {}}
+        onOpenSession={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText('DOC-1 description')).toBeTruthy());
+    const ident = document.querySelector('.card-ident');
+    expect(ident?.firstElementChild?.className).toBe('type-glyph');
+  });
+
+  it('says the board has dropped the issue rather than taking the drawer away', async () => {
+    vi.mocked(getIssue).mockResolvedValue(detail('DOC-1', [record('qc-DOC-1-implement')]));
+    render(
+      <IssueDrawer
+        card={card('DOC-1', [cardSession('qc-DOC-1-implement')])}
+        workspaceId="docs"
+        playbooks={[]}
+        nowMs={Date.parse(FIXTURE_NOW)}
+        dropped={true}
+        onClose={() => {}}
+        onOpenSession={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(DROPPED_SENTENCE)).toBeTruthy());
   });
 });

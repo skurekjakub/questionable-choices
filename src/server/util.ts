@@ -1,9 +1,57 @@
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { Context } from 'hono';
 
 /**
  * Largest JSON request body the server reads, in bytes.
  */
 export const MAX_JSON_BODY_BYTES = 1_000_000;
+
+/**
+ * Ends the process after giving stderr a chance to drain.
+ *
+ * `process.exit` discards buffered output when stderr is a pipe rather than a
+ * TTY, which is exactly how a supervisor runs the server, so the message that
+ * explains the exit would be the thing lost.
+ *
+ * @param code - Exit status.
+ * @returns Nothing.
+ */
+export function fatalExit(code: number): void {
+  process.exitCode = code;
+  // Both streams: a supervisor pipes stderr and `npm run config:check` pipes
+  // stdout, and the discard costs whichever of them the caller wrote to.
+  process.stdout.write('', () => {
+    process.stderr.write('', () => {
+      process.exit(code);
+    });
+  });
+}
+
+/**
+ * Reports whether a module is the one the process was started with.
+ *
+ * Importing a module — which a test must do to reach anything in it — has to be
+ * free of side effects, so a boot or a `process.exit` at the bottom of an entry
+ * module is gated on this rather than running on every import. Both paths are
+ * resolved through `realpath`, so a checkout reached through a symlink is not
+ * mistaken for a different file.
+ *
+ * @param moduleUrl - The candidate module's own `import.meta.url`.
+ * @param entry - Path the process was started with; defaults to `argv[1]`.
+ * @returns True when the entry path resolves to that module.
+ */
+export function isProcessEntry(
+  moduleUrl: string,
+  entry: string | undefined = process.argv[1],
+): boolean {
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(entry);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Turns anything thrown into a message.

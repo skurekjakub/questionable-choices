@@ -110,7 +110,14 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
    * @returns Nothing.
    */
   override componentDidCatch(error: unknown, info: ErrorInfo): void {
-    console.error('the dashboard stopped rendering', error, info.componentStack);
+    // The console is the only place a caught throw is recorded, so it carries
+    // the route it happened on — a session id is in the pathname, and without
+    // it a report from a long-lived tab names no session at all.
+    console.error(
+      `the dashboard stopped rendering on ${window.location.pathname}`,
+      error,
+      info.componentStack,
+    );
   }
 
   /**

@@ -6,9 +6,10 @@ import {
   EVENT_MEMBERS_MAX,
   EVENT_STRING_MAX_LENGTH,
   Store,
+  TRUNCATION_MARKER_KEY,
   writeJsonAtomic,
 } from '../../src/server/store.js';
-import type { SessionRecord } from '../../src/core/types.js';
+import type { SessionRecord, SessionState } from '../../src/core/types.js';
 import { makeRecord } from '../core/helpers.js';
 
 describe('Store', () => {
@@ -113,7 +114,9 @@ describe('Store', () => {
     reading = false;
     await reader;
 
-    expect(seen.length).toBeGreaterThan(1);
+    // A floor proportional to the 39 writes: two reads would let the assertion
+    // below pass without the reader ever having raced a rename.
+    expect(seen.length).toBeGreaterThanOrEqual(10);
     for (const document of seen) expect(document).toEqual({ version: expect.any(Number) });
     expect(await readdir(dir)).toEqual(['probe.json']);
   });
@@ -262,7 +265,69 @@ describe('Store', () => {
     await store.load();
 
     expect(store.sessions().map((record) => record.id)).toEqual(['qc-DOC-1-implement']);
-    expect(warnings.join('\n')).toContain('3 session record(s) were dropped');
+    expect(warnings.join('\n')).toContain('3 of its members');
+  });
+
+  it('refuses a persisted state that is not one the state machine has', async () => {
+    // A state outside the set is never live, so the reconciler skips it for
+    // ever, the clash check ignores it and the lamp table has no entry.
+    const warnings: string[] = [];
+    await writeFile(
+      join(dir, 'sessions.json'),
+      JSON.stringify([makeRecord({ id: 'qc-DOC-9-implement', state: 'wat' as SessionState })]),
+      'utf8',
+    );
+    const store = new Store(dir, (message) => warnings.push(message));
+
+    await store.load();
+
+    expect(store.sessions()).toEqual([]);
+    expect(warnings.join('\n')).toContain('qc-DOC-9-implement');
+  });
+
+  it('keeps the document whose members it dropped, and names them', async () => {
+    // The drop is irreversible and the next write rewrites the file, so without
+    // this the owner's mistyped hand-edit costs that record's branch, worktree
+    // path, prompt and run history for good.
+    const warnings: string[] = [];
+    const broken = JSON.stringify([{ id: 'qc-DOC-5-implement', issueKey: 'DOC-5' }, makeRecord()]);
+    await writeFile(join(dir, 'sessions.json'), broken, 'utf8');
+    const store = new Store(dir, (message) => warnings.push(message));
+
+    await store.load();
+    await store.saveSession(makeRecord({ id: 'qc-DOC-6-implement' }));
+
+    expect(await readFile(join(dir, 'sessions.json.rejected'), 'utf8')).toBe(broken);
+    expect(warnings.join('\n')).toContain('qc-DOC-5-implement');
+  });
+
+  it('never renames one rejected document over another', async () => {
+    // The copy of the first rejection is the owner's original file; a second
+    // bad edit must not turn their backup into a copy of the second mistake.
+    await writeFile(join(dir, 'sessions.json'), 'first { not json', 'utf8');
+    await new Store(dir, () => undefined).load();
+    await writeFile(join(dir, 'sessions.json'), 'second { not json', 'utf8');
+
+    await new Store(dir, () => undefined).load();
+
+    expect(await readFile(join(dir, 'sessions.json.rejected'), 'utf8')).toBe('first { not json');
+    const kept = (await readdir(dir)).filter((name) => name.endsWith('.rejected'));
+    expect(kept).toHaveLength(2);
+    const second = kept.find((name) => name !== 'sessions.json.rejected') as string;
+    expect(await readFile(join(dir, second), 'utf8')).toBe('second { not json');
+  });
+
+  it('sweeps the temporary files a process that died mid-write left behind', async () => {
+    // `writeJsonAtomic` cleans up after a failed rename, never after a SIGKILL
+    // between the write and the rename, and nothing else ever cleans dataDir.
+    await writeFile(join(dir, 'sessions.json.999.123.tmp'), '[]', 'utf8');
+    await writeFile(join(dir, 'keep-me.json'), '{}', 'utf8');
+
+    await new Store(dir).load();
+
+    const entries = await readdir(dir);
+    expect(entries.filter((name) => name.endsWith('.tmp'))).toEqual([]);
+    expect(entries).toContain('keep-me.json');
   });
 
   it('rolls a failed save back by identity, not by an array snapshot', async () => {
@@ -288,7 +353,73 @@ describe('Store', () => {
     await surviving;
 
     expect(store.session('qc-DOC-2-implement')).toBeUndefined();
-    expect(store.session('qc-DOC-3-implement')).toBeDefined();
+    expect(store.session('qc-DOC-3-implement')?.state).toBe('starting');
+    // The disk, not just memory: a write that serialises `this.records` when it
+    // runs — rather than the snapshot taken at the call — puts the record whose
+    // save was refused back on disk, and it returns as a ghost on the next boot.
+    const persisted = JSON.parse(await readFile(join(dir, 'sessions.json'), 'utf8')) as Array<{
+      id: string;
+    }>;
+    expect(persisted.map((record) => record.id)).toEqual([
+      'qc-DOC-1-implement',
+      'qc-DOC-3-implement',
+    ]);
+  });
+
+  it('writes the version each save was given, not the one memory holds by then', async () => {
+    // A save queued behind another must not decide the earlier one's outcome:
+    // with memory written at call time, this save's own version is never
+    // serialised at all and its caller is told it succeeded.
+    const store = new Store(dir);
+    await store.load();
+    await store.saveSession(makeRecord({ id: 'qc-DOC-1-implement', state: 'starting' }));
+    const doomed = makeRecord({ id: 'qc-DOC-1-implement', state: 'working' }) as SessionRecord & {
+      toJSON?: () => unknown;
+    };
+    doomed.toJSON = () => {
+      throw new Error('ENOSPC: no space left on device');
+    };
+
+    const failing = store.saveSession(doomed);
+    const later = store.saveSession(makeRecord({ id: 'qc-DOC-1-implement', state: 'idle' }));
+    await expect(failing).rejects.toThrow('ENOSPC');
+    await later;
+
+    expect(store.session('qc-DOC-1-implement')?.state).toBe('idle');
+    const persisted = JSON.parse(await readFile(join(dir, 'sessions.json'), 'utf8')) as Array<{
+      state: string;
+    }>;
+    expect(persisted.map((record) => record.state)).toEqual(['idle']);
+  });
+
+  it('keeps the old version in memory and on disk when a save fails', async () => {
+    const store = new Store(dir);
+    await store.load();
+    await store.saveSession(makeRecord({ id: 'qc-DOC-1-implement', state: 'working' }));
+    const doomed = makeRecord({ id: 'qc-DOC-1-implement', state: 'idle' }) as SessionRecord & {
+      toJSON?: () => unknown;
+    };
+    doomed.toJSON = () => {
+      throw new Error('ENOSPC: no space left on device');
+    };
+
+    await expect(store.saveSession(doomed)).rejects.toThrow('ENOSPC');
+
+    expect(store.session('qc-DOC-1-implement')?.state).toBe('working');
+    const persisted = JSON.parse(await readFile(join(dir, 'sessions.json'), 'utf8')) as Array<{
+      state: string;
+    }>;
+    expect(persisted.map((record) => record.state)).toEqual(['working']);
+  });
+
+  it('removes the temporary file when the rename it was written for fails', async () => {
+    // Nothing ever cleans dataDir, so a leaked temp file is there for good.
+    const destination = join(dir, 'a-directory-in-the-way.json');
+    await mkdir(destination, { recursive: true });
+
+    await expect(writeJsonAtomic(destination, { version: 1 })).rejects.toThrow();
+
+    expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
   it('caps the members of an array or an object in a raw payload', async () => {
@@ -310,6 +441,59 @@ describe('Store', () => {
     const event = entry?.event as { tool_response: string[] };
     expect(event.tool_response).toHaveLength(EVENT_MEMBERS_MAX + 1);
     expect(event.tool_response.at(-1)).toContain('truncated 4800 members');
+  });
+
+  it('caps the keys of an object in a raw payload, not only the members of an array', async () => {
+    const store = new Store(dir);
+    await store.load();
+    const wide = Object.fromEntries(
+      Array.from({ length: 500 }, (_value, index) => [`key-${String(index)}`, index]),
+    );
+
+    await store.appendEvent('qc-DOC-1-implement', {
+      at: '2026-09-09T10:00:00.000Z',
+      event: { hook_event_name: 'PostToolUse', tool_response: wide },
+      state: 'working',
+    });
+
+    const [entry] = await store.readEvents('qc-DOC-1-implement');
+    const event = entry?.event as { tool_response: Record<string, unknown> };
+    // The count, not just the marker: asserting the marker alone leaves the cap
+    // itself deletable, because the marker is written either way.
+    expect(Object.keys(event.tool_response)).toHaveLength(EVENT_MEMBERS_MAX + 1);
+    expect(JSON.stringify(event.tool_response)).toContain('truncated 300 keys');
+  });
+
+  it('never lets the truncation marker overwrite a key the payload itself sent', async () => {
+    const store = new Store(dir);
+    await store.load();
+    const wide: Record<string, unknown> = { [TRUNCATION_MARKER_KEY]: 'the payload said this' };
+    for (let index = 0; index < 500; index += 1) wide[`key-${String(index)}`] = index;
+
+    await store.appendEvent('qc-DOC-1-implement', {
+      at: '2026-09-09T10:00:00.000Z',
+      event: { tool_response: wide },
+      state: 'working',
+    });
+
+    const [entry] = await store.readEvents('qc-DOC-1-implement');
+    const event = entry?.event as { tool_response: Record<string, unknown> };
+    expect(event.tool_response[TRUNCATION_MARKER_KEY]).toBe('the payload said this');
+    expect(JSON.stringify(event.tool_response)).toContain('truncated 301 keys');
+  });
+
+  it('waits for every queued write before it reports the store flushed', async () => {
+    // A hook answered 204 has its write on the queue; a shutdown that exits
+    // before the queue drains loses the record change it was answered for.
+    const store = new Store(dir);
+    await store.load();
+
+    void store.saveSession(makeRecord({ id: 'qc-DOC-1-implement' }));
+    void store.saveSession(makeRecord({ id: 'qc-DOC-2-implement' }));
+    await store.flush();
+
+    const persisted = JSON.parse(await readFile(join(dir, 'sessions.json'), 'utf8')) as unknown[];
+    expect(persisted).toHaveLength(2);
   });
 
   it('recreates a session directory that went away under the running store', async () => {

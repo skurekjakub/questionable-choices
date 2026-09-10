@@ -31,12 +31,3 @@ export function createIssueSource(
   }
   throw new Error(`unknown connector type '${(connector as { type: string }).type}'`);
 }
-
-export {
-  JiraClient,
-  JiraHttpError,
-  JiraIssueSource,
-  MissingCredentialsError,
-  createJiraIssueSource,
-} from './jira/index.js';
-export type { CreateJiraIssueSourceOptions } from './jira/index.js';

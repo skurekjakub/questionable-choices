@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -607,14 +607,52 @@ describe('applyWorkspaceChange', () => {
     ],
   ])('tells the owner what a valid id looks like for %s', (_name, request, locator, message) => {
     // An id is validated as a record key, so the schema's own message is
-    // discarded and zod reports "Invalid key in record" — which names the
-    // problem and not the rule the dialog has to show next to the field.
+    // discarded and zod reports its generic one — which names the problem and
+    // not the rule the dialog has to show next to the field.
     try {
       applyWorkspaceChange(config, request);
       throw new Error('expected the request to be rejected');
     } catch (error) {
       const issues = (error as ConfigError).issues;
       expect(issues.find((issue) => issue.path === locator)?.message).toBe(message);
+    }
+  });
+});
+
+describe('a record key the schema refuses', () => {
+  it.each([
+    ['repos', 'repo id must be lowercase letters, digits and dashes'],
+    ['connectors', 'connector id must be lowercase letters, digits and dashes'],
+    ['workspaces', 'workspace id must be lowercase letters, digits and dashes'],
+  ])('names the id rule for a bad key under %s', (section, message) => {
+    // The repair is keyed on zod's issue `code`, not on the text of its
+    // message: a library that rewords the message in a patch release would
+    // otherwise turn the repair into a silent no-op.
+    const document = minimal() as Record<string, Record<string, unknown>>;
+    const entries = document[section] as Record<string, unknown>;
+    entries['Bad Id'] = entries[Object.keys(entries)[0] as string];
+
+    try {
+      parseConfig(document, { home: HOME });
+      throw new Error('expected the document to be rejected');
+    } catch (error) {
+      const issues = (error as ConfigError).issues;
+      expect(issues.find((issue) => issue.path === `${section}.Bad Id`)?.message).toBe(message);
+    }
+  });
+
+  it('leaves a value problem’s own message alone', () => {
+    const document = minimal() as Record<string, Record<string, unknown>>;
+    (document['workspaces']?.['ws'] as Record<string, unknown>)['epic'] = '';
+
+    try {
+      parseConfig(document, { home: HOME });
+      throw new Error('expected the document to be rejected');
+    } catch (error) {
+      const issues = (error as ConfigError).issues;
+      expect(issues.find((issue) => issue.path === 'workspaces.ws.epic')?.message).not.toContain(
+        'must be lowercase',
+      );
     }
   });
 });
@@ -675,7 +713,7 @@ describe('removeWorkspace', () => {
 
   it('keeps the connector when another workspace still names it', () => {
     const next = removeWorkspace(config, 'second');
-    expect(next.connectors['tracker']).toBeDefined();
+    expect(next.connectors['tracker']?.site).toBe('example.atlassian.net');
     expect(next.workspaces['ws']?.connector).toBe('tracker');
   });
 

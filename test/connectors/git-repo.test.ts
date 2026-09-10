@@ -22,6 +22,14 @@ import { makeIssue, makePlaybook, makeRepo } from '../core/helpers.js';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Seconds the `ext::` transport sleeps in the leak test.
+ *
+ * Unique to this run, so a survivor of an earlier one — which is the very
+ * failure the test exists to catch — cannot be counted as this run's.
+ */
+const SLEEP_SECONDS = 20_000 + (Date.now() % 9000);
+
 let root = '';
 let repo = '';
 let worktreeDir = '';
@@ -245,7 +253,10 @@ describe('GitRepo.prepare against a remote that moved', () => {
 
   it('gives up on a remote that never answers instead of holding the caller for ever', async () => {
     // `ext::` runs the command as the transport, so this is a fetch that
-    // really hangs rather than one that is refused quickly.
+    // really hangs rather than one that is refused quickly. It is also the case
+    // the process-group kill exists for: the transport is a separate process
+    // that inherits git's pipes and outlives a signal sent to git alone.
+    const timeoutMs = 500;
     const issue = makeIssue({ key: 'DOC-53', summary: 'Black hole' });
     await cloned.prepare(issue, playbooks.worktree);
     await run(['config', 'protocol.ext.allow', 'always'], clone);
@@ -253,16 +264,45 @@ describe('GitRepo.prepare against a remote that moved', () => {
     const bounded = new GitRepo(
       'docs',
       makeRepo({ path: clone, worktreeDir: cloneWorktrees, baseRef: 'origin/main' }),
-      { fetchTimeoutMs: 500 },
+      { fetchTimeoutMs: timeoutMs },
     );
 
     const started = Date.now();
     const prepared = await bounded.prepare(issue, playbooks.worktree);
+    const elapsed = Date.now() - started;
 
-    expect(Date.now() - started).toBeLessThan(10_000);
+    // A multiple of the deadline, not a round number above the harness's own
+    // `testTimeout`: an assertion the runner can never reach measures nothing.
+    // The transport sleeps 30 s, so anything that waited for it fails here.
+    expect(elapsed).toBeLessThan(timeoutMs * 12);
     expect(prepared.cwd).toBe(join(cloneWorktrees, 'DOC-53'));
     expect(bounded.lastFetchError()).toEqual(expect.stringContaining('timed out after 500 ms'));
-  });
+  }, 20_000);
+
+  it('leaves no transport process behind when it gives up on a remote', async () => {
+    // `npm test` returning is not the same as the machine being quiet: without
+    // a process group to kill, the transport lives out its own 30 s.
+    const issue = makeIssue({ key: 'DOC-54', summary: 'Black hole, tidied' });
+    await cloned.prepare(issue, playbooks.worktree);
+    await run(['config', 'protocol.ext.allow', 'always'], clone);
+    await run(['remote', 'set-url', 'origin', `ext::sleep ${String(SLEEP_SECONDS)}`], clone);
+    const bounded = new GitRepo(
+      'docs',
+      makeRepo({ path: clone, worktreeDir: cloneWorktrees, baseRef: 'origin/main' }),
+      { fetchTimeoutMs: 500 },
+    );
+
+    await bounded.prepare(issue, playbooks.worktree);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    // Anchored on the whole command line, so the shell that runs this probe —
+    // whose own arguments name the same sleep — cannot count as a survivor.
+    const survivors = await execFileAsync('bash', [
+      '-c',
+      `ps -eo args= | grep -c '^[^ ]*sleep ${String(SLEEP_SECONDS)}$' || true`,
+    ]);
+    expect(survivors.stdout.trim()).toBe('0');
+  }, 20_000);
 
   it('fetches for issue-worktree isolation too, so a just-pushed branch resolves', async () => {
     await run(['checkout', '-b', 'DOC-52-pushed-late', 'main'], repo);
@@ -329,9 +369,41 @@ describe('GitRepo.findIssueBranch', () => {
   });
 });
 
-describe('GitRepo.listWorktrees', () => {
+describe('GitRepo.listWorktrees and removeWorktree', () => {
+  // A clone of its own, with the worktrees this describe asserts on and no
+  // others: the exact list below only holds when nothing else in the file has
+  // created or removed a worktree first.
+  let own = '';
+  let ownWorktrees = '';
+  let target: GitRepo;
+
+  beforeEach(async () => {
+    const stamp = `${String(Date.now())}-${String(Math.random()).slice(2)}`;
+    own = join(root, `worktrees-${stamp}`);
+    ownWorktrees = join(root, `worktrees-${stamp}-checkouts`);
+    await run(['clone', join(root, 'origin.git'), own], root);
+    await run(['config', 'commit.gpgsign', 'false'], own);
+    // The bare origin was initialised before its first push, so its HEAD names
+    // git's default branch rather than the one every assertion here reads.
+    await run(['checkout', '-B', 'main', 'origin/main'], own);
+    target = new GitRepo(
+      'docs',
+      makeRepo({ path: own, worktreeDir: ownWorktrees, baseRef: 'origin/main' }),
+    );
+    await target.prepare(makeIssue(), playbooks.worktree);
+    await target.prepare(
+      makeIssue({ key: 'DOC-2', summary: 'Second thing' }),
+      playbooks.issueWorktree,
+    );
+  });
+
+  afterEach(async () => {
+    await rm(own, { recursive: true, force: true });
+    await rm(ownWorktrees, { recursive: true, force: true });
+  });
+
   it('lists the main checkout alongside every issue worktree', async () => {
-    const worktrees = await subject.listWorktrees();
+    const worktrees = await target.listWorktrees();
 
     expect(worktrees.map((worktree) => worktree.branch)).toEqual([
       'main',
@@ -341,23 +413,21 @@ describe('GitRepo.listWorktrees', () => {
   });
 
   it('resolves one issue to its worktree', async () => {
-    const worktree = await subject.worktreeFor('DOC-2');
+    const worktree = await target.worktreeFor('DOC-2');
 
     expect(worktree?.branch).toBe('DOC-2-newer');
   });
-});
 
-describe('GitRepo.removeWorktree', () => {
   it('removes a clean worktree', async () => {
-    await subject.removeWorktree('DOC-2', false);
+    await target.removeWorktree('DOC-2', false);
 
-    expect(await subject.worktreeFor('DOC-2')).toBeNull();
+    expect(await target.worktreeFor('DOC-2')).toBeNull();
   });
 
   it('refuses a dirty worktree and reports the porcelain status', async () => {
-    await writeFile(join(worktreeDir, 'DOC-1', 'scratch.txt'), 'wip\n', 'utf8');
+    await writeFile(join(ownWorktrees, 'DOC-1', 'scratch.txt'), 'wip\n', 'utf8');
 
-    const refusal = subject.removeWorktree('DOC-1', false);
+    const refusal = target.removeWorktree('DOC-1', false);
 
     await expect(refusal).rejects.toBeInstanceOf(DirtyWorktreeError);
     await expect(refusal).rejects.toThrow(/\?\? scratch\.txt/);
@@ -367,13 +437,15 @@ describe('GitRepo.removeWorktree', () => {
   });
 
   it('removes a dirty worktree when forced', async () => {
-    await subject.removeWorktree('DOC-1', true);
+    await writeFile(join(ownWorktrees, 'DOC-1', 'scratch.txt'), 'wip\n', 'utf8');
 
-    expect(await subject.worktreeFor('DOC-1')).toBeNull();
+    await target.removeWorktree('DOC-1', true);
+
+    expect(await target.worktreeFor('DOC-1')).toBeNull();
   });
 
   it('refuses an issue that has no worktree', async () => {
-    await expect(subject.removeWorktree('DOC-404', false)).rejects.toBeInstanceOf(
+    await expect(target.removeWorktree('DOC-404', false)).rejects.toBeInstanceOf(
       WorktreeNotFoundError,
     );
   });

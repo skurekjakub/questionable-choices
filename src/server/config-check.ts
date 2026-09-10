@@ -1,7 +1,6 @@
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   ConfigError,
   checkEnvironment,
@@ -9,6 +8,7 @@ import {
   resolveConfigPath,
 } from '../core/config.js';
 import { loadConfig } from './config-file.js';
+import { fatalExit, isProcessEntry } from './util.js';
 
 /**
  * Everything the check needs, so a test can point it at a temporary file.
@@ -72,8 +72,8 @@ export function checkConfig(options: ConfigCheckOptions): number {
 
 // Running under `tsx src/server/config-check.ts` is the only case that should
 // exit the process; importing the module from a test must not.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  process.exit(
+if (isProcessEntry(import.meta.url)) {
+  fatalExit(
     checkConfig({
       env: process.env,
       home: homedir(),

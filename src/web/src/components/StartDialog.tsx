@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import type { Card, PlaybookSummary, PublicRunnerConfig } from '../../../core/api.js';
 import { createSession, errorMessage, getPrefill } from '../api.js';
 import { useFocusTrap } from '../hooks/useFocusTrap.js';
-import type { Effort, PermissionModeSetting } from '../model.js';
+import { DROPPED_SENTENCE, type Effort, type PermissionModeSetting } from '../model.js';
 import { CloseIcon } from './Icons.js';
 
 /**
@@ -48,6 +48,8 @@ const DISCARD_NOTE: Readonly<Record<DiscardIntent['kind'], string>> = {
  * @param props.playbooks - Playbooks the workspace offers.
  * @param props.runner - Picker options and defaults from the public config.
  * @param props.initialPlaybookId - Playbook selected when the dialog opens.
+ * @param props.dropped - Whether the board has stopped listing the card, so
+ * what is on screen is the card as the dialog opened it.
  * @param props.onClose - Called when the dialog should close.
  * @param props.onStarted - Called with the new session's id once it starts.
  * @returns The dialog element.
@@ -58,6 +60,7 @@ export function StartDialog({
   playbooks,
   runner,
   initialPlaybookId,
+  dropped,
   onClose,
   onStarted,
 }: {
@@ -66,6 +69,7 @@ export function StartDialog({
   playbooks: PlaybookSummary[];
   runner: PublicRunnerConfig;
   initialPlaybookId: string;
+  dropped: boolean;
   onClose: () => void;
   onStarted: (sessionId: string) => void;
 }): JSX.Element {
@@ -115,6 +119,10 @@ export function StartDialog({
   // Escape and the backdrop both route here, so while the confirmation is up
   // they mean "keep editing" rather than repeating a question already asked.
   const requestClose = useCallback(() => {
+    // The session is started whether or not this dialog is on screen, so
+    // closing over the request in flight loses both the id to navigate to and
+    // the refusal that says why nothing started.
+    if (starting) return;
     if (confirming) {
       setDiscardIntent(null);
       return;
@@ -124,7 +132,7 @@ export function StartDialog({
       return;
     }
     onClose();
-  }, [confirming, edited, onClose]);
+  }, [starting, confirming, edited, onClose]);
   const dialog = useFocusTrap<HTMLDivElement>(requestClose);
   const keepEditing = useRef<HTMLButtonElement>(null);
   const promptField = useRef<HTMLTextAreaElement>(null);
@@ -211,6 +219,11 @@ export function StartDialog({
         </div>
 
         <div className="dialog-body">
+          {dropped ? (
+            <p className="empty empty-inline" role="status">
+              {DROPPED_SENTENCE}
+            </p>
+          ) : null}
           <label className="field">
             <span>Playbook</span>
             <select value={playbookId} onChange={(event) => selectPlaybook(event.target.value)}>

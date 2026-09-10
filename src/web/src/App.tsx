@@ -107,13 +107,27 @@ export function App(): JSX.Element {
     });
   }, [config]);
 
+  const sessionId = sessionIdFromPath(path);
+  const onSessionRoute = sessionId !== null;
+
+  // A workspace the session route resolved is on screen without being the
+  // owner's choice, so leaving that route puts the remembered board back —
+  // otherwise the switcher and the next cold start disagree about which epic
+  // the dashboard is showing.
+  useEffect(() => {
+    if (onSessionRoute || config === null) return;
+    const remembered = readRememberedWorkspace();
+    if (remembered === null) return;
+    if (!config.workspaces.some((workspace) => workspace.id === remembered)) return;
+    setWorkspaceId(remembered);
+  }, [onSessionRoute, config]);
+
   const board = useBoard(workspaceId);
   const openSession = useCallback((sessionId: string) => {
     navigate(`/session/${encodeURIComponent(sessionId)}`);
   }, []);
   useNeedsYouSignals(board.board, openSession);
 
-  const sessionId = sessionIdFromPath(path);
   const resolvingOwner = useSessionOwner(sessionId, config, board.board, showWorkspace);
 
   if (sessionId !== null) {

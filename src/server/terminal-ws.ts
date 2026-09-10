@@ -148,7 +148,9 @@ export function registerWebSocketRoutes(app: Hono, deps: WebSocketRoutesDeps): v
 
       const withTerminal = (action: (attached: RunnerTerminal) => void): void => {
         chain(() => {
-          if (terminal !== null && !closed) action(terminal);
+          // `teardown` nulls the terminal in the same statement that closes the
+          // socket, so a non-null terminal is by itself proof it is still open.
+          if (terminal !== null) action(terminal);
         });
       };
 

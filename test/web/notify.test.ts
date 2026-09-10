@@ -8,6 +8,7 @@ import {
   requestNotificationPermission,
 } from '../../src/web/src/notify.js';
 import { boardView, card, cardSession } from './fixtures.js';
+import './jsdom-gaps.js';
 
 /**
  * A stand-in for the browser's `Notification`, recording what was posted.
@@ -182,6 +183,10 @@ describe('applyBadge', () => {
     });
     try {
       expect(() => applyBadge(2)).not.toThrow();
+      // The write is the only thing that failed; nothing else may be skipped
+      // over it, and the sealed title must still read what the host set.
+      expect(document.title).toBe('sealed');
+      expect(document.querySelector('link[rel="icon"]')).toBeNull();
     } finally {
       delete (document as unknown as Record<string, unknown>)['title'];
       if (original !== undefined) Object.defineProperty(Document.prototype, 'title', original);
@@ -189,7 +194,7 @@ describe('applyBadge', () => {
   });
 
   it('keeps the dashboard up when the icon cannot be painted', () => {
-    // jsdom has no 2d canvas context, so this is the "browser cannot draw the
+    // `getContext` answers null here, so this is the "browser cannot draw the
     // face" path: the title still updates and no icon link is added.
     applyBadge(1);
     expect(document.title).toBe('(1) questionable choices');
@@ -273,5 +278,7 @@ describe('notifyNeedsYou', () => {
   it('keeps the board up when the constructor throws, as gated builds do', () => {
     FakeNotification.refuse = new Error('notifications are disabled');
     expect(() => notifyNeedsYou(entry, () => {})).not.toThrow();
+    // Nothing reached the browser, so nothing may be recorded as if it had.
+    expect(FakeNotification.posted).toHaveLength(0);
   });
 });

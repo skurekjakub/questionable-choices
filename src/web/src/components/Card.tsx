@@ -5,7 +5,7 @@ import { STATE_LABELS } from '../model.js';
 import { CacheReadout } from './CacheReadout.js';
 import { LabelChips, StatusChip } from './Chips.js';
 import { EditorIcon } from './Icons.js';
-import { Lamp, StaleMarker, type LampTone } from './Lamp.js';
+import { HintMarker, Lamp, StaleMarker, type LampTone } from './Lamp.js';
 import { Menu } from './Menu.js';
 
 /**
@@ -48,8 +48,9 @@ function railTone(card: CardModel): LampTone | null {
  *
  * The row is the width of one lane track, so everything that is not a reading
  * the owner scans for is carried by a tooltip rather than by words: where a
- * failed session left its shell, and that an unverified session's state has not
- * been confirmed since the server restarted.
+ * failed session left its shell, that an unverified session's state has not
+ * been confirmed since the server restarted, and what a lagging notification
+ * said about a session that may need the owner.
  *
  * @param props - Component props.
  * @param props.session - Session to render.
@@ -78,9 +79,10 @@ function SessionRow({
         <span className="session-state" title={ended?.shell ?? undefined}>
           {ended?.label ?? STATE_LABELS[session.state]}
         </span>
-        {session.staleSince === null ? null : <StaleMarker />}
-        {session.done ? <span className="session-done">done</span> : null}
         <span className="session-time">{timeInState(session.stateSince, nowMs)}</span>
+        {session.done ? <span className="session-done">done</span> : null}
+        {session.staleSince === null ? null : <StaleMarker />}
+        {session.hint === null ? null : <HintMarker summary={session.hint} />}
         <CacheReadout cache={session.cache} nowMs={nowMs} />
       </span>
       {session.needsYou && session.pending !== null ? (

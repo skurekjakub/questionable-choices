@@ -1,6 +1,5 @@
 import { serve, upgradeWebSocket } from '@hono/node-server';
 import type { WebSocketServerLike } from '@hono/node-server';
-import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,14 +16,14 @@ import { loadConfig } from './config-file.js';
 import { buildConnectors, buildWorkspaceRuntime } from './connectors.js';
 import { SessionManager, consoleLogger, readDerivedCacheTtlSeconds } from './session-manager.js';
 import { Store } from './store.js';
-import { messageOf } from './util.js';
+import { fatalExit, isProcessEntry, messageOf } from './util.js';
 
 /**
  * Loads the configuration, printing the issue list and exiting on failure.
  *
  * @param path - Absolute path of the configuration file.
  * @param home - Home directory used to expand `~`.
- * @returns The validated configuration.
+ * @returns The validated configuration; never returns when loading failed.
  * @throws {Error} When loading fails for a reason that is not a `ConfigError`.
  */
 function loadOrExit(path: string, home: string): Config {
@@ -34,7 +33,10 @@ function loadOrExit(path: string, home: string): Config {
     if (!(cause instanceof ConfigError)) throw cause;
     console.error(cause.message);
     console.error(formatConfigIssues(cause.issues));
-    return process.exit(1);
+    // A long zod issue list is the one output that can exceed the pipe buffer,
+    // and it is the whole reason the process is exiting.
+    fatalExit(1);
+    throw cause;
   }
 }
 
@@ -60,23 +62,6 @@ export function guardTheProcess(exit: (code: number) => void = fatalExit): void 
   });
   process.on('unhandledRejection', (cause) => {
     console.error(`unhandled rejection, still serving: ${messageOf(cause)}`);
-  });
-}
-
-/**
- * Ends the process after giving stderr a chance to drain.
- *
- * `process.exit` discards buffered output when stderr is a pipe rather than a
- * TTY, which is exactly how a supervisor runs the server, so the message that
- * explains the exit would be the thing lost.
- *
- * @param code - Exit status.
- * @returns Nothing.
- */
-export function fatalExit(code: number): void {
-  process.exitCode = code;
-  process.stderr.write('', () => {
-    process.exit(code);
   });
 }
 
@@ -110,7 +95,7 @@ export function listenErrorHandler(
  * @returns Nothing, once the server is listening.
  * @throws {Error} When the store or a connector cannot be built.
  */
-export async function main(): Promise<void> {
+async function main(): Promise<void> {
   guardTheProcess();
   const home = homedir();
   const configPath = resolveConfigPath(process.env, home);
@@ -176,32 +161,24 @@ export async function main(): Promise<void> {
     // Idle keep-alive sockets hold the close open too, and only the HTTP/1
     // member of the adapter's server union offers a way to drop them.
     if ('closeAllConnections' in server) server.closeAllConnections();
-    server.close(() => process.exit(0));
+    server.close(() => {
+      // A hook answered 204 has its write on the store's queue; exiting before
+      // the queue drains loses the record change it was answered for.
+      void store
+        .flush()
+        .catch((cause: unknown) => {
+          console.error(`a queued write did not finish: ${messageOf(cause)}`);
+        })
+        .finally(() => {
+          process.exit(0);
+        });
+    });
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
 
-/**
- * Reports whether this module is the one the process was started with.
- *
- * Importing the module — which a test must do to reach anything in it — has to
- * be free of side effects, so the boot below is gated on being the entry point
- * rather than running on every import.
- *
- * @param entry - Path the process was started with; defaults to `argv[1]`.
- * @returns True when the entry path resolves to this file.
- */
-export function isProcessEntry(entry: string | undefined = process.argv[1]): boolean {
-  if (entry === undefined) return false;
-  try {
-    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(entry);
-  } catch {
-    return false;
-  }
-}
-
-if (isProcessEntry()) {
+if (isProcessEntry(import.meta.url)) {
   // A boot that never gets as far as listening must exit non-zero: the
   // unhandledRejection handler would otherwise print "still serving" about a
   // process that serves nothing and then exit 0 for a supervisor to read as ok.

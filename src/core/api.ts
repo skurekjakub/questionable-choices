@@ -20,7 +20,9 @@
  * POST   /api/workspaces/:id/issues/:key/open-editor     → 204; 409 without a checkout
  * POST   /api/sessions/:id/<SessionAction>               → 200 SessionRecord
  * POST   /api/sessions/:id/remove-worktree               → 200 RemoveWorktreeResponse
- * GET    /api/sessions/:id/events                        → 200 SessionEventsResponse (debug)
+ * GET    /api/sessions/:id/events                        → 200 SessionEventsResponse
+ *                                                          404 when no session has the id
+ *                                                          409 when the log exists and cannot be read
  * POST   /api/hooks/:sessionId/:event                    → 204 (hook ingress)
  * POST   /api/hooks/:sessionId/statusline                → 204 (status-line ingress)
  * POST   /api/hooks/:sessionId/launcher/:event           → 204 (launcher ingress)
@@ -79,6 +81,16 @@ export const LIVE_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
   'waiting-question',
   'idle',
 ]);
+
+/**
+ * A session record as the wire carries it.
+ *
+ * `lastEventAt` is the server's own bookkeeping for the staleness judgement
+ * and is not part of the contract: `CardSession.staleSince` is the answer a
+ * client renders, and nothing outside the server may derive that answer for
+ * itself.
+ */
+export type WireSessionRecord = Omit<SessionRecord, 'lastEventAt'>;
 
 /**
  * One reason a document was rejected, with the path that caused it.
@@ -311,6 +323,16 @@ export interface CardSession {
    * should mark such a session rather than present its state as a fact.
    */
   staleSince: string | null;
+  /**
+   * What the session's last `Notification` said, or null when none is
+   * outstanding.
+   *
+   * A notification lags the dialog it describes and cannot be placed in a turn,
+   * so it never moves `state` and never sets `needsYou`. A UI may show it as
+   * "this session may need you"; it must not present it as a fact, and the
+   * next lifecycle event clears it.
+   */
+  hint: string | null;
   /** Prompt-cache state the countdown ticks from, or null when unknown. */
   cache: SessionCache | null;
   /** Owner-set "this session did its job" flag. */
@@ -385,7 +407,7 @@ export interface IssueDetailResponse {
   /** The issue, including its description. */
   issue: Issue;
   /** Every non-archived session for the issue, newest first. */
-  sessions: SessionRecord[];
+  sessions: WireSessionRecord[];
   /** Absolute worktree path, or null when the issue has none to open. */
   worktreePath: string | null;
   /** Owner-set flags for the issue. */
@@ -541,7 +563,7 @@ export type EventFrame =
       /** One session record changed. */
       type: 'session';
       /** The record after the change. */
-      record: SessionRecord;
+      record: WireSessionRecord;
     }
   | {
       /** A workspace was added or removed. */

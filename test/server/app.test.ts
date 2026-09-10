@@ -341,6 +341,36 @@ describe('HTTP API', () => {
     expect(editorCalls).toEqual([{ command: 'code', args: ['/repos/worktrees/DOC-1'] }]);
   });
 
+  describe('the event log route', () => {
+    it('answers 404 for a session id nothing knows', async () => {
+      const response = await app.request('/api/sessions/qc-nothing/events');
+
+      expect(response.status).toBe(404);
+      expect(((await response.json()) as ErrorResponse).error).toContain('qc-nothing');
+    });
+
+    it('answers 200 with an empty list for a session that has no log yet', async () => {
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+
+      const response = await app.request('/api/sessions/qc-DOC-1-implement/events');
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ events: [] });
+    });
+
+    it('answers 409 for a log that exists and cannot be read', async () => {
+      // A pruned session and an unreadable log are different answers, and the
+      // panel that reads this route shows one of them as a filesystem problem.
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+      await mkdir(join(dir, 'sessions', 'qc-DOC-1-implement', 'events.jsonl'), { recursive: true });
+
+      const response = await app.request('/api/sessions/qc-DOC-1-implement/events');
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as ErrorResponse).error).toContain('qc-DOC-1-implement');
+    });
+  });
+
   describe('refusal reasons', () => {
     it('names a duplicate workspace id', async () => {
       const response = await post(app, '/api/workspaces', {
