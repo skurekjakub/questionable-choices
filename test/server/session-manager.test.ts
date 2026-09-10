@@ -1,14 +1,18 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BoardView, CreateSessionRequest, EventFrame } from '../../src/core/api.js';
 import type { Config, SessionRecord } from '../../src/core/types.js';
+import { JiraTruncatedError } from '../../src/connectors/issues/jira/client.js';
+import { MissingExecutableError } from '../../src/connectors/runners/claude-tmux/index.js';
 import {
   ActionError,
   BOARD_DEBOUNCE_MS,
   RECONCILE_INTERVAL_MS,
   SessionManager,
+  checkoutKey,
+  detachedEditorSpawner,
   readDerivedCacheTtlSeconds,
   spawnDetached,
 } from '../../src/server/session-manager.js';
@@ -115,12 +119,57 @@ async function harness(): Promise<Harness> {
 }
 
 /**
- * Waits out one board debounce window.
+ * Runs out one board debounce window on the fake clock.
  *
  * @returns Nothing, once every queued board frame has been pushed.
  */
-function settle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, BOARD_DEBOUNCE_MS + 20));
+async function settle(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(BOARD_DEBOUNCE_MS);
+}
+
+/**
+ * Gives the event loop enough real turns for any unblocked work — including
+ * the store's file writes — to run to completion.
+ *
+ * A concurrency test asserts that something has *not* happened, so it needs an
+ * upper bound on what would have happened had the lock not been there.
+ *
+ * @param turns - Event-loop turns to yield.
+ * @returns Nothing.
+ */
+async function drain(turns = 200): Promise<void> {
+  for (let index = 0; index < turns; index += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/**
+ * Yields the event loop until a condition holds.
+ *
+ * @param condition - What the test is waiting for.
+ * @param label - Named in the failure when the condition never holds.
+ * @returns Nothing.
+ * @throws {Error} When the condition still does not hold after two seconds.
+ */
+async function waitFor(condition: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/**
+ * Builds a promise a test releases by hand.
+ *
+ * @returns The promise and the function that resolves it.
+ */
+function gate(): { held: Promise<void>; release: () => void } {
+  let release = (): void => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { held, release };
 }
 
 /**
@@ -141,11 +190,17 @@ describe('SessionManager', () => {
   let h: Harness;
 
   beforeEach(async () => {
+    // The board debounce and the poll interval are the only timers here, and
+    // both are the subject of assertions: waiting them out on the real clock
+    // costs a second of wall time and buys a flake window. `setImmediate` and
+    // `Date` stay real, so `drain` can still give the event loop real turns.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
     h = await harness();
   });
 
   afterEach(async () => {
     h.manager.stop();
+    vi.useRealTimers();
     await rm(h.dir, { recursive: true, force: true });
   });
 
@@ -174,6 +229,15 @@ describe('SessionManager', () => {
     it('puts the issue in the Working lane', async () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       expect(laneOf(h.manager.board('ws'), 'DOC-1')).toBe('working');
+    });
+
+    it('names the clash as a live session so a UI need not read the prose', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+
+      await expect(h.manager.startSession('ws', 'DOC-1', START)).rejects.toMatchObject({
+        status: 409,
+        reason: 'session-live',
+      });
     });
 
     it('refuses a second live session for the same issue and playbook', async () => {
@@ -214,11 +278,30 @@ describe('SessionManager', () => {
     });
 
     it('marks the record failed when the runner refuses to launch', async () => {
-      h.runner.startError = new Error('tmux: command not found');
+      // The record can move while the launch runs, so the failure is written
+      // over a re-read; patching the caller's snapshot would drop it.
+      h.runner.start = async (request) => {
+        h.runner.started.push(request);
+        await h.store.saveSession({ ...request.record, claudeSessionId: 'abc-123' });
+        throw new Error('tmux: command not found');
+      };
+
       await expect(h.manager.startSession('ws', 'DOC-1', START)).rejects.toBeInstanceOf(
         ActionError,
       );
-      expect(h.store.session('qc-DOC-1-implement')?.state).toBe('failed');
+
+      const record = h.store.session('qc-DOC-1-implement');
+      expect(record?.state).toBe('failed');
+      expect(record?.claudeSessionId).toBe('abc-123');
+    });
+
+    it('carries the runner’s machine-readable reason onto the refusal', async () => {
+      h.runner.startError = new MissingExecutableError('claude');
+
+      await expect(h.manager.startSession('ws', 'DOC-1', START)).rejects.toMatchObject({
+        status: 409,
+        reason: 'missing-executable',
+      });
     });
 
     it('refuses an issue the source does not have', async () => {
@@ -592,6 +675,18 @@ describe('SessionManager', () => {
 
       expect(error.message).toContain('qc-no-such-editor');
     });
+
+    it('detaches the child, so an open editor window cannot hold the dashboard up', () => {
+      const calls: string[] = [];
+      const spawner = detachedEditorSpawner(() => ({
+        on: (event: 'error') => calls.push(`on:${event}`),
+        unref: () => calls.push('unref'),
+      }));
+
+      spawner('code', ['/repos/worktrees/DOC-1'], () => undefined);
+
+      expect(calls).toEqual(['on:error', 'unref']);
+    });
   });
 
   describe('reconciler', () => {
@@ -759,8 +854,14 @@ describe('SessionManager', () => {
       await h.manager.removeWorkspace('second');
 
       expect(h.manager.workspaceIds()).toEqual(['ws']);
-      expect(h.store.session('qc-DOC-1-implement')).toBeDefined();
-      expect(h.store.worktree('app', 'DOC-1')).toBeDefined();
+      expect(h.store.session('qc-DOC-1-implement')).toMatchObject({
+        issueKey: 'DOC-1',
+        state: 'starting',
+      });
+      expect(h.store.worktree('app', 'DOC-1')).toEqual({
+        path: '/repos/worktrees/DOC-1',
+        branch: 'DOC-1-document-the-thing',
+      });
       expect(() => h.manager.board('second')).toThrow(ActionError);
     });
 
@@ -838,13 +939,332 @@ describe('SessionManager', () => {
       unsubscribe();
 
       const configs = frames.filter((frame) => frame.type === 'config');
-      expect(configs).toHaveLength(2);
-      expect(configs[0]?.type === 'config' && configs[0].config.workspaces).toHaveLength(2);
-      expect(configs[1]?.type === 'config' && configs[1].config.workspaces).toHaveLength(1);
+      expect(configs.map((frame) => frame.config.workspaces.map((entry) => entry.id))).toEqual([
+        ['ws', 'second'],
+        ['ws'],
+      ]);
+    });
+  });
+
+  describe('locks', () => {
+    it('holds a hook for a suffixed second run until its launch has finished', async () => {
+      // The second run takes a suffixed id, which is not the key the start
+      // already holds; without a lock on that id the launch write and the
+      // hook's read-modify-write overlap and one of them loses.
+      const first = await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.killSession(first.id);
+      await h.manager.archiveSession(first.id);
+      h.clock.ms += 60_000;
+      const { held, release } = gate();
+      let secondId = '';
+      h.runner.start = async (request) => {
+        secondId = request.record.id;
+        h.runner.started.push(request);
+        h.runner.alive.add(request.record.id);
+        await held;
+      };
+
+      const launch = h.manager.startSession('ws', 'DOC-1', START);
+      await waitFor(() => secondId !== '', 'the second run to reach the runner');
+      let applied = false;
+      const hook = h.manager
+        .applyEvent(
+          secondId,
+          { type: 'hook', hook: { hook_event_name: 'SessionStart', session_id: 'from-hook' } },
+          {},
+        )
+        .then(() => {
+          applied = true;
+        });
+      await drain();
+
+      expect(applied).toBe(false);
+
+      release();
+      await Promise.all([launch, hook]);
+      expect(h.store.session(secondId)?.claudeSessionId).toBe('from-hook');
+    });
+
+    it('holds a removal of the checkout a start is preparing', async () => {
+      const first = await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.killSession(first.id);
+      await h.manager.archiveSession(first.id);
+      h.clock.ms += 60_000;
+      const { held, release } = gate();
+      let preparing = false;
+      h.repo.prepare = async () => {
+        preparing = true;
+        await held;
+        return { cwd: '/repos/worktrees/DOC-1', branch: 'DOC-1-x', needsBootstrap: false };
+      };
+
+      const start = h.manager.startSession('ws', 'DOC-1', START);
+      await waitFor(() => preparing, 'the start to reach the checkout');
+      let removed = false;
+      const removal = h.manager
+        .removeWorktree(first.id, true)
+        .then(() => {
+          removed = true;
+        })
+        .catch(() => undefined);
+      await drain();
+
+      expect(removed).toBe(false);
+      expect(h.repo.removed).toEqual([]);
+
+      release();
+      await Promise.allSettled([start, removal]);
+    });
+
+    it('holds a start of the issue whose checkout is being removed', async () => {
+      const first = await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.killSession(first.id);
+      await h.manager.archiveSession(first.id);
+      h.clock.ms += 60_000;
+      const { held, release } = gate();
+      h.repo.removeWorktree = async (issueKey, force) => {
+        h.repo.removed.push({ issueKey, force });
+        await held;
+      };
+
+      const removal = h.manager.removeWorktree(first.id, true);
+      await waitFor(() => h.repo.removed.length > 0, 'the removal to reach the repo');
+      let prepared = false;
+      h.repo.prepare = async () => {
+        prepared = true;
+        return { cwd: '/repos/worktrees/DOC-1', branch: 'DOC-1-x', needsBootstrap: false };
+      };
+      const start = h.manager.startSession('ws', 'DOC-1', START).catch(() => undefined);
+      await drain();
+
+      expect(prepared).toBe(false);
+
+      release();
+      await Promise.allSettled([removal, start]);
+    });
+
+    it('gives two different (repo, issue) pairs two different checkout keys', () => {
+      // Without the separator, `('app-1','DOC-2')` and `('ap','p-1DOC-2')` are
+      // one key, and two unrelated checkouts serialise against each other.
+      expect(checkoutKey('app-1', 'DOC-2')).not.toBe(checkoutKey('ap', 'p-1DOC-2'));
+      expect(checkoutKey('app', 'DOC-1')).toBe(checkoutKey('app', 'DOC-1'));
+    });
+  });
+
+  describe('polling', () => {
+    it('installs the poll timer even when the boot sequence rejects', async () => {
+      // A boot that fails must cost a banner, not a server that never polls
+      // and never reconciles for as long as it runs.
+      const sessions = h.store.sessions.bind(h.store);
+      let thrown = false;
+      h.store.sessions = () => {
+        if (thrown) return sessions();
+        thrown = true;
+        throw new Error('EACCES: sessions.json');
+      };
+
+      await expect(h.manager.start()).rejects.toThrow('EACCES: sessions.json');
+      const before = h.source.listCalls;
+      await vi.advanceTimersByTimeAsync(h.config.workspaces['ws']!.pollSeconds * 1000);
+      await drain();
+
+      expect(h.source.listCalls).toBeGreaterThan(before);
+    });
+
+    it('stops polling a query the source says repeating cannot fix', async () => {
+      h.source.listError = new JiraTruncatedError('parent = DOC-100', 50, 5000);
+      await h.manager.start();
+      expect(h.logger.lines.join('\n')).toContain('polling suspended');
+      const suspended = h.source.listCalls;
+      h.source.listError = null;
+
+      await vi.advanceTimersByTimeAsync(h.config.workspaces['ws']!.pollSeconds * 3000);
+
+      expect(h.source.listCalls).toBe(suspended);
+    });
+
+    it('resumes polling once the owner asks for a refresh', async () => {
+      h.source.listError = new JiraTruncatedError('parent = DOC-100', 50, 5000);
+      await h.manager.start();
+      h.source.listError = null;
+
+      await h.manager.refresh('ws');
+      const resumed = h.source.listCalls;
+      await vi.advanceTimersByTimeAsync(h.config.workspaces['ws']!.pollSeconds * 1000);
+
+      expect(h.source.listCalls).toBeGreaterThan(resumed);
+    });
+
+    it('leaves the suspension in place when a session merely exits', async () => {
+      // A session exiting is not the owner asking; treating it as one resumes
+      // the same rejected query on the next tick.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.source.listError = new JiraTruncatedError('parent = DOC-100', 50, 5000);
+      await h.manager.start();
+      h.source.listError = null;
+
+      await h.manager.killSession('qc-DOC-1-implement');
+      const afterExit = h.source.listCalls;
+      await vi.advanceTimersByTimeAsync(h.config.workspaces['ws']!.pollSeconds * 3000);
+
+      expect(h.source.listCalls).toBe(afterExit);
+    });
+
+    it('answers a refresh from a fetch issued after it, never from one before', async () => {
+      // The whole point of `inFlightStartedAt`: a refresh clicked for a change
+      // must not be answered by a list read before that change happened.
+      const { held, release } = gate();
+      h.source.list = async () => {
+        h.source.listCalls += 1;
+        // Snapshot at call time, the way a real request does: what a fetch
+        // answers is what the tracker held when it was issued.
+        const snapshot = [...h.source.issues];
+        await held;
+        return snapshot;
+      };
+      const first = h.manager.refresh('ws');
+      await waitFor(() => h.source.listCalls > 1, 'the first refresh to reach the source');
+      h.clock.ms += 1000;
+      h.source.issues = [makeIssue(), makeIssue({ key: 'DOC-2', summary: 'Added later' })];
+      const second = h.manager.refresh('ws');
+      await drain();
+      release();
+
+      const [, view] = await Promise.all([first, second]);
+
+      expect(laneOf(view, 'DOC-2')).toBe('backlog');
+    });
+  });
+
+  describe('staleness', () => {
+    it('leaves the marker alone for a status-line payload, which reports no state', async () => {
+      // A cold cache says nothing about whether the session moved, and it
+      // arrives once a second: clearing the marker on one erases it instantly.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const survivor = h.store.session('qc-DOC-1-implement') as SessionRecord;
+      await h.store.saveSession({
+        ...survivor,
+        stateSince: new Date(h.clock.ms - 3_600_000).toISOString(),
+      });
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+      await h.manager.reconcile();
+      expect(h.store.session('qc-DOC-1-implement')?.staleSince).not.toBeNull();
+
+      await h.manager.applyEvent(
+        'qc-DOC-1-implement',
+        {
+          type: 'statusline',
+          payload: { prompt_cache: { expires_at: 1_788_976_000, ttl: '5m', warm: false } },
+        },
+        {},
+      );
+
+      expect(h.store.session('qc-DOC-1-implement')?.staleSince).not.toBeNull();
+    });
+
+    it('leaves a session that is still reporting unflagged, however long it has been working', async () => {
+      // `stateSince` only moves on a state change, so a session that has been
+      // working across the restart and is still posting hooks would be flagged
+      // on every pass, and unflagged again by its next hook, for ever.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const survivor = h.store.session('qc-DOC-1-implement') as SessionRecord;
+      await h.store.saveSession({
+        ...survivor,
+        state: 'working',
+        stateSince: new Date(h.clock.ms - 3_600_000).toISOString(),
+      });
+      await h.manager.applyEvent(
+        'qc-DOC-1-implement',
+        { type: 'hook', hook: { hook_event_name: 'PreToolUse', tool_name: 'Bash' } },
+        {},
+      );
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+
+      await h.manager.reconcile();
+
+      expect(h.store.session('qc-DOC-1-implement')?.staleSince).toBeNull();
+    });
+
+    it('clears the marker on the record it closes in the same pass', async () => {
+      // A dead record receives no further event, so a flag left on it is one
+      // nothing can ever clear.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const survivor = h.store.session('qc-DOC-1-implement') as SessionRecord;
+      await h.store.saveSession({
+        ...survivor,
+        stateSince: new Date(h.clock.ms - 3_600_000).toISOString(),
+      });
+      h.runner.alive.clear();
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+
+      await h.manager.reconcile();
+
+      const record = h.store.session('qc-DOC-1-implement');
+      expect(record?.state).toBe('failed');
+      expect(record?.staleSince).toBeNull();
+    });
+
+    it('flags a record once, not once per reconcile pass', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const survivor = h.store.session('qc-DOC-1-implement') as SessionRecord;
+      await h.store.saveSession({
+        ...survivor,
+        stateSince: new Date(h.clock.ms - 3_600_000).toISOString(),
+      });
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+      const frames: EventFrame[] = [];
+      h.manager.subscribe((frame) => frames.push(frame));
+
+      await h.manager.reconcile();
+      await h.manager.reconcile();
+
+      expect(frames.filter((frame) => frame.type === 'session')).toHaveLength(1);
+    });
+  });
+
+  describe('event log', () => {
+    it('refuses a log it cannot read with a status the panel can show', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.store.readEvents = async () => {
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      };
+
+      await expect(h.manager.sessionEvents('qc-DOC-1-implement')).rejects.toMatchObject({
+        status: 409,
+        detail: 'EACCES: permission denied',
+      });
     });
   });
 
   describe('fan-out', () => {
+    it('says nothing when a refresh in flight outlives the workspace it was for', async () => {
+      // The refresh schedules the board after its fetch returns, i.e. after the
+      // removal has already cleared that workspace's timers.
+      await h.manager.addWorkspace({
+        id: 'second',
+        name: 'Second',
+        epic: 'DOC-900',
+        repo: 'app',
+        connector: 'tracker',
+      });
+      await settle();
+      const { held, release } = gate();
+      h.source.list = async () => {
+        h.source.listCalls += 1;
+        await held;
+        return [...h.source.issues];
+      };
+
+      const refresh = h.manager.refresh('second').catch(() => undefined);
+      await waitFor(() => h.source.listCalls > 1, 'the refresh to reach the source');
+      await h.manager.removeWorkspace('second');
+      release();
+      await refresh;
+      await settle();
+
+      expect(h.logger.lines.join('\n')).not.toContain('cannot project');
+    });
+
     it('pushes a session frame immediately and one debounced board frame', async () => {
       // The harness's first refresh already queued a board frame; letting it
       // land keeps this test measuring only the frames it causes itself.
