@@ -18,11 +18,15 @@ export function jqlQuote(value: string): string {
 /**
  * Builds the query listing an epic's unfinished children.
  *
- * @param epic - Key of the parent epic.
+ * A bare numeric epic is emitted unquoted, because JQL resolves a quoted
+ * literal as an issue key first and a numeric id has none.
+ *
+ * @param epic - Key or numeric id of the parent epic.
  * @returns The JQL query.
  */
 export function epicChildrenJql(epic: string): string {
-  return `parent = ${jqlQuote(epic)} AND statusCategory != Done ${DEFAULT_JQL_ORDER}`;
+  const operand = /^\d+$/.test(epic) ? epic : jqlQuote(epic);
+  return `parent = ${operand} AND statusCategory != Done ${DEFAULT_JQL_ORDER}`;
 }
 
 /**

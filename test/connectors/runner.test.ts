@@ -123,6 +123,11 @@ describe('readOwnerStatuslineCommand', () => {
     await writeOwnerSettings({ statusLine: { type: 'command', command: 'bash ~/sl.sh' } });
     expect(readOwnerStatuslineCommand(home)).toBe('bash ~/sl.sh');
   });
+
+  it('answers null for an empty command, which would be chained into the script', async () => {
+    await writeOwnerSettings({ statusLine: { type: 'command', command: '' } });
+    expect(readOwnerStatuslineCommand(home)).toBeNull();
+  });
 });
 
 describe('ClaudeTmuxRunner.writeSessionFiles', () => {
@@ -212,6 +217,13 @@ describe('resolveExecutable', () => {
 
     expect(resolveExecutable(path, '/nowhere')).toBeNull();
   });
+
+  it('resolves an explicit path without consulting the search path at all', async () => {
+    const path = join(root, 'claude-here');
+    await writeFile(path, '#!/bin/sh\n', { mode: 0o755 });
+
+    expect(resolveExecutable(path, '')).toBe(path);
+  });
 });
 
 describe('ClaudeTmuxRunner.start', () => {
@@ -226,6 +238,55 @@ describe('ClaudeTmuxRunner.start', () => {
     await expect(
       runner.start({ record: makeRecord(), needsBootstrap: false }),
     ).rejects.toBeInstanceOf(MissingExecutableError);
+  });
+
+  it('probes the CLI before writing anything, leaving no session directory behind', async () => {
+    const runner = new ClaudeTmuxRunner({
+      config: { ...RUNNER_CONFIG, claudeBin: 'qc-no-such-binary' },
+      port: 4400,
+      dataDir,
+      home,
+    });
+    const record = makeRecord();
+
+    await expect(runner.start({ record, needsBootstrap: false })).rejects.toBeInstanceOf(
+      MissingExecutableError,
+    );
+
+    await expect(readFile(join(dataDir, 'sessions', record.id, 'run.sh'), 'utf8')).rejects.toThrow(
+      /ENOENT/,
+    );
+  });
+});
+
+describe('ClaudeTmuxRunner.resume', () => {
+  it('probes the CLI before killing the session it is replacing', async () => {
+    const runner = new ClaudeTmuxRunner({
+      config: { ...RUNNER_CONFIG, claudeBin: 'qc-no-such-binary' },
+      port: 4400,
+      dataDir,
+      home,
+    });
+    const record = makeRecord({ claudeSessionId: 'abc' });
+
+    await expect(runner.resume(record)).rejects.toBeInstanceOf(MissingExecutableError);
+
+    await expect(readFile(join(dataDir, 'sessions', record.id, 'run.sh'), 'utf8')).rejects.toThrow(
+      /ENOENT/,
+    );
+  });
+
+  it('refuses a record that never reported a claude session id before probing anything', async () => {
+    const runner = new ClaudeTmuxRunner({
+      config: { ...RUNNER_CONFIG, claudeBin: 'qc-no-such-binary' },
+      port: 4400,
+      dataDir,
+      home,
+    });
+
+    await expect(runner.resume(makeRecord({ claudeSessionId: null }))).rejects.toBeInstanceOf(
+      ResumeUnavailableError,
+    );
   });
 });
 

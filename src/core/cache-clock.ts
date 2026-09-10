@@ -101,7 +101,8 @@ export function cacheChanged(a: SessionCache | null, b: SessionCache | null): bo
  *
  * @param cache - Cache state, or null when nothing has reported one.
  * @param nowMs - Current time in epoch milliseconds.
- * @returns Whole seconds remaining; 0 once the cache is cold or unknown.
+ * @returns Whole seconds remaining; 0 once the cache is cold or no expiry has
+ *   been reported.
  */
 export function secondsLeft(cache: SessionCache | null, nowMs: number): number {
   if (cache === null || cache.expiresAt === null) return 0;

@@ -124,7 +124,8 @@ connectors{id}
 workspaces{id}             what the header dropdown switches between
   name                     shown in the switcher
   epic                     parent key (`DOC-3807`) or numeric issue id; the shape is
-                           validated, and the value is quoted into the default JQL
+                           validated, and a key (never a numeric id, which JQL would
+                           then resolve as a key first) is quoted into the default JQL
                            parent = "<epic>" AND statusCategory != Done ORDER BY Rank ASC
   jql?                     raw override of the whole query
   connector                connector id
@@ -134,7 +135,10 @@ workspaces{id}             what the header dropdown switches between
 repos{id}
   path                     absolute path of the main checkout
   worktreeDir              where worktrees go; worktree path = <worktreeDir>/<KEY>
-  baseRef                  'origin/main'; fetched before every worktree add
+  baseRef                  'origin/main'; its remote is fetched at the start of every
+                           non-shared `prepare`, before the reuse check. The fetch is
+                           an attempt: an unreachable remote leaves the refs stale and
+                           the start dialog says so, it never refuses the start
   branchPattern            '{{key}}-{{slug}}'
   bootstrap                shell string run in the tmux session after a NEW worktree
   playbooks[]
@@ -185,7 +189,7 @@ interface SessionRecord {
   branch: string | null; // null for isolation 'shared'
   model: string;
   effort: Effort;
-  permissionMode: PermissionMode | 'default';
+  permissionMode: PermissionModeSetting; // includes 'default', which passes no flag
   prompt: string; // exactly what was sent
   claudeSessionId: string | null; // from the SessionStart hook
   state: SessionState;
@@ -233,34 +237,44 @@ failed          bootstrap or launch failed; tmux window holds the failed shell
 
 Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 
-| Event                                           | From                                    | To                 | Side data                                                                   |
-| ----------------------------------------------- | --------------------------------------- | ------------------ | --------------------------------------------------------------------------- |
-| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                             |
-| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                             |
-| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended                                                            |
-| hook SessionStart                               | starting                                | starting           | record `claudeSessionId`                                                    |
-| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                               |
-| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                               |
-| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                             |
-| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                               |
-| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`               |
-| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict     |
-| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, under the notification guard        |
-| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message, under the notification guard        |
-| hook PermissionDenied                           | any live                                | working            | clear pending                                                               |
-| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl |
-| action interrupt                                | working, waiting-*                      | idle               | the runner sent Escape; no hook reports an interrupt                        |
-| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                     |
-| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                   |
-| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9)                                              |
+| Event                                           | From                                    | To                 | Side data                                                                    |
+| ----------------------------------------------- | --------------------------------------- | ------------------ | ---------------------------------------------------------------------------- |
+| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                              |
+| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                              |
+| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended                                                             |
+| hook SessionStart (source ≠ resume)             | starting                                | starting           | record `claudeSessionId`; an empty id never overwrites a known one           |
+| hook SessionStart (source = resume)             | starting                                | idle               | the only signal that a resumed session is back at the prompt; never notifies |
+| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                                |
+| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                                |
+| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                              |
+| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                                |
+| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                |
+| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict      |
+| hook Notification (permission_prompt)           | any live                                | waiting-permission | pending.summary = notification message, under the notification guard         |
+| hook Notification (elicitation_dialog)          | any live                                | waiting-question   | pending.summary = notification message, under the notification guard         |
+| hook PermissionDenied                           | any live                                | working            | clear pending                                                                |
+| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl  |
+| action interrupt                                | working, waiting-*                      | idle               | the runner sent Escape; no hook reports an interrupt                         |
+| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                      |
+| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                    |
+| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9)                                               |
 
 The notification guard, shared by both Notification rows: a Notification only
 ever opens a pending, never redescribes or reclassifies one, so it is dropped
 when the record already needs the owner or already carries a `pending`. It is
-dropped too when its `prompt_id` is the one on `lastToolResultPromptId`, i.e.
-when a tool of that same turn has already returned: the dialog it describes was
-answered while it was in flight (it lags by ~6 s, and a question answered in 3 s
-lands its PostToolUse first).
+dropped too when its `prompt_id` is the one on `lastToolResultPromptId`: the
+dialog it describes was answered while it was in flight (it lags by ~6 s, and a
+question answered in 3 s lands its PostToolUse first).
+
+`lastToolResultPromptId` is written by PostToolUse / PostToolUseFailure /
+PermissionDenied and holds the turn of a tool result **that closed a dialog the
+record knew about** — a result arriving with `pending` already null writes null
+instead. Otherwise the first tool result of a turn would suppress every later
+Notification of that turn, including one describing a dialog whose
+PermissionRequest hook never reached the server, which is exactly the case the
+Notification is the fallback for. Every run boundary (`claude-start`,
+`claude-exit`, SessionEnd) clears it, so the guard never depends on prompt ids
+being unique across runs.
 
 Unknown events are ignored and logged. Every hook and launcher signal is
 appended to `<dataDir>/sessions/<id>/events.jsonl` (raw payload + resulting
@@ -326,7 +340,11 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
 2. `Repo.prepare(issue, playbook, hints)` resolves `cwd` and `branch`; the
    server passes `hints.knownBranch` from the newest non-archived record for
    that issue in that repo:
-   - `worktree`: `git fetch <remote of baseRef>`; if `<worktreeDir>/<KEY>` is
+   Both non-shared isolations first attempt `git fetch <remote of baseRef>`; a
+   failed fetch is recorded as staleness, never raised. A registered worktree
+   whose HEAD is detached is refused rather than reused: there is no branch to
+   work on and the owner has to repair it by hand.
+   - `worktree`: if `<worktreeDir>/<KEY>` is
      already a registered worktree, reuse it (no bootstrap); else
      `git worktree add -b <branch> <path> <baseRef>` and mark `needsBootstrap`.
      If the branch already exists, `git worktree add <path> <branch>`.
@@ -519,7 +537,8 @@ The runner's generated `statusline.sh` reads stdin once, POSTs it to
 pipes the same payload into the owner's original statusline command when
 `~/.claude/settings.json` has one, so the TUI keeps its own statusline. The
 server keeps `cache = { expiresAt, ttlSeconds, warm, source: 'statusline' }`
-from the payload and only broadcasts when `expiresAt`/`warm` change.
+from the payload and only broadcasts when `expiresAt`, `ttlSeconds` or `warm`
+change.
 
 Fallback when no statusline payload has arrived yet: on Stop, `cache =
 { expiresAt: now + ttlSeconds, warm: true, source: 'derived' }` with
@@ -537,11 +556,25 @@ vars). Endpoint `POST /rest/api/3/search/jql` with `fields:
 summary,issuetype,status,labels,assignee,priority,description,updated`,
 paginated on `nextPageToken`. Status category from
 `status.statusCategory.key` (`new` → todo, `indeterminate` → inprogress,
-`done` → done). Description ADF → plain text in the connector.
+`done` → done). Description ADF → plain text in the connector; a document that
+is not shaped like ADF degrades to less text, never to a failed fetch, and a
+resource with no usable `key` is dropped from the list.
+
+Limits, both user-visible: every request carries a 15 s abort (`JIRA_TIMEOUT_MS`),
+reported as a `JiraHttpError` naming the site and the URL rather than as a bare
+`TimeoutError`; and a search walks at most 50 pages of 100
+(`JIRA_MAX_PAGES` × `JIRA_PAGE_SIZE`). A query with pages left after the cap
+fails rather than presenting a partial epic as the whole one, and because
+repeating it changes nothing it also suspends that workspace's poll timer until
+the owner asks for a refresh.
 
 Polling: every `pollSeconds`, plus `POST /api/workspaces/:id/refresh`, plus once
 whenever a session leaves the live set. On failure the last good list is
-served with `sourceError` set on the board payload; the UI shows a banner.
+served with `sourceError` set on the board payload; the UI shows a banner. A
+caller that arrives while a fetch is already in flight joins it only when that
+fetch was issued after the caller's own request; otherwise it awaits it and
+then runs its own, so a refresh never answers with a list read before the
+change it was clicked for.
 
 Interface:
 
@@ -648,7 +681,8 @@ Session view:
 
 Notifications: `Notification` API, permission requested once from a button in
 the header; one notification per transition into the needs-you set, titled
-`<KEY> · <state>`, body = pending summary or last assistant snippet.
+`<KEY> · <state>`, body = `CardSession.pending?.summary` or, for an idle
+session (which by definition has none), `CardSession.lastAssistantMessage`.
 
 ## 13. Persistence
 

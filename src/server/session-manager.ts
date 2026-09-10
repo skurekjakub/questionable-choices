@@ -7,6 +7,7 @@ import {
   DirtyWorktreeError,
   NoBranchError,
 } from '../connectors/repos/git/index.js';
+import { JiraTruncatedError } from '../connectors/issues/jira/client.js';
 import { MissingExecutableError } from '../connectors/runners/claude-tmux/index.js';
 import type {
   BoardView,
@@ -215,6 +216,13 @@ interface IssueCache {
   sourceError: string | null;
   /** The refresh currently running, so callers can join it instead of piling on. */
   inFlight: Promise<void> | null;
+  /** Epoch ms at which `inFlight` was issued; 0 when nothing is running. */
+  inFlightStartedAt: number;
+  /**
+   * Whether the last list failed for a reason repeating it cannot fix, which
+   * suspends the poll timer until the owner asks for a refresh.
+   */
+  queryRejected: boolean;
 }
 
 /**
@@ -384,6 +392,8 @@ export class SessionManager {
       fetchedAt: new Date(this.now()).toISOString(),
       sourceError: null,
       inFlight: null,
+      inFlightStartedAt: 0,
+      queryRejected: false,
     });
   }
 
@@ -397,7 +407,11 @@ export class SessionManager {
     const previous = this.pollTimers.get(runtime.id);
     if (previous !== undefined) clearInterval(previous);
     const timer = setInterval(() => {
-      void this.refresh(runtime.id).catch((cause: unknown) => {
+      // A query the source rejected outright is not retried on a timer: the
+      // poll would re-send the same rejected query for as long as the server
+      // runs, and only the owner can change it.
+      if (this.requireCache(runtime.id).queryRejected) return;
+      void this.refreshNow(runtime.id).catch((cause: unknown) => {
         this.logger.warn(`poll of workspace '${runtime.id}' failed: ${messageOf(cause)}`);
       });
     }, runtime.config.pollSeconds * 1000);
@@ -546,18 +560,41 @@ export class SessionManager {
    * @throws {ActionError} When no workspace has that id.
    */
   async refresh(workspaceId: string): Promise<BoardView> {
+    // An explicit refresh is the owner saying "try again", so it lifts the
+    // suspension a rejected query put the poll timer under.
+    this.requireCache(workspaceId).queryRejected = false;
+    return this.refreshNow(workspaceId);
+  }
+
+  /**
+   * Refetches one workspace's issues without lifting a poll suspension.
+   *
+   * A caller that joins a fetch already in flight is only answered by it when
+   * that fetch was issued after the caller's own request; otherwise the join
+   * would report a list read before the change the caller is looking for.
+   *
+   * @param workspaceId - Workspace to refresh.
+   * @returns The board view after the refresh.
+   * @throws {ActionError} When no workspace has that id.
+   */
+  private async refreshNow(workspaceId: string): Promise<BoardView> {
     const runtime = this.requireWorkspace(workspaceId);
     const cache = this.requireCache(workspaceId);
-    if (cache.inFlight !== null) {
-      await cache.inFlight;
-      return this.board(workspaceId);
+    const requestedAt = this.now();
+    while (cache.inFlight !== null) {
+      const joined = cache.inFlight;
+      const startedAt = cache.inFlightStartedAt;
+      await joined;
+      if (startedAt >= requestedAt) return this.board(workspaceId);
     }
+    cache.inFlightStartedAt = this.now();
     const work = this.fetchIssues(runtime, cache);
     cache.inFlight = work;
     try {
       await work;
     } finally {
       cache.inFlight = null;
+      cache.inFlightStartedAt = 0;
     }
     this.scheduleBoard(workspaceId);
     return this.board(workspaceId);
@@ -1164,7 +1201,13 @@ export class SessionManager {
     } catch (cause) {
       listed = false;
       cache.sourceError = messageOf(cause);
-      this.logger.warn(`workspace '${runtime.id}' issue list failed: ${cache.sourceError}`);
+      // A truncated walk costs `JIRA_MAX_PAGES` authenticated requests and
+      // repeating it changes nothing, so it suspends the timer rather than
+      // running every poll for as long as the server is up.
+      cache.queryRejected = cause instanceof JiraTruncatedError;
+      const message = `workspace '${runtime.id}' issue list failed: ${cache.sourceError}`;
+      if (cache.queryRejected) this.logger.error(`${message} (polling suspended until a refresh)`);
+      else this.logger.warn(message);
     }
     // While the source is down the previously fetched session-only issues are
     // the only ones there are, so they are kept rather than refetched.

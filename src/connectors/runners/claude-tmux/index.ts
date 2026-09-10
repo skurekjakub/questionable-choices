@@ -259,13 +259,22 @@ export class ClaudeTmuxRunner implements Runner {
    * @throws {TmuxError} When tmux is missing or refuses the session.
    */
   private async startWindow(record: SessionRecord, dir: string): Promise<void> {
+    await tmux(newSessionArgv(record.id, record.cwd, join(dir, 'run.sh')));
+    await tmux(windowSizeArgv(record.id));
+  }
+
+  /**
+   * Refuses a launch whose CLI is not on the machine.
+   *
+   * @returns Nothing.
+   * @throws {MissingExecutableError} When the configured CLI does not resolve.
+   */
+  private requireClaude(): void {
     // A missing CLI would otherwise be discovered by bash inside the window,
     // which exits 127 a second after a start the owner was told succeeded.
     if (resolveExecutable(this.config.claudeBin, process.env['PATH'] ?? '') === null) {
       throw new MissingExecutableError(this.config.claudeBin);
     }
-    await tmux(newSessionArgv(record.id, record.cwd, join(dir, 'run.sh')));
-    await tmux(windowSizeArgv(record.id));
   }
 
   /**
@@ -277,6 +286,9 @@ export class ClaudeTmuxRunner implements Runner {
    * @throws {TmuxError} When tmux is missing or refuses the session.
    */
   async start(request: RunnerStartRequest): Promise<void> {
+    // Probed before anything is written: a typo in `claudeBin` would otherwise
+    // leave an orphan session directory behind on every attempt.
+    this.requireClaude();
     const dir = await this.writeSessionFiles({
       record: request.record,
       needsBootstrap: request.needsBootstrap,
@@ -292,11 +304,15 @@ export class ClaudeTmuxRunner implements Runner {
    * @param record - Record to resume; its `claudeSessionId` must not be null.
    * @returns Nothing; progress is reported through launcher events.
    * @throws {ResumeUnavailableError} When the record has no Claude session id.
+   * @throws {MissingExecutableError} When the configured CLI is not on PATH.
    * @throws {TmuxError} When tmux is missing or refuses the session.
    */
   async resume(record: SessionRecord): Promise<void> {
     const claudeSessionId = record.claudeSessionId;
     if (claudeSessionId === null) throw new ResumeUnavailableError(record.id);
+    // Probed before the kill below: a resume that cannot succeed must not take
+    // down the tmux session it was meant to replace.
+    this.requireClaude();
     // A leftover window would make `new-session` fail with "duplicate session",
     // and the old one is dead by definition once a resume is asked for.
     await tmuxAttempt(killSessionArgv(record.id));

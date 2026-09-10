@@ -486,9 +486,14 @@ export function applyWorkspaceChange(config: Config, request: CreateWorkspaceReq
  * @returns The locator relative to the request.
  */
 function requestPathOf(path: string, workspaceId: string, connectorId: string | undefined): string {
+  // An id that is itself invalid produces a locator with no trailing segment
+  // (`connectors.Bad-Id`), which the dialog must still match to the field the
+  // id was typed into.
+  if (path === `workspaces.${workspaceId}`) return 'id';
   const workspacePrefix = `workspaces.${workspaceId}.`;
   if (path.startsWith(workspacePrefix)) return path.slice(workspacePrefix.length);
   if (connectorId !== undefined) {
+    if (path === `connectors.${connectorId}`) return 'newConnector.id';
     const connectorPrefix = `connectors.${connectorId}.`;
     if (path.startsWith(connectorPrefix)) {
       return `newConnector.${path.slice(connectorPrefix.length)}`;

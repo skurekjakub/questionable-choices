@@ -3,14 +3,18 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   DetachedWorktreeError,
   DirtyWorktreeError,
+  GitError,
   GitRepo,
   InvalidIssueKeyError,
   NoBranchError,
   WorktreeNotFoundError,
+  git,
+  gitAttempt,
+  gitCommandLine,
 } from '../../src/connectors/repos/git/index.js';
 import type { RepoConfig } from '../../src/core/types.js';
 import { makeIssue, makePlaybook, makeRepo } from '../core/helpers.js';
@@ -154,11 +158,121 @@ describe('GitRepo.prepare', () => {
     const path = join(worktreeDir, 'DOC-7');
     await run(['worktree', 'add', '--detach', path, 'main'], repo);
 
-    await expect(subject.prepare(issue, playbooks.worktree)).rejects.toBeInstanceOf(
-      DetachedWorktreeError,
+    try {
+      await expect(subject.prepare(issue, playbooks.worktree)).rejects.toBeInstanceOf(
+        DetachedWorktreeError,
+      );
+    } finally {
+      // The fixture is shared by every test in this file, so the cleanup must
+      // run even when the assertion above fails, or later tests fail too.
+      await run(['worktree', 'remove', '--force', path], repo);
+    }
+  });
+
+  it('refuses a key that is not a usable path segment even for shared isolation', async () => {
+    // `shared` never builds a path, but the key still names the tmux session
+    // and the session directory, so the gate is not the worktree path's alone.
+    await expect(
+      subject.prepare(makeIssue({ key: '../../etc' }), playbooks.shared),
+    ).rejects.toBeInstanceOf(InvalidIssueKeyError);
+  });
+});
+
+describe('GitRepo.prepare against a remote that moved', () => {
+  let clone = '';
+  let cloneWorktrees = '';
+  let cloned: GitRepo;
+
+  beforeEach(async () => {
+    clone = join(root, `clone-${String(Date.now())}-${String(Math.random()).slice(2)}`);
+    cloneWorktrees = join(clone, '..', `clone-worktrees-${String(Math.random()).slice(2)}`);
+    await run(['clone', join(root, 'origin.git'), clone], root);
+    await run(['config', 'commit.gpgsign', 'false'], clone);
+    cloned = new GitRepo(
+      'docs',
+      makeRepo({ path: clone, worktreeDir: cloneWorktrees, baseRef: 'origin/main' }),
+    );
+  });
+
+  afterEach(async () => {
+    await rm(clone, { recursive: true, force: true });
+    await rm(cloneWorktrees, { recursive: true, force: true });
+  });
+
+  it('branches off the tip that was pushed after the clone, not the stale ref', async () => {
+    await commitFile('after-clone.txt', '2026-07-01T00:00:00+0000');
+    await run(['push', 'origin', 'main'], repo);
+    const tip = (await run(['rev-parse', 'main'], repo)).trim();
+
+    const prepared = await cloned.prepare(
+      makeIssue({ key: 'DOC-50', summary: 'Fresh base' }),
+      playbooks.worktree,
     );
 
-    await run(['worktree', 'remove', '--force', path], repo);
+    expect((await run(['rev-parse', 'HEAD'], prepared.cwd)).trim()).toBe(tip);
+    expect(cloned.lastFetchError()).toBeNull();
+  });
+
+  it('reuses a registered worktree offline, reporting the fetch failure instead', async () => {
+    const issue = makeIssue({ key: 'DOC-51', summary: 'Already on disk' });
+    await cloned.prepare(issue, playbooks.worktree);
+    await run(['remote', 'set-url', 'origin', 'https://127.0.0.1:1/nope.git'], clone);
+
+    const prepared = await cloned.prepare(issue, playbooks.worktree);
+
+    expect(prepared.cwd).toBe(join(cloneWorktrees, 'DOC-51'));
+    expect(prepared.needsBootstrap).toBe(false);
+    expect(cloned.lastFetchError()).toContain('git fetch origin');
+  });
+
+  it('fetches for issue-worktree isolation too, so a just-pushed branch resolves', async () => {
+    await run(['checkout', '-b', 'DOC-52-pushed-late', 'main'], repo);
+    await commitFile('late.txt', '2026-08-01T00:00:00+0000');
+    await run(['push', 'origin', 'DOC-52-pushed-late'], repo);
+    await run(['checkout', 'main'], repo);
+    await run(['branch', '-D', 'DOC-52-pushed-late'], repo);
+
+    const prepared = await cloned.prepare(
+      makeIssue({ key: 'DOC-52', summary: 'Pushed late' }),
+      playbooks.issueWorktree,
+    );
+
+    expect(prepared.branch).toBe('DOC-52-pushed-late');
+  });
+});
+
+describe('git and gitAttempt', () => {
+  it('throws a GitError naming the exact command, directory and exit code', async () => {
+    const failure = git(['rev-parse', '--verify', 'refs/heads/no-such-branch'], repo);
+
+    await expect(failure).rejects.toBeInstanceOf(GitError);
+    const error = (await failure.catch((cause: unknown) => cause)) as GitError;
+    expect(error.args).toEqual(['rev-parse', '--verify', 'refs/heads/no-such-branch']);
+    expect(error.cwd).toBe(repo);
+    expect(error.exitCode).not.toBeNull();
+    expect(error.stderr).not.toBe('');
+    expect(error.message).toContain('git rev-parse --verify refs/heads/no-such-branch');
+  });
+
+  it('reports the same failure as a result rather than a throw', async () => {
+    const attempt = await gitAttempt(['rev-parse', '--verify', 'refs/heads/no-such-branch'], repo);
+
+    expect(attempt.ok).toBe(false);
+    expect(attempt.exitCode).not.toBe(0);
+    expect(attempt.stderr).not.toBe('');
+  });
+
+  it('answers a successful command with both streams', async () => {
+    const attempt = await gitAttempt(['rev-parse', '--abbrev-ref', 'HEAD'], repo);
+
+    expect(attempt).toMatchObject({ ok: true, exitCode: 0 });
+    expect(attempt.stdout.trim()).toBe('main');
+  });
+
+  it('renders a command line the way a person would type it', () => {
+    expect(gitCommandLine(['worktree', 'add', '/path', 'branch'])).toBe(
+      'git worktree add /path branch',
+    );
   });
 });
 
@@ -208,6 +322,9 @@ describe('GitRepo.removeWorktree', () => {
 
     await expect(refusal).rejects.toBeInstanceOf(DirtyWorktreeError);
     await expect(refusal).rejects.toThrow(/\?\? scratch\.txt/);
+    // The message names the flag that gets past it, so an owner reading the
+    // refusal knows what the second attempt has to say.
+    await expect(refusal).rejects.toThrow(/--force/);
   });
 
   it('removes a dirty worktree when forced', async () => {

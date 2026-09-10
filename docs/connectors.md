@@ -41,8 +41,9 @@ By hand, add an entry to `workspaces`:
 
 `connector` and `repo` are ids from the other two maps; naming one that does
 not exist fails validation. `epic` is required, and must be an issue key such
-as `DOC-3807` or a numeric issue id; it is quoted into the query, so it can
-neither break the JQL nor replace its ordering. `jql` replaces the default
+as `DOC-3807` or a numeric issue id. A key is quoted into the query, so it can
+neither break the JQL nor replace its ordering; a bare numeric id is emitted
+unquoted, because JQL resolves a quoted operand as an issue key first. `jql` replaces the default
 `parent = "<epic>" AND statusCategory != Done ORDER BY Rank ASC` query for
 workspaces whose issues are not plain epic children — the epic key is still
 what the header shows. `reviewStatuses` defaults to `["Ready for review"]`
@@ -101,7 +102,10 @@ A playbook is a named kickoff recipe on a repo. Add an entry to that repo's
 - `isolation` is `worktree` (fresh branch off `baseRef`), `issue-worktree`
   (the issue's existing branch, found from the newest session record for that
   issue in that repo, else from `origin/<KEY>-*`) or `shared` (the main
-  checkout, no branch).
+  checkout, no branch). Both non-shared isolations attempt a fetch of the base
+  ref's remote before anything else — a failure only makes the refs stale — and
+  both reuse an already-registered `<worktreeDir>/<KEY>` unless its HEAD is
+  detached, which is refused: there is no branch to work on.
 - `primaryFor` lists the board columns whose cards offer this playbook as
   their primary button: `backlog`, `working`, `needs-you`, `review`, `done`.
   The first playbook of the repo is the fallback for a column nothing claims,

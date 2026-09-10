@@ -59,7 +59,13 @@ describe('hookUrl and launcherUrl', () => {
 describe('hookCommand', () => {
   it('posts stdin and never fails the session', () => {
     expect(hookCommand(PORT, SESSION_ID, 'PreToolUse')).toBe(
-      "curl -s -m 2 -X POST -H 'content-type: application/json' --data-binary @- http://127.0.0.1:4400/api/hooks/qc-DOC-1-implement/PreToolUse >/dev/null 2>&1 || true",
+      "curl -s -m 2 -X POST -H 'content-type: application/json' --data-binary @- 'http://127.0.0.1:4400/api/hooks/qc-DOC-1-implement/PreToolUse' >/dev/null 2>&1 || true",
+    );
+  });
+
+  it('quotes the url, so the safety does not depend on how a session is named', () => {
+    expect(hookCommand(PORT, "qc-DOC-1-'; rm -rf /", 'PreToolUse')).toContain(
+      "'http://127.0.0.1:4400/api/hooks/qc-DOC-1-'\\''; rm -rf //PreToolUse'",
     );
   });
 });
