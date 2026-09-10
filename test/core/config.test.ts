@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -713,7 +713,7 @@ describe('removeWorkspace', () => {
 
   it('keeps the connector when another workspace still names it', () => {
     const next = removeWorkspace(config, 'second');
-    expect(next.connectors['tracker']).toBeDefined();
+    expect(next.connectors['tracker']?.site).toBe('example.atlassian.net');
     expect(next.workspaces['ws']?.connector).toBe('tracker');
   });
 

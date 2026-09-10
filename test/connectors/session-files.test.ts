@@ -378,7 +378,7 @@ describe('the generated launcher, run by bash', () => {
     );
 
     const failure = posts.find((post) => post.url.endsWith('/bootstrap-failed'));
-    expect(failure).toBeDefined();
+    expect(failure?.url).toContain('/launcher/bootstrap-failed');
     const body = JSON.parse(failure?.body ?? '') as { exitCode: number; message: string };
     expect(body.exitCode).toBe(3);
     expect(body.message).toContain('npm error 404 Not Found');

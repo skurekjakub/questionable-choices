@@ -1100,7 +1100,16 @@ describe('SessionManager', () => {
       // Without the separator, `('app-1','DOC-2')` and `('ap','p-1DOC-2')` are
       // one key, and two unrelated checkouts serialise against each other.
       expect(checkoutKey('app-1', 'DOC-2')).not.toBe(checkoutKey('ap', 'p-1DOC-2'));
-      expect(checkoutKey('app', 'DOC-1')).toBe(checkoutKey('app', 'DOC-1'));
+      // The repo id is what a reader of the key recovers from it, and a repo id
+      // may not hold a slash, so the first one is always the separator.
+      expect(checkoutKey('app', 'DOC-1/x').split('/')[0]).toBe('app');
+      const keys = [
+        checkoutKey('app', 'DOC-1'),
+        checkoutKey('app', 'DOC-2'),
+        checkoutKey('other', 'DOC-1'),
+        checkoutKey('app', 'DOC-1/x'),
+      ];
+      expect(new Set(keys).size).toBe(keys.length);
     });
   });
 
