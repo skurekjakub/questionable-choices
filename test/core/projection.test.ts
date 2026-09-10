@@ -73,7 +73,6 @@ describe('board shape', () => {
   it('carries the workspace identity and its playbooks', () => {
     const view = projectWith();
     expect(view.workspaceId).toBe('ws');
-    expect(view.name).toBe('Docs');
     expect(view.playbooks.map((playbook) => playbook.id)).toEqual(['implement', 'test']);
     expect(view.sourceError).toBeNull();
   });

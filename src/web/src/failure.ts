@@ -50,8 +50,10 @@ function reasonOf(signal: LoggedLauncherSignal): string | null {
 /**
  * Finds why a session ended badly, from the raw event log the server keeps.
  *
- * The state machine discards the `message` a `bootstrap-failed` signal carries,
- * so the log is the only place a failed session's reason survives.
+ * The record keeps only the exit code: the reducer reads `exitCode` off a
+ * `bootstrap-failed` or `claude-exit` signal and drops the rest of the body. So
+ * the `message` the launcher posts — the tail of the output that ended the run
+ * — reaches a reader through the event log or not at all.
  *
  * @param events - A session's accepted events, oldest first.
  * @returns The newest failure reason, or null when the log names none.

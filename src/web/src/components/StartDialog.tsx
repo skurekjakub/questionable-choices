@@ -127,11 +127,23 @@ export function StartDialog({
   }, [confirming, edited, onClose]);
   const dialog = useFocusTrap<HTMLDivElement>(requestClose);
   const keepEditing = useRef<HTMLButtonElement>(null);
+  const promptField = useRef<HTMLTextAreaElement>(null);
+  const wasConfirming = useRef(false);
 
   // The confirmation is announced from a live region; without moving focus a
   // keyboard user hears it with no way to reach the two buttons it offers.
+  // "Keep editing" then unmounts itself, and focus it was holding goes to
+  // `document.body` with the dialog still open, so it is handed back to the
+  // prompt — which is what the owner asked to keep editing.
   useEffect(() => {
-    if (confirming) keepEditing.current?.focus();
+    if (confirming) {
+      wasConfirming.current = true;
+      keepEditing.current?.focus();
+      return;
+    }
+    if (!wasConfirming.current) return;
+    wasConfirming.current = false;
+    promptField.current?.focus();
   }, [confirming]);
 
   const selectPlaybook = (next: string): void => {
@@ -227,6 +239,7 @@ export function StartDialog({
             <span>Prompt</span>
             <textarea
               rows={14}
+              ref={promptField}
               value={prompt}
               disabled={loading}
               onChange={(event) => setPrompt(event.target.value)}

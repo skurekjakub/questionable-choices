@@ -1,19 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BoardView, PublicConfigResponse } from '../../../core/api.js';
 import { getBoard } from '../api.js';
-
-/**
- * Whether a board lists a session.
- *
- * @param board - Board view to search.
- * @param sessionId - Id of the session to look for.
- * @returns True when one of the board's cards carries that session.
- */
-function lists(board: BoardView, sessionId: string): boolean {
-  return board.columns.some((column) =>
-    column.cards.some((card) => card.sessions.some((session) => session.id === sessionId)),
-  );
-}
+import { findSessionOwner, lists } from '../session-owner.js';
 
 /**
  * Switches to the workspace that owns a session the selected board does not
@@ -48,25 +36,20 @@ export function useSessionOwner(
     }
     if (searched.current === sessionId) return;
     searched.current = sessionId;
-    const others = config.workspaces.filter((workspace) => workspace.id !== board.workspaceId);
+    const others = config.workspaces
+      .filter((workspace) => workspace.id !== board.workspaceId)
+      .map((workspace) => workspace.id);
     if (others.length === 0) return;
+    let live = true;
     setSearching(true);
-    void (async () => {
-      for (const workspace of others) {
-        try {
-          const view = await getBoard(workspace.id);
-          if (lists(view, sessionId)) {
-            onSelectWorkspace(workspace.id);
-            break;
-          }
-        } catch {
-          // A workspace whose source is unreachable cannot rule the session in
-          // or out; the remaining boards still can.
-          continue;
-        }
-      }
+    void findSessionOwner(sessionId, others, getBoard).then((owner) => {
+      if (!live) return;
+      if (owner !== null) onSelectWorkspace(owner);
       setSearching(false);
-    })();
+    });
+    return () => {
+      live = false;
+    };
   }, [sessionId, config, board, onSelectWorkspace]);
 
   return searching;

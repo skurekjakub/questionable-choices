@@ -8,7 +8,12 @@ import type {
   WorkspaceSummary,
 } from '../../../core/api.js';
 import { useFocusTrap } from '../hooks/useFocusTrap.js';
-import { placeIssue, withoutField, type WorkspaceFieldPath } from '../workspace-fields.js';
+import {
+  NEW_CONNECTOR_FIELDS,
+  placeIssue,
+  withoutFields,
+  type WorkspaceFieldPath,
+} from '../workspace-fields.js';
 import { CloseIcon } from './Icons.js';
 
 /**
@@ -90,9 +95,13 @@ export function AddWorkspaceDialog({
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const prefix = useId();
   const keepEditing = useRef<HTMLButtonElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  const wasConfirming = useRef(false);
 
-  const defaultRepo = repos[0]?.id ?? '';
-  const defaultConnector = connectors[0]?.id ?? NEW_CONNECTOR;
+  // Only typing counts. A select is never blank, so "changed from its default"
+  // is not work worth confirming away: picking the other repo and picking the
+  // first one back would otherwise leave an empty form permanently dirty, and
+  // every Escape after it would raise a discard confirmation over nothing.
   const dirty =
     name !== '' ||
     epic !== '' ||
@@ -100,9 +109,7 @@ export function AddWorkspaceDialog({
     site !== '' ||
     emailEnv !== '' ||
     tokenEnv !== '' ||
-    reviewStatuses !== DEFAULT_REVIEW_STATUSES ||
-    repo !== defaultRepo ||
-    connector !== defaultConnector;
+    reviewStatuses !== DEFAULT_REVIEW_STATUSES;
 
   // Escape, the backdrop and Close all route here, so a stray click cannot take
   // eight filled fields with it; while the confirmation is up they mean "keep
@@ -122,8 +129,18 @@ export function AddWorkspaceDialog({
 
   // The confirmation is announced from a live region; without moving focus a
   // keyboard user hears it with no way to reach the two buttons it offers.
+  // "Keep editing" then unmounts itself, and focus it was holding goes to
+  // `document.body` with the dialog still open, so it is handed on to the
+  // control that replaces it rather than dropped.
   useEffect(() => {
-    if (confirmingDiscard) keepEditing.current?.focus();
+    if (confirmingDiscard) {
+      wasConfirming.current = true;
+      keepEditing.current?.focus();
+      return;
+    }
+    if (!wasConfirming.current) return;
+    wasConfirming.current = false;
+    cancel.current?.focus();
   }, [confirmingDiscard]);
 
   const creatingConnector = connector === NEW_CONNECTOR;
@@ -149,6 +166,24 @@ export function AddWorkspaceDialog({
   const unplaced = issues.filter((issue) => placeIssue(issue.path) === null);
 
   /**
+   * Retires the problems the given fields were holding.
+   *
+   * The dialog-wide note goes with the last of them: it says the request was
+   * invalid, and once nothing in the form is, a live region asserting otherwise
+   * is telling the owner their form is broken with no indication of where.
+   * A refusal that placed no problems at all — a duplicate id, a write that
+   * failed — is not about a field and stays until the next submit.
+   *
+   * @param fields - Fields whose problems should go.
+   * @returns Nothing.
+   */
+  const retire = (fields: readonly WorkspaceFieldPath[]): void => {
+    const next = withoutFields(issues, fields);
+    setIssues(next);
+    if (issues.length > 0 && next.length === 0) setError(null);
+  };
+
+  /**
    * Wraps a field's setter so editing it retires the problem it was holding.
    *
    * @param path - Field the control edits.
@@ -159,8 +194,25 @@ export function AddWorkspaceDialog({
     (path: WorkspaceFieldPath, set: (value: string) => void) =>
     (event: { target: { value: string } }): void => {
       set(event.target.value);
-      setIssues((current) => withoutField(current, path));
+      retire([path]);
     };
+
+  /**
+   * Switches the issue source, retiring the problems of the fields the switch
+   * hides.
+   *
+   * The four `newConnector.*` fields unmount when the picker leaves "add a new
+   * issue source", so a problem left on one of them is neither shown nor
+   * retired — it simply vanishes with its field and re-appears on the next
+   * submit against a connector the owner is no longer creating.
+   *
+   * @param event - Change event from the picker.
+   * @returns Nothing.
+   */
+  const changeConnector = (event: { target: { value: string } }): void => {
+    setConnector(event.target.value);
+    retire(['connector', ...NEW_CONNECTOR_FIELDS]);
+  };
 
   const submit = (): void => {
     const statuses = reviewStatuses
@@ -243,7 +295,7 @@ export function AddWorkspaceDialog({
                 {repos.length === 0 ? <option value="">No repos configured</option> : null}
                 {repos.map((entry) => (
                   <option key={entry.id} value={entry.id}>
-                    {entry.id}
+                    {entry.id} — {entry.path}
                   </option>
                 ))}
               </select>
@@ -253,11 +305,7 @@ export function AddWorkspaceDialog({
 
           <label className="field">
             <span>Issue source</span>
-            <select
-              value={connector}
-              onChange={edits('connector', setConnector)}
-              {...faultProps('connector')}
-            >
+            <select value={connector} onChange={changeConnector} {...faultProps('connector')}>
               {connectors.map((entry) => (
                 <option key={entry.id} value={entry.id}>
                   {entry.id} — {entry.site}
@@ -361,7 +409,7 @@ export function AddWorkspaceDialog({
               </button>
             </>
           ) : (
-            <button type="button" className="btn btn-quiet" onClick={requestClose}>
+            <button type="button" className="btn btn-quiet" ref={cancel} onClick={requestClose}>
               Cancel
             </button>
           )}

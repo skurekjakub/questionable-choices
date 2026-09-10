@@ -1,7 +1,8 @@
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionEventLogEntry } from '../core/api.js';
 import type { IssueFlags, SessionRecord } from '../core/types.js';
+import { messageOf } from './util.js';
 
 /**
  * What the app remembers about the checkout it made for one issue.
@@ -37,28 +38,57 @@ const WORKTREES_FILE = 'worktrees.json';
 export const EVENT_STRING_MAX_LENGTH = 4096;
 
 /**
- * Truncates every string inside a raw event payload.
+ * Most members kept from one array or object inside a raw event payload.
+ *
+ * A string cap alone bounds one field; a `tool_response` holding fifty thousand
+ * short strings is the other half of the same problem.
+ */
+export const EVENT_MEMBERS_MAX = 200;
+
+/**
+ * Caps the size of a raw event payload: string length, array length and the
+ * number of keys on an object.
  *
  * @param value - The payload, whatever shape it arrived in.
- * @returns A copy with long strings replaced by a truncated, marked version.
+ * @returns A copy with anything past a cap replaced by a marked, shortened one.
  */
-function capStrings(value: unknown): unknown {
+function capPayload(value: unknown): unknown {
   if (typeof value === 'string') {
     return value.length <= EVENT_STRING_MAX_LENGTH
       ? value
       : `${value.slice(0, EVENT_STRING_MAX_LENGTH)}… [truncated ${String(value.length - EVENT_STRING_MAX_LENGTH)} chars]`;
   }
-  if (Array.isArray(value)) return value.map(capStrings);
+  if (Array.isArray(value)) {
+    const kept = value.slice(0, EVENT_MEMBERS_MAX).map(capPayload);
+    if (value.length > EVENT_MEMBERS_MAX) {
+      kept.push(`… [truncated ${String(value.length - EVENT_MEMBERS_MAX)} members]`);
+    }
+    return kept;
+  }
   if (typeof value === 'object' && value !== null) {
+    const entries = Object.entries(value);
     const capped: Record<string, unknown> = {};
-    for (const [key, member] of Object.entries(value)) capped[key] = capStrings(member);
+    for (const [key, member] of entries.slice(0, EVENT_MEMBERS_MAX))
+      capped[key] = capPayload(member);
+    if (entries.length > EVENT_MEMBERS_MAX) {
+      capped['…'] = `[truncated ${String(entries.length - EVENT_MEMBERS_MAX)} keys]`;
+    }
     return capped;
   }
   return value;
 }
 
 /**
+ * Suffix a document that failed the shape check is renamed with.
+ */
+export const REJECTED_SUFFIX = '.rejected';
+
+/**
  * Writes a JSON document so that readers never observe a partial file.
+ *
+ * Atomicity here means "a reader always sees one whole document, the old one or
+ * the new one". It is not a durability guarantee: nothing is fsynced, so a
+ * power loss can still lose the write.
  *
  * @param path - Absolute path of the destination file.
  * @param value - Value to serialise.
@@ -70,8 +100,20 @@ export async function writeJsonAtomic(path: string, value: unknown): Promise<voi
   // sibling of the destination rather than a file under the system temp dir.
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  await rename(tmp, path);
+  try {
+    await rename(tmp, path);
+  } catch (cause) {
+    // Nothing ever cleans dataDir, so a failed rename would otherwise leave its
+    // temporary file beside the document for good.
+    await rm(tmp, { force: true });
+    throw cause;
+  }
 }
+
+/**
+ * Where a store reports a document it could not use.
+ */
+export type StoreWarn = (message: string) => void;
 
 /**
  * Reads a JSON document, falling back when it is missing, unreadable or the
@@ -79,17 +121,22 @@ export async function writeJsonAtomic(path: string, value: unknown): Promise<voi
  *
  * A document that parses but is not what the caller expects is as unusable as
  * one that does not parse, and a cast would leave every later read of it
- * throwing on a shape nothing reported.
+ * throwing on a shape nothing reported. A rejected document is renamed to
+ * `<name>.rejected` and reported, because the next write of the same file
+ * replaces it and a hand-edit that lost a comma would otherwise cost every
+ * record it held.
  *
  * @param path - Absolute path of the file to read.
  * @param fallback - Value returned when the document cannot be used.
- * @param isShape - Predicate the parsed document must satisfy.
+ * @param coerce - Turns a parsed document into the shape, or null to reject it.
+ * @param warn - Where a rejection is reported.
  * @returns The parsed document, or `fallback`.
  */
 async function readJson<T>(
   path: string,
   fallback: T,
-  isShape: (value: unknown) => value is T,
+  coerce: (value: unknown) => T | null,
+  warn: StoreWarn,
 ): Promise<T> {
   let text: string;
   try {
@@ -101,29 +148,79 @@ async function readJson<T>(
   try {
     parsed = JSON.parse(text) as unknown;
   } catch {
+    await setAside(path, 'it is not JSON', warn);
     return fallback;
   }
-  return isShape(parsed) ? parsed : fallback;
+  const coerced = coerce(parsed);
+  if (coerced !== null) return coerced;
+  await setAside(path, 'it is not the shape this file holds', warn);
+  return fallback;
 }
 
 /**
- * Reports whether a parsed document is an array.
+ * Renames a document the store refused, so the next write cannot destroy it.
  *
- * @param value - The parsed document.
- * @returns True when the document is an array.
+ * @param path - Absolute path of the refused document.
+ * @param why - Why it was refused, for the log line.
+ * @param warn - Where the rejection is reported.
+ * @returns Nothing; a rename that itself fails is reported and swallowed.
  */
-function isRecordArray(value: unknown): value is SessionRecord[] {
-  return Array.isArray(value);
+async function setAside(path: string, why: string, warn: StoreWarn): Promise<void> {
+  const kept = `${path}${REJECTED_SUFFIX}`;
+  try {
+    await rename(path, kept);
+    warn(`${path} was not used because ${why}; it has been kept as ${kept}`);
+  } catch (cause) {
+    warn(`${path} was not used because ${why}, and it could not be kept: ${messageOf(cause)}`);
+  }
 }
 
 /**
- * Reports whether a parsed document is a plain object.
+ * Reports whether a parsed value carries the fields every consumer of a session
+ * record reads without guarding.
+ *
+ * @param value - One member of the sessions document.
+ * @returns True when the member is usable as a `SessionRecord`.
+ */
+function isSessionRecord(value: unknown): value is SessionRecord {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Partial<SessionRecord>;
+  return (
+    typeof record.id === 'string' &&
+    typeof record.issueKey === 'string' &&
+    typeof record.repoId === 'string' &&
+    typeof record.state === 'string' &&
+    typeof record.stateSince === 'string'
+  );
+}
+
+/**
+ * Coerces a parsed sessions document into the records the board can project.
+ *
+ * The outermost shape decides whether the document is usable at all; a single
+ * malformed member is dropped, because one hand-edit must not cost the rest.
  *
  * @param value - The parsed document.
- * @returns True when the document is a non-null, non-array object.
+ * @param warn - Where dropped members are reported.
+ * @returns The usable records, or null when the document is not an array.
  */
-function isPlainObject<T>(value: unknown): value is T {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+function coerceRecords(value: unknown, warn: StoreWarn): SessionRecord[] | null {
+  if (!Array.isArray(value)) return null;
+  const kept = value.filter(isSessionRecord);
+  if (kept.length !== value.length) {
+    warn(`${String(value.length - kept.length)} session record(s) were dropped as unusable`);
+  }
+  return kept;
+}
+
+/**
+ * Coerces a parsed document into a plain object.
+ *
+ * @param value - The parsed document.
+ * @returns The object, or null when the document is not a non-array object.
+ */
+function coerceObject<T>(value: unknown): T | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as T) : null;
 }
 
 /**
@@ -143,31 +240,50 @@ export class Store {
   private worktrees: WorktreesByRepo = {};
   private queue: Promise<void> = Promise.resolve();
   private readonly eventDirsMade = new Set<string>();
+  private readonly warn: StoreWarn;
 
   /**
    * Builds a store over a data directory. Nothing is read until `load` runs.
    *
    * @param dataDir - Absolute directory holding the JSON documents.
+   * @param warn - Where a document the store refuses is reported; defaults to
+   *   the process console.
    */
-  constructor(dataDir: string) {
+  constructor(dataDir: string, warn: StoreWarn = (message) => console.warn(message)) {
     this.dataDir = dataDir;
+    this.warn = warn;
   }
 
   /**
    * Creates the data directory and reads whatever is already in it.
    *
-   * A document that is missing, unparseable or not the shape it should be is
-   * treated as empty, so a hand-edited file costs the state it held rather than
-   * leaving the dashboard answering every later request with a 500.
+   * A document that is missing, unparseable or not the shape its file holds is
+   * treated as empty and kept as `<name>.rejected`, so the next write cannot
+   * destroy it and the dashboard still boots.
    *
    * @returns Nothing.
    * @throws {Error} When the data directory cannot be created.
    */
   async load(): Promise<void> {
     await mkdir(join(this.dataDir, 'sessions'), { recursive: true });
-    this.records = await readJson<SessionRecord[]>(this.path(SESSIONS_FILE), [], isRecordArray);
-    this.flags = await readJson<FlagsByWorkspace>(this.path(FLAGS_FILE), {}, isPlainObject);
-    this.worktrees = await readJson<WorktreesByRepo>(this.path(WORKTREES_FILE), {}, isPlainObject);
+    this.records = await readJson<SessionRecord[]>(
+      this.path(SESSIONS_FILE),
+      [],
+      (value) => coerceRecords(value, this.warn),
+      this.warn,
+    );
+    this.flags = await readJson<FlagsByWorkspace>(
+      this.path(FLAGS_FILE),
+      {},
+      coerceObject,
+      this.warn,
+    );
+    this.worktrees = await readJson<WorktreesByRepo>(
+      this.path(WORKTREES_FILE),
+      {},
+      coerceObject,
+      this.warn,
+    );
   }
 
   /**
@@ -223,17 +339,23 @@ export class Store {
    * @throws {Error} When the file cannot be written.
    */
   async saveSession(record: SessionRecord): Promise<void> {
-    const previous = [...this.records];
     const index = this.records.findIndex((existing) => existing.id === record.id);
+    const previous = index === -1 ? undefined : this.records[index];
     if (index === -1) this.records.push(record);
     else this.records[index] = record;
     // Memory is what every later read answers from, so a failed write has to
     // take the in-memory value with it; otherwise the dashboard shows a session
-    // that vanishes on the next boot.
+    // that vanishes on the next boot. The undo is by identity, never by array
+    // snapshot: a snapshot taken before a concurrent save would drop that
+    // save's record along with this one's.
     try {
       await this.enqueue(() => writeJsonAtomic(this.path(SESSIONS_FILE), this.records));
     } catch (cause) {
-      this.records = previous;
+      const current = this.records.findIndex((existing) => existing.id === record.id);
+      if (current !== -1) {
+        if (previous === undefined) this.records.splice(current, 1);
+        else this.records[current] = previous;
+      }
       throw cause;
     }
   }
@@ -362,8 +484,9 @@ export class Store {
   /**
    * Appends one accepted event to a session's raw event log.
    *
-   * Strings inside the raw payload are capped at `EVENT_STRING_MAX_LENGTH`, so
-   * one event cannot cost as much as a whole hook request body.
+   * The raw payload is capped — strings at `EVENT_STRING_MAX_LENGTH`, arrays
+   * and objects at `EVENT_MEMBERS_MAX` members — so one event cannot cost as
+   * much as a whole hook request body.
    *
    * @param sessionId - Session the event belongs to.
    * @param entry - Timestamp, raw payload and the state the event produced.
@@ -376,8 +499,18 @@ export class Store {
       await mkdir(dir, { recursive: true });
       this.eventDirsMade.add(sessionId);
     }
-    const capped: SessionEventLogEntry = { ...entry, event: capStrings(entry.event) };
-    await appendFile(join(dir, 'events.jsonl'), `${JSON.stringify(capped)}\n`, 'utf8');
+    const capped: SessionEventLogEntry = { ...entry, event: capPayload(entry.event) };
+    const line = `${JSON.stringify(capped)}\n`;
+    const log = join(dir, 'events.jsonl');
+    try {
+      await appendFile(log, line, 'utf8');
+    } catch (cause) {
+      // A session directory removed under the running server would otherwise
+      // make every later append fail, because the cache says the mkdir is done.
+      if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
+      await mkdir(dir, { recursive: true });
+      await appendFile(log, line, 'utf8');
+    }
   }
 
   /**

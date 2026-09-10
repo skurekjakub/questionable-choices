@@ -18,7 +18,7 @@ import {
   remoteOf,
   remoteRefPattern,
 } from './branches.js';
-import { GitError, git, gitAttempt } from './git.js';
+import { GIT_NETWORK_TIMEOUT_MS, GitError, git, gitAttempt } from './git.js';
 import { parseWorktreeList } from './worktrees.js';
 
 /**
@@ -137,6 +137,26 @@ export class DetachedWorktreeError extends Error {
 const ISSUE_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 /**
+ * Staleness reported before any fetch has run in this process.
+ *
+ * The refs on disk are whatever the last run of the dashboard, or the owner,
+ * left behind, which is a caveat worth showing rather than silence.
+ */
+export const NO_FETCH_YET_MESSAGE =
+  'no fetch has been attempted since the dashboard started, so the refs are as old as the checkout';
+
+/**
+ * Knobs a caller may override when building a repo connector.
+ */
+export interface GitRepoOptions {
+  /**
+   * Milliseconds a network-bound git invocation may run; defaults to
+   * `GIT_NETWORK_TIMEOUT_MS`.
+   */
+  fetchTimeoutMs?: number | undefined;
+}
+
+/**
  * Provides checkouts for sessions out of one git repository and its worktrees.
  */
 export class GitRepo implements Repo {
@@ -145,18 +165,21 @@ export class GitRepo implements Repo {
 
   private readonly config: RepoConfig;
   private readonly remote: string;
-  private fetchError: string | null = null;
+  private readonly fetchTimeoutMs: number;
+  private fetchError: string | null = NO_FETCH_YET_MESSAGE;
 
   /**
    * Builds a repo connector over one main checkout.
    *
    * @param id - Id of the repo, matching its key in `Config.repos`.
    * @param config - The repo's configuration.
+   * @param options - Overrides of the connector's own limits.
    */
-  constructor(id: string, config: RepoConfig) {
+  constructor(id: string, config: RepoConfig, options: GitRepoOptions = {}) {
     this.id = id;
     this.config = config;
     this.remote = remoteOf(config.baseRef);
+    this.fetchTimeoutMs = options.fetchTimeoutMs ?? GIT_NETWORK_TIMEOUT_MS;
   }
 
   /**
@@ -291,10 +314,13 @@ export class GitRepo implements Repo {
   }
 
   /**
-   * Message from the last failed base-ref fetch, or null when the last one
-   * worked or none has been attempted.
+   * Why the repo's refs may be stale, or null when the last fetch worked.
    *
-   * @returns The failure text, or null.
+   * Before any fetch has run in this process the answer is
+   * `NO_FETCH_YET_MESSAGE`, not null: "nobody has checked" and "it is fine" are
+   * different answers, and the start dialog shows one of them as a warning.
+   *
+   * @returns The staleness text, or null.
    */
   lastFetchError(): string | null {
     return this.fetchError;
@@ -305,16 +331,19 @@ export class GitRepo implements Repo {
    *
    * A checkout that is already on disk must stay usable without a network, so
    * an unreachable remote degrades to stale refs plus a warning rather than a
-   * refused start.
+   * refused start. The fetch carries a deadline because it runs under the
+   * caller's checkout lock and a black-holed remote never returns on its own.
    *
    * @returns Nothing.
    */
   private async fetchBaseRef(): Promise<void> {
-    const attempt = await gitAttempt(['fetch', this.remote], this.config.path);
+    const args = ['fetch', this.remote];
+    const attempt = await gitAttempt(args, this.config.path, {
+      timeoutMs: this.fetchTimeoutMs,
+    });
     this.fetchError = attempt.ok
       ? null
-      : new GitError(['fetch', this.remote], this.config.path, attempt.exitCode, attempt.stderr)
-          .message;
+      : new GitError(args, this.config.path, attempt.exitCode, attempt.stderr).message;
   }
 
   /**
@@ -418,8 +447,15 @@ async function canonicalPath(path: string): Promise<string> {
   }
 }
 
-export { GIT_MAX_BUFFER, GitError, git, gitAttempt, gitCommandLine } from './git.js';
-export type { GitAttempt, GitOutput } from './git.js';
+export {
+  GIT_MAX_BUFFER,
+  GIT_NETWORK_TIMEOUT_MS,
+  GitError,
+  git,
+  gitAttempt,
+  gitCommandLine,
+} from './git.js';
+export type { GitAttempt, GitOutput, GitRunOptions } from './git.js';
 export { parseWorktreeList, shortBranch } from './worktrees.js';
 export {
   newestBranch,

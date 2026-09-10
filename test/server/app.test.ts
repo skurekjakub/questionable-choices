@@ -316,7 +316,7 @@ describe('HTTP API', () => {
         await post(app, '/api/sessions/qc-DOC-1-implement/remove-worktree', {})
       ).json()) as RemoveWorktreeResponse;
 
-      expect(removed).toEqual({ path: '/repos/worktrees/DOC-1', removed: true });
+      expect(removed).toEqual({ path: '/repos/worktrees/DOC-1' });
       expect(repo.removed).toEqual([{ issueKey: 'DOC-1', force: false }]);
     });
 
@@ -505,6 +505,23 @@ describe('HTTP API', () => {
       expect(response.status).toBe(503);
       expect(await response.text()).toContain('npm run build:web');
     });
+
+    it.each(['/', '/session/qc-DOC-1-implement', '/favicon.ico', '/assets/app.js'])(
+      'answers 503 for %s, not only for the board itself',
+      async (path) => {
+        // Every SPA path is unserved, not just `/`: a browser asked for the
+        // bundle would otherwise get a 404 it cannot explain.
+        const dev = createApp({
+          manager,
+          logger: new RecordingLogger(),
+          webRoot: join(dir, 'nothing-here'),
+        });
+
+        const response = await dev.request(path);
+
+        expect(response.status).toBe(503);
+      },
+    );
 
     it('keeps serving the API', async () => {
       const dev = createApp({

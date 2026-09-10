@@ -10,6 +10,7 @@ import {
   GitError,
   GitRepo,
   InvalidIssueKeyError,
+  NO_FETCH_YET_MESSAGE,
   NoBranchError,
   WorktreeNotFoundError,
   git,
@@ -116,11 +117,22 @@ describe('GitRepo.prepare', () => {
   });
 
   it('reuses a registered worktree without asking for another bootstrap', async () => {
-    const prepared = await subject.prepare(makeIssue(), playbooks.worktree);
+    // Its own key and its own worktree: taking the one the test above created
+    // would make this assertion depend on that test having run first.
+    const issue = makeIssue({ key: 'DOC-11', summary: 'Reused' });
+    const created = await subject.prepare(issue, playbooks.worktree);
+    expect(created.needsBootstrap).toBe(true);
 
-    expect(prepared.cwd).toBe(join(worktreeDir, 'DOC-1'));
-    expect(prepared.branch).toBe('DOC-1-document-the-thing');
-    expect(prepared.needsBootstrap).toBe(false);
+    try {
+      const prepared = await subject.prepare(issue, playbooks.worktree);
+
+      expect(prepared.cwd).toBe(join(worktreeDir, 'DOC-11'));
+      expect(prepared.branch).toBe('DOC-11-reused');
+      expect(prepared.needsBootstrap).toBe(false);
+    } finally {
+      await run(['worktree', 'remove', '--force', join(worktreeDir, 'DOC-11')], repo);
+      await run(['branch', '-D', 'DOC-11-reused'], repo);
+    }
   });
 
   it('recreates an issue worktree from the newest remote branch', async () => {
@@ -213,16 +225,43 @@ describe('GitRepo.prepare against a remote that moved', () => {
     expect(cloned.lastFetchError()).toBeNull();
   });
 
+  it('reports the refs as unrefreshed before it has attempted a single fetch', async () => {
+    // "nobody has checked" and "the refs are current" are different answers,
+    // and the start dialog shows one of them as a warning.
+    expect(cloned.lastFetchError()).toBe(NO_FETCH_YET_MESSAGE);
+  });
+
   it('reuses a registered worktree offline, reporting the fetch failure instead', async () => {
     const issue = makeIssue({ key: 'DOC-51', summary: 'Already on disk' });
     await cloned.prepare(issue, playbooks.worktree);
-    await run(['remote', 'set-url', 'origin', 'https://127.0.0.1:1/nope.git'], clone);
+    await run(['remote', 'set-url', 'origin', join(root, 'no-such-origin.git')], clone);
 
     const prepared = await cloned.prepare(issue, playbooks.worktree);
 
     expect(prepared.cwd).toBe(join(cloneWorktrees, 'DOC-51'));
     expect(prepared.needsBootstrap).toBe(false);
-    expect(cloned.lastFetchError()).toContain('git fetch origin');
+    expect(cloned.lastFetchError()).toEqual(expect.stringContaining('git fetch origin'));
+  });
+
+  it('gives up on a remote that never answers instead of holding the caller for ever', async () => {
+    // `ext::` runs the command as the transport, so this is a fetch that
+    // really hangs rather than one that is refused quickly.
+    const issue = makeIssue({ key: 'DOC-53', summary: 'Black hole' });
+    await cloned.prepare(issue, playbooks.worktree);
+    await run(['config', 'protocol.ext.allow', 'always'], clone);
+    await run(['remote', 'set-url', 'origin', 'ext::sleep 30'], clone);
+    const bounded = new GitRepo(
+      'docs',
+      makeRepo({ path: clone, worktreeDir: cloneWorktrees, baseRef: 'origin/main' }),
+      { fetchTimeoutMs: 500 },
+    );
+
+    const started = Date.now();
+    const prepared = await bounded.prepare(issue, playbooks.worktree);
+
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(prepared.cwd).toBe(join(cloneWorktrees, 'DOC-53'));
+    expect(bounded.lastFetchError()).toEqual(expect.stringContaining('timed out after 500 ms'));
   });
 
   it('fetches for issue-worktree isolation too, so a just-pushed branch resolves', async () => {

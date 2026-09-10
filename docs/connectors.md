@@ -54,8 +54,13 @@ than a silently applied default, so `pollSecs` is caught instead of reverting
 the interval to 120.
 
 Removing a workspace (the switcher's remove action, or `DELETE
-/api/workspaces/:id`) deletes nothing else: its sessions, worktrees and issue
-flags stay, and another workspace over the same repo still shows them.
+/api/workspaces/:id`) leaves its sessions, worktrees and issue flags alone —
+another workspace over the same repo still shows them. It takes exactly one
+other thing with it: the connector the removed workspace named, and only when
+no remaining workspace names that connector. Nothing else can remove a
+connector, so an inline one created from the dialog would otherwise be
+permanent. A connector you wrote into the file by hand for a board that does
+not exist yet is never touched, whether or not anything references it.
 
 ## Add a repo
 
@@ -94,7 +99,7 @@ A playbook is a named kickoff recipe on a repo. Add an entry to that repo's
   "isolation": "issue-worktree",
   "primaryFor": ["review"],
   "defaults": { "permissionMode": "acceptEdits" },
-  "promptTemplate": "Review {{key}} — {{summary}} on branch {{branch}} in {{worktree}}."
+  "promptTemplate": "Review {{key}} — {{summary}}.\nThe checkout is {{worktree}} and its branch is {{branch}}."
 }
 ```
 
@@ -115,7 +120,10 @@ A playbook is a named kickoff recipe on a repo. Add an entry to that repo's
   this playbook only; the start dialog prefills from it and stays editable.
 - `promptTemplate` may use `{{key}} {{summary}} {{type}} {{status}}
 {{labels}} {{url}} {{description}} {{branch}} {{worktree}}`. Unknown
-  variables are left as written.
+  variables are left as written. `{{branch}}` renders "the branch resolved
+  when the session starts" when there is none yet — `shared` isolation, or
+  `issue-worktree` before the checkout exists — so word the sentence around
+  it to read in both cases: "on branch {{branch}}" does not.
 
 ## Add an issue-source type
 
@@ -140,7 +148,22 @@ Today's only type is `jira`. To add another:
 
 A source that cannot reach its tracker must throw. The server keeps the last
 good list and shows the message as the board's `sourceError` rather than
-emptying the board.
+emptying the board, and polls again on the next tick.
+
+A query that repeating **cannot** fix is different: a search past its page
+cap, a syntactically invalid query, a project the credentials cannot see.
+Throw an error carrying `permanent: true` — the marker `PermanentSourceError`
+in `src/core/types.ts` describes and `isPermanentSourceError` recognises, as
+`JiraTruncatedError` does. The server suspends that workspace's poll timer
+until the owner asks for a refresh, so the same rejected query does not cost
+its full request budget every `pollSeconds` for as long as the server runs.
+Nothing about the marker is Jira's, and the server never names a connector's
+own error classes.
+
+A resource the tracker returns without a usable key is dropped from `list`
+and reported as "no such issue" by `get`: the key is what the projection
+matches sessions by and what the browser URL is built from, so a keyless card
+is a dead link on a lane of its own.
 
 ## Add a runner
 
@@ -152,7 +175,9 @@ type is `claude-tmux`.
    `kill`, `isAlive`.
 2. Report lifecycle through the hook ingress rather than by scraping the
    screen: `POST /api/hooks/:sessionId/launcher/<signal>` for
-   `bootstrap-start`, `bootstrap-failed`, `claude-start` (with
+   `bootstrap-start`, `bootstrap-failed` (with `exitCode` and a `message`
+   carrying the tail of what the bootstrap said — the exit code alone repeats
+   what the card's state pill already shows), `claude-start` (with
    `{"mode":"resume"}` when the launch continues an existing transcript) and
    `claude-exit`, and `POST /api/hooks/:sessionId/<event>` for the CLI's own
    hooks. The names and body shapes are declared in `src/core/api.ts`, which

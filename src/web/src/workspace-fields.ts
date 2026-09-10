@@ -52,19 +52,34 @@ export function placeIssue(path: string): WorkspaceFieldPath | null {
 }
 
 /**
- * Drops the problems the server placed against one field.
+ * Fields that describe the connector being created inline, which exist only
+ * while the picker is on "add a new issue source".
+ */
+export const NEW_CONNECTOR_FIELDS = [
+  'newConnector.id',
+  'newConnector.site',
+  'newConnector.emailEnv',
+  'newConnector.tokenEnv',
+] as const satisfies readonly WorkspaceFieldPath[];
+
+/**
+ * Drops the problems the server placed against the given fields.
  *
  * A message about a value the owner has since replaced is worse than no message
  * at all: a screen reader keeps announcing it, and the control keeps reporting
- * itself invalid, until the next submit.
+ * itself invalid, until the next submit. A message against a field that is no
+ * longer on screen is worse still, because nothing shows it at all.
  *
  * @param issues - Problems the server reported, in the order it sent them.
- * @param field - Field whose problems should go.
+ * @param fields - Fields whose problems should go.
  * @returns The problems belonging to every other field, in the same order.
  */
-export function withoutField<T extends { path: string }>(
+export function withoutFields<T extends { path: string }>(
   issues: readonly T[],
-  field: WorkspaceFieldPath,
+  fields: readonly WorkspaceFieldPath[],
 ): T[] {
-  return issues.filter((issue) => placeIssue(issue.path) !== field);
+  return issues.filter((issue) => {
+    const placed = placeIssue(issue.path);
+    return placed === null || !fields.includes(placed);
+  });
 }

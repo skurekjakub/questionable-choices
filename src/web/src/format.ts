@@ -1,3 +1,5 @@
+import type { SessionState } from './model.js';
+
 /**
  * Formats how long a session has been in its current state.
  *
@@ -57,31 +59,53 @@ export function attachCommand(sessionId: string, reported?: string | null): stri
 }
 
 /**
- * What a board row and a session header say about a session that failed.
+ * What a board row and a session header say about a session whose process has
+ * ended.
  */
-export interface FailureHint {
-  /** State word, carrying the exit code when one was reported. */
+export interface EndedHint {
+  /** State word, carrying the exit code when a non-zero one was reported. */
   label: string;
-  /** Where the failed shell was left, so it can be attached to and read. */
-  shell: string;
+  /**
+   * Where the shell the failure was left in can be read, or null when the
+   * session left none behind.
+   */
+  shell: string | null;
 }
 
 /**
- * Words a failure so the owner can see why and where without leaving the board.
+ * Words an ended session so the owner can see how it ended, and where to look,
+ * without leaving the board.
  *
  * A failed start leaves its shell open in tmux under the session's own name, so
- * naming both the code and the session turns a dead end into an instruction.
+ * naming both the code and the session turns a dead end into an instruction. A
+ * CLI that ran and died non-zero leaves no shell, but its code is the only
+ * thing separating it from a session the owner ended deliberately.
  *
  * @param sessionId - Id of the session, which is also its tmux session name.
- * @param exitCode - Exit code the launcher reported, or null when none reached
- * the record.
- * @returns The state word and the pointer to the shell.
+ * @param state - Lifecycle state the session is in.
+ * @param exitCode - Exit code of the process that most recently ended, or null
+ * when none reached the record.
+ * @returns The state word and the pointer to the shell, or null when the state
+ * is one the plain state label already describes.
  */
-export function failureHint(sessionId: string, exitCode: number | null): FailureHint {
-  return {
-    label: exitCode === null ? 'failed' : `failed, exit ${exitCode}`,
-    shell: `shell open in tmux ${sessionId}`,
-  };
+export function endedHint(
+  sessionId: string,
+  state: SessionState,
+  exitCode: number | null,
+): EndedHint | null {
+  if (state === 'failed') {
+    return {
+      label: exitCode === null ? 'failed' : `failed, exit ${exitCode}`,
+      shell: `shell open in tmux ${sessionId}`,
+    };
+  }
+  // A clean exit is the ordinary end of a session and says nothing extra; a
+  // non-zero one is a `claude` that ran and died, which otherwise looks
+  // identical to the owner typing `/exit`.
+  if (state === 'exited' && exitCode !== null && exitCode !== 0) {
+    return { label: `exited, code ${exitCode}`, shell: null };
+  }
+  return null;
 }
 
 /**

@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { EVENT_STRING_MAX_LENGTH, Store, writeJsonAtomic } from '../../src/server/store.js';
+import {
+  EVENT_MEMBERS_MAX,
+  EVENT_STRING_MAX_LENGTH,
+  Store,
+  writeJsonAtomic,
+} from '../../src/server/store.js';
+import type { SessionRecord } from '../../src/core/types.js';
 import { makeRecord } from '../core/helpers.js';
 
 describe('Store', () => {
@@ -84,19 +90,32 @@ describe('Store', () => {
     expect(JSON.parse(text)).toHaveLength(20);
   });
 
-  it('replaces the document by renaming over it, never by truncating it in place', async () => {
-    // A truncate-then-write leaves a window in which a reader sees a partial
-    // document. A rename has no such window, and it is the new inode that
-    // proves one happened.
+  it('never lets a reader see the document missing or half-written', async () => {
+    // The property is not "the inode changed" — an unlink followed by a write
+    // changes it too, and has exactly the window a rename exists to close. It
+    // is that every read during the write answers one whole document.
     const path = join(dir, 'probe.json');
     await writeJsonAtomic(path, { version: 1 });
-    const before = await stat(path);
+    const seen: unknown[] = [];
+    let reading = true;
+    const reader = (async () => {
+      while (reading) {
+        try {
+          seen.push(JSON.parse(await readFile(path, 'utf8')));
+        } catch (cause) {
+          seen.push(cause);
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    })();
 
-    await writeJsonAtomic(path, { version: 2 });
+    for (let round = 2; round <= 40; round += 1) await writeJsonAtomic(path, { version: round });
+    reading = false;
+    await reader;
 
-    const after = await stat(path);
-    expect(after.ino).not.toBe(before.ino);
-    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ version: 2 });
+    expect(seen.length).toBeGreaterThan(1);
+    for (const document of seen) expect(document).toEqual({ version: expect.any(Number) });
+    expect(await readdir(dir)).toEqual(['probe.json']);
   });
 
   it('keeps the old document when a write fails, in memory as well as on disk', async () => {
@@ -207,6 +226,107 @@ describe('Store', () => {
 
     await store.clearWorktree('ws', 'DOC-404');
 
-    expect((await stat(join(dir, 'worktrees.json'))).mtimeMs).toBe(before.mtimeMs);
+    // The inode, not the mtime: a rewrite of identical bytes inside the same
+    // millisecond leaves the mtime byte-identical and the file replaced.
+    expect((await stat(join(dir, 'worktrees.json'))).ino).toBe(before.ino);
+  });
+
+  it('keeps a document it refuses instead of letting the next write destroy it', async () => {
+    // The next `saveSession` renames a fresh document over this file, so a
+    // hand-edit that lost a comma would otherwise cost every record it held.
+    const warnings: string[] = [];
+    await writeFile(join(dir, 'sessions.json'), '[{"id":"qc-DOC-1-implement"},', 'utf8');
+    const store = new Store(dir, (message) => warnings.push(message));
+
+    await store.load();
+    await store.saveSession(makeRecord({ id: 'qc-DOC-2-implement' }));
+
+    expect(await readFile(join(dir, 'sessions.json.rejected'), 'utf8')).toBe(
+      '[{"id":"qc-DOC-1-implement"},',
+    );
+    expect(warnings.join('\n')).toContain('sessions.json.rejected');
+    expect(store.sessions().map((record) => record.id)).toEqual(['qc-DOC-2-implement']);
+  });
+
+  it('drops the members of sessions.json that are not usable records', async () => {
+    // The outermost shape is not the whole story: a member with no `state` or
+    // `repoId` reaches the projection and every board request throws on it.
+    const warnings: string[] = [];
+    await writeFile(
+      join(dir, 'sessions.json'),
+      JSON.stringify([{ nonsense: 1 }, makeRecord(), 3, null]),
+      'utf8',
+    );
+    const store = new Store(dir, (message) => warnings.push(message));
+
+    await store.load();
+
+    expect(store.sessions().map((record) => record.id)).toEqual(['qc-DOC-1-implement']);
+    expect(warnings.join('\n')).toContain('3 session record(s) were dropped');
+  });
+
+  it('rolls a failed save back by identity, not by an array snapshot', async () => {
+    // Two saves overlap: a rollback that restored the whole array would drop
+    // the record the other one has already inserted and written.
+    const store = new Store(dir);
+    await store.load();
+    await store.saveSession(makeRecord({ id: 'qc-DOC-1-implement' }));
+    const doomed = makeRecord({ id: 'qc-DOC-2-implement' }) as SessionRecord & {
+      toJSON?: () => unknown;
+    };
+    let attempts = 0;
+    doomed.toJSON = () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('ENOSPC: no space left on device');
+      const { toJSON: _drop, ...rest } = doomed;
+      return rest;
+    };
+
+    const failing = store.saveSession(doomed);
+    const surviving = store.saveSession(makeRecord({ id: 'qc-DOC-3-implement' }));
+    await expect(failing).rejects.toThrow('ENOSPC');
+    await surviving;
+
+    expect(store.session('qc-DOC-2-implement')).toBeUndefined();
+    expect(store.session('qc-DOC-3-implement')).toBeDefined();
+  });
+
+  it('caps the members of an array or an object in a raw payload', async () => {
+    // A string cap bounds one field; a `tool_response` holding fifty thousand
+    // short strings is the other half of the same problem.
+    const store = new Store(dir);
+    await store.load();
+
+    await store.appendEvent('qc-DOC-1-implement', {
+      at: '2026-09-09T10:00:00.000Z',
+      event: {
+        hook_event_name: 'PostToolUse',
+        tool_response: Array.from({ length: 5000 }, () => 'x'),
+      },
+      state: 'working',
+    });
+
+    const [entry] = await store.readEvents('qc-DOC-1-implement');
+    const event = entry?.event as { tool_response: string[] };
+    expect(event.tool_response).toHaveLength(EVENT_MEMBERS_MAX + 1);
+    expect(event.tool_response.at(-1)).toContain('truncated 4800 members');
+  });
+
+  it('recreates a session directory that went away under the running store', async () => {
+    // The mkdir is cached per session, so without a retry every later append
+    // for that session fails for the life of the process.
+    const store = new Store(dir);
+    await store.load();
+    const entry = {
+      at: '2026-09-09T10:00:00.000Z',
+      event: { hook_event_name: 'Stop' },
+      state: 'idle' as const,
+    };
+    await store.appendEvent('qc-DOC-1-implement', entry);
+    await rm(store.sessionDir('qc-DOC-1-implement'), { recursive: true, force: true });
+
+    await store.appendEvent('qc-DOC-1-implement', entry);
+
+    expect(await store.readEvents('qc-DOC-1-implement')).toHaveLength(1);
   });
 });

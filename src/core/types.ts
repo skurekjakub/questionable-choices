@@ -126,6 +126,18 @@ export interface Pending {
 }
 
 /**
+ * The dialog a tool result closed, kept so a `Notification` describing a dialog
+ * that is already gone can be told from one describing a dialog the server was
+ * never told about.
+ */
+export interface AnsweredDialog {
+  /** Prompt id of the turn the dialog belonged to, or null when none was sent. */
+  promptId: string | null;
+  /** Summary the dialog was showing when the tool result closed it. */
+  summary: string;
+}
+
+/**
  * Where a session's prompt-cache figures came from.
  *
  * `statusline` means a real status-line payload; `derived` means the value was
@@ -197,11 +209,18 @@ export interface SessionRecord {
   /** What the session is waiting for, or null when it is not waiting. */
   pending: Pending | null;
   /**
-   * Prompt id of the turn whose newest tool call already returned, or null
-   * before any tool has returned. A `permission_prompt` notification carrying
-   * this id describes a dialog that is already gone.
+   * The dialog a tool result most recently closed, or null when the record has
+   * no answered dialog outstanding. A `Notification` naming that dialog's turn
+   * describes it — and is therefore stale — unless `toolCallOpen` says a tool is
+   * still waiting, in which case a newer dialog whose `PermissionRequest` never
+   * arrived may be on screen. Cleared at every run and turn boundary.
    */
-  lastToolResultPromptId?: string | null | undefined;
+  answeredDialog?: AnsweredDialog | null | undefined;
+  /**
+   * Whether a tool call has announced itself with `PreToolUse` and not yet
+   * reported a result. Only an open tool call can have a dialog on screen.
+   */
+  toolCallOpen?: boolean | undefined;
   /** Snippet of the last assistant message, when the Stop payload carried one. */
   lastAssistantMessage: string | null;
   /**
@@ -218,6 +237,13 @@ export interface SessionRecord {
    * out of date rather than guessed at. The next accepted event clears it.
    */
   staleSince: string | null;
+  /**
+   * ISO timestamp of the last accepted event that carried lifecycle
+   * information, or null before any. A status-line payload never stamps it: it
+   * says nothing about the state, so it must not pass for having heard from the
+   * session.
+   */
+  lastEventAt: string | null;
   /** Prompt-cache state, or null before anything reported one. */
   cache: SessionCache | null;
   /** ISO timestamp of record creation. */
@@ -398,6 +424,30 @@ export interface Config {
   repos: Record<string, RepoConfig>;
   /** Workspaces, keyed by workspace id; each one is a board. */
   workspaces: Record<string, WorkspaceConfig>;
+}
+
+/**
+ * An error an issue source raises for a query that repeating cannot fix — a
+ * search past its page cap, a syntactically invalid query, a project the
+ * credentials cannot see.
+ *
+ * The manager suspends a workspace's poll timer on one of these rather than
+ * re-sending the same rejected query every `pollSeconds` for as long as the
+ * server runs. Any source may raise one; nothing about the marker is Jira's.
+ */
+export interface PermanentSourceError extends Error {
+  /** Always true; a transient failure carries no `permanent` property at all. */
+  readonly permanent: true;
+}
+
+/**
+ * Reports whether a thrown value is an issue source's permanent refusal.
+ *
+ * @param cause - Whatever the source threw.
+ * @returns True when the error marks itself `permanent`.
+ */
+export function isPermanentSourceError(cause: unknown): cause is PermanentSourceError {
+  return cause instanceof Error && (cause as { permanent?: unknown }).permanent === true;
 }
 
 /**

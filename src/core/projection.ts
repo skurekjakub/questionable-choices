@@ -1,5 +1,6 @@
+import { LIVE_STATES, NEEDS_YOU_STATES } from './api.js';
 import type { BoardColumn, BoardView, Card, CardSession, PlaybookSummary } from './api.js';
-import { LIVE_STATES, NEEDS_YOU_STATES, isLive, needsYou } from './state-machine.js';
+import { isLive, needsYou } from './state-machine.js';
 import {
   COLUMN_IDS,
   COLUMN_NAMES,
@@ -259,7 +260,6 @@ export function project(input: ProjectionInput): BoardView {
 
   return {
     workspaceId: input.workspaceId,
-    name: input.workspace.name,
     playbooks,
     columns,
     sourceError: input.sourceError ?? null,

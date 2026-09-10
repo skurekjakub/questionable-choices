@@ -37,14 +37,6 @@
  * is not an integer between 1 and 1000 falls back to the server's default
  * (`DEFAULT_COLS` / `DEFAULT_ROWS` in `server/terminal-ws.ts`).
  */
-/**
- * `NEEDS_YOU_STATES` (a session is blocked on the owner) and `LIVE_STATES` (a
- * session still counts as running) are part of the wire contract: `CardSession`
- * reports `needsYou` and `live` derived from them, and a client that filters
- * records itself must read the sets from here rather than restate them.
- */
-export { LIVE_STATES, NEEDS_YOU_STATES } from './state-machine.js';
-
 import type {
   ColumnId,
   Effort,
@@ -61,10 +53,42 @@ import type {
 } from './types.js';
 
 /**
+ * States in which a session is blocked on the owner.
+ *
+ * Part of the wire contract: `CardSession.needsYou` is derived from this set,
+ * and a client that filters records itself reads the set from here rather than
+ * restating it. It lives in the contract module so the SPA never has to reach
+ * into the reducer for it.
+ */
+export const NEEDS_YOU_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
+  'waiting-permission',
+  'waiting-question',
+  'idle',
+]);
+
+/**
+ * States in which a session still counts as running.
+ *
+ * Part of the wire contract: `CardSession.live` is derived from this set.
+ */
+export const LIVE_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
+  'bootstrapping',
+  'starting',
+  'working',
+  'waiting-permission',
+  'waiting-question',
+  'idle',
+]);
+
+/**
  * One reason a document was rejected, with the path that caused it.
  */
 export interface ConfigIssue {
-  /** Dotted path into the document, e.g. `workspaces.docs.epic`. */
+  /**
+   * Dotted locator of the field that caused the problem, relative to whatever
+   * was submitted: `workspaces.docs.epic` for a configuration file, `epic` or
+   * `newConnector.id` for a `POST /api/workspaces` body.
+   */
   path: string;
   /** Human-readable explanation. */
   message: string;
@@ -342,8 +366,6 @@ export interface BoardColumn {
 export interface BoardView {
   /** Id of the workspace this board is the view of. */
   workspaceId: string;
-  /** Name of the workspace, repeated here so a board needs no config lookup. */
-  name: string;
   /** Playbooks offered on this board's cards. */
   playbooks: PlaybookSummary[];
   /** The five lanes, in display order. */
@@ -428,10 +450,8 @@ export interface RemoveWorktreeRequest {
  * Response of `POST /api/sessions/:id/remove-worktree`.
  */
 export interface RemoveWorktreeResponse {
-  /** Path that was removed. */
+  /** Path that was removed; a refusal comes back as an `ErrorResponse` instead. */
   path: string;
-  /** Always true; a refusal comes back as an `ErrorResponse` instead. */
-  removed: true;
 }
 
 /**

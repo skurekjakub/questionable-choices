@@ -52,7 +52,13 @@ function paintFavicon(needsYou: number): string | null {
  * @returns Nothing.
  */
 export function applyBadge(needsYou: number): void {
-  document.title = needsYou > 0 ? `(${needsYou}) ${BASE_TITLE}` : BASE_TITLE;
+  try {
+    document.title = needsYou > 0 ? `(${needsYou}) ${BASE_TITLE}` : BASE_TITLE;
+  } catch {
+    // This runs from a render effect, so a host that refuses the write — an
+    // embedder that seals `document`, an extension that redefines the property
+    // — would otherwise take the whole dashboard down through the boundary.
+  }
   const href = paintFavicon(needsYou);
   // Painting is best-effort; a browser that cannot draw the face keeps the icon
   // it already has rather than losing the title update above.
@@ -71,7 +77,7 @@ export function applyBadge(needsYou: number): void {
  *
  * @returns True when notifications can be requested and shown.
  */
-export function notificationsSupported(): boolean {
+function notificationsSupported(): boolean {
   return typeof window !== 'undefined' && 'Notification' in window;
 }
 

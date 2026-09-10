@@ -162,7 +162,10 @@ export function registerWebSocketRoutes(app: Hono, deps: WebSocketRoutesDeps): v
 
       return {
         onOpen(_event, ws) {
-          queue = (async () => {
+          // Through `chain` like every other link: an unguarded attach that
+          // rejected would leave the queue rejected, so the first frame after
+          // it would be dropped by the guard the other links share.
+          chain(async () => {
             if (!manager.hasSession(sessionId)) {
               const message = `unknown session '${sessionId}'`;
               logger.warn(`terminal socket for ${message}`);
@@ -196,7 +199,7 @@ export function registerWebSocketRoutes(app: Hono, deps: WebSocketRoutesDeps): v
               sendJson(ws, { type: 'exit', exitCode });
               ws.close(1000, 'terminal exited');
             });
-          })();
+          });
         },
 
         onError(_event, ws) {

@@ -183,8 +183,10 @@ file the owner maintains by hand, so an owner who cares about the formatting
 should expect to re-tidy it after using the dialog. The third finding of the
 same QA run — an inline connector surviving the removal of its only workspace,
 with no route and no control able to remove it — was a real one-way door and is
-fixed: `DELETE /api/workspaces/:id` now drops a connector nothing else
-references (spec §11).
+fixed: `DELETE /api/workspaces/:id` now drops the connector that workspace
+named, and only when no remaining workspace names it (spec §11). A connector
+the owner wrote into the file by hand for a board that does not exist yet is
+left alone, referenced or not.
 
 ## What still does not work
 
@@ -237,3 +239,41 @@ answers 409. It should open the session instead.
 **Vite dev logs two WebSocket warnings on load.** React StrictMode mounts the
 effect twice, so the first socket is closed before its handshake completes.
 Harmless, and absent from a production build.
+
+## Deliberately not fixed, with the failure each one buys
+
+Four limits are known, understood and left in place. Each is recorded here with
+the concrete first failure an owner meets, so nobody has to rediscover it.
+
+**A refresh has no overall deadline.** `SessionManager.fetchIssues` fans its
+per-issue `get` calls out serially and each carries the Jira client's own 15 s
+abort. First failure: Jira degrades while twenty issues with live sessions have
+dropped off the epic's list. One refresh then runs twenty serial fetches at up
+to 15 s each — five minutes in which `POST /api/workspaces/:id/refresh` does
+not answer, every poll tick joins the same in-flight fetch, and no banner
+appears because `sourceError` is only set by a failed **list**. The symptom is
+"the dashboard is hung" and nothing in the UI says why. It degrades, it does
+not corrupt; the fix is a budget across the whole refresh, not per request.
+
+**`KeyedMutex` has no timeout.** First failure: `Repo.prepare` blocked on
+something slow while holding `checkoutKey(repo, issue)` and the session lock,
+so every start of that issue and `remove-worktree` for it queue behind it. The
+worst case of this — an unreachable remote — is now bounded by
+`GIT_NETWORK_TIMEOUT_MS`, which is the half worth fixing. A timeout on the
+mutex itself would be worse: a critical section abandoned mid-write is exactly
+how the store and memory come to disagree.
+
+**Records are never pruned.** `Store` has no removal path, and `archived` is
+the only valve. First failure: an owner who never archives accumulates
+non-archived records for issues that have fallen off the epic.
+`missingIssueKeys` then issues one Jira `get` per such issue on **every** poll,
+serially; at thirty stale issues one poll costs thirty round-trips and the
+board stops keeping up with `pollSeconds`. Nothing in the UI or the docs tells
+the owner that archiving is what prevents this.
+
+**`events.jsonl` is never rotated.** First failure: `GET
+/api/sessions/:id/events` reads and parses the whole file on every request, so
+the "Why it failed" panel gets slower with the session's age long before
+anything breaks. The hard failure — `ERR_STRING_TOO_LONG` past ~512 MB — now
+throws honestly instead of reporting an empty log, answers 409 rather than 500,
+and is far harder to reach since the per-string and per-member caps (spec §13).

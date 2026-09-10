@@ -20,6 +20,13 @@ export interface SessionContext {
   error: string | null;
   /** Whether the first load is still in flight; false once the board rules the session out. */
   loading: boolean;
+  /**
+   * Whether a loaded board lists no such session.
+   *
+   * This is the answer to "does this session exist", and the issue detail is
+   * not: a tracker outage refuses the detail for a session that is running.
+   */
+  missing: boolean;
   /** Re-reads the issue and its sessions from the server. */
   reload: () => void;
 }
@@ -116,6 +123,7 @@ export function useSession(sessionId: string, board: BoardView | null): SessionC
     worktreePath: detailWorktree === null ? (located?.worktreePath ?? null) : detailWorktree.path,
     error,
     loading: !missing && loading && record === null,
+    missing,
     reload,
   };
 }

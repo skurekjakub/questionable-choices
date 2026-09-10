@@ -240,10 +240,56 @@ describe('hook ingress', () => {
     expect(store.session(SESSION_ID)?.runs[0]?.exitCode).toBe(2);
   });
 
-  it('marks a failed bootstrap as failed', async () => {
+  it('marks a failed bootstrap as failed and keeps its exit code', async () => {
     await post(app, `/api/hooks/${SESSION_ID}/launcher/bootstrap-start`, {});
     await post(app, `/api/hooks/${SESSION_ID}/launcher/bootstrap-failed`, { exitCode: 1 });
     expect(store.session(SESSION_ID)?.state).toBe('failed');
+    expect(store.session(SESSION_ID)?.lastExitCode).toBe(1);
+  });
+
+  it('lands the bootstrap failure message in the log, which is where the panel reads it', async () => {
+    // The reducer keeps only the exit code, so the message the generated
+    // launcher posts survives in the raw event log or nowhere.
+    await post(app, `/api/hooks/${SESSION_ID}/launcher/bootstrap-start`, {});
+    await post(app, `/api/hooks/${SESSION_ID}/launcher/bootstrap-failed`, {
+      exitCode: 3,
+      message: 'npm error code E404\nnpm error 404 Not Found',
+    });
+
+    const events = await store.readEvents(SESSION_ID);
+    const failure = events
+      .map((entry) => entry.event as { launcher?: string; body?: { message?: string } })
+      .find((event) => event.launcher === 'bootstrap-failed');
+    expect(failure?.body?.message).toContain('npm error 404 Not Found');
+  });
+
+  it('answers 404 for a statusline payload posted against an unknown session id', async () => {
+    const response = await post(app, '/api/hooks/qc-nope/statusline', {});
+
+    expect(response.status).toBe(404);
+    expect(logger.lines.some((line) => line.includes('qc-nope'))).toBe(true);
+  });
+
+  it('answers 404 for a launcher signal posted against an unknown session id', async () => {
+    const response = await post(app, '/api/hooks/qc-nope/launcher/claude-start', {});
+
+    expect(response.status).toBe(404);
+  });
+
+  it('measures the body cap in bytes, not in UTF-16 units', async () => {
+    // A three-byte character counts as one unit, so a `String.length` cap would
+    // admit a body three times the size it is meant to.
+    const body = JSON.stringify({ last_assistant_message: '☃'.repeat(MAX_JSON_BODY_BYTES / 2) });
+    expect(body.length).toBeLessThan(MAX_JSON_BODY_BYTES);
+    expect(Buffer.byteLength(body, 'utf8')).toBeGreaterThan(MAX_JSON_BODY_BYTES);
+
+    const response = await app.request(`/api/hooks/${SESSION_ID}/Stop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+
+    expect(response.status).toBe(400);
   });
 
   it('ignores an unknown launcher signal with a 204', async () => {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BoardView, EventFrame, PublicConfigResponse } from '../../src/core/api.js';
+import type { EventFrame } from '../../src/core/api.js';
+import { boardView, publicConfig } from './fixtures.js';
 
 /**
  * A stand-in for the browser's WebSocket that a test drives by hand.
@@ -59,11 +60,7 @@ class FakeSocket {
  * @returns The frame.
  */
 function boardFrame(workspaceId: string): EventFrame {
-  return {
-    type: 'board',
-    workspaceId,
-    view: { workspaceId, name: workspaceId, columns: [] } as unknown as BoardView,
-  };
+  return { type: 'board', workspaceId, view: boardView(workspaceId) };
 }
 
 /**
@@ -73,12 +70,7 @@ function boardFrame(workspaceId: string): EventFrame {
  * @returns The frame.
  */
 function configFrame(ids: string[]): EventFrame {
-  return {
-    type: 'config',
-    config: {
-      workspaces: ids.map((id) => ({ id, name: id, epic: 'DOC-1', repo: 'r', connector: 'c' })),
-    } as unknown as PublicConfigResponse,
-  };
+  return { type: 'config', config: publicConfig(ids) };
 }
 
 /**
@@ -139,7 +131,7 @@ describe('socketUrl', () => {
 });
 
 describe('subscribeEvents', () => {
-  it('opens one socket for every subscriber', async () => {
+  it('opens one socket for every subscriber to share', async () => {
     const { subscribeEvents } = await loadWs();
     subscribeEvents({ onFrame: () => {} });
     subscribeEvents({ onFrame: () => {} });
@@ -217,16 +209,63 @@ describe('subscribeEvents', () => {
     expect(FakeSocket.opened).toHaveLength(2);
   });
 
-  it('opens one socket however many times a close is reported', async () => {
+  it('waits a longer rung after a second failed reconnect', async () => {
     const { subscribeEvents } = await loadWs();
     subscribeEvents({ onFrame: () => {} });
+    FakeSocket.opened[0]?.onopen?.();
+    FakeSocket.opened[0]?.close();
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(500);
+    expect(FakeSocket.opened).toHaveLength(2);
+
+    // The second socket never opens, so the ladder must not restart at its
+    // first rung: a server that is down stays hammered at 2/second otherwise.
+    FakeSocket.opened[1]?.close();
+    vi.advanceTimersByTime(999);
+    expect(FakeSocket.opened).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(FakeSocket.opened).toHaveLength(3);
+  });
+
+  it('arms one reconnect timer when a socket closes during a pending backoff', async () => {
+    const { subscribeEvents } = await loadWs();
+    subscribeEvents({ onFrame: () => {} });
+    FakeSocket.opened[0]?.onopen?.();
+    FakeSocket.opened[0]?.close();
+    vi.advanceTimersByTime(100);
+
+    // A second subscriber opens a socket while the first one's backoff is still
+    // pending, and that socket can close before the pending timer fires.
+    subscribeEvents({ onFrame: () => {} });
+    expect(FakeSocket.opened).toHaveLength(2);
+    FakeSocket.opened[1]?.close();
+    expect(vi.getTimerCount()).toBe(1);
+
+    // The orphaned first timer would fire 400 ms from here and open a socket
+    // the newly armed one then opens a second time.
+    vi.advanceTimersByTime(400);
+    expect(FakeSocket.opened).toHaveLength(2);
+    vi.advanceTimersByTime(600);
+    expect(FakeSocket.opened).toHaveLength(3);
+  });
+
+  it('ignores a close reported by a socket it has already replaced', async () => {
+    const { subscribeEvents } = await loadWs();
+    const seen: boolean[] = [];
+    subscribeEvents({ onFrame: () => {}, onConnected: (state) => seen.push(state) });
     const first = FakeSocket.opened[0];
     first?.onopen?.();
     first?.close();
-    first?.onclose?.();
+    vi.advanceTimersByTime(100);
+    subscribeEvents({ onFrame: () => {} });
+    expect(FakeSocket.opened).toHaveLength(2);
+
     first?.onclose?.();
     vi.advanceTimersByTime(20_000);
+    // Acting on the stale close would drop the reference to the live socket,
+    // leaving it open and unreachable while a third one is dialled.
     expect(FakeSocket.opened).toHaveLength(2);
+    expect(seen).toEqual([false, true, false]);
   });
 
   it('keeps the socket open across a remount, and closes it once nobody is left', async () => {

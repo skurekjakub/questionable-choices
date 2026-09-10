@@ -4,9 +4,22 @@ import type {
   JiraConnectorConfig,
   WorkspaceQuery,
 } from '../../../core/types.js';
-import { JiraClient, type FetchLike } from './client.js';
+import { JiraClient, type FetchLike, type JiraIssueResource } from './client.js';
 import { buildJql } from './jql.js';
 import { mapIssue } from './map.js';
+
+/**
+ * Reports whether a Jira resource carries a key the board can render.
+ *
+ * The field is typed non-optional and sourced from the network, so it is the
+ * one field worth checking before a resource becomes a card.
+ *
+ * @param resource - An issue resource as Jira returned it.
+ * @returns True when the resource has a non-empty string key.
+ */
+function hasKey(resource: JiraIssueResource): boolean {
+  return typeof resource.key === 'string' && resource.key !== '';
+}
 
 /**
  * Thrown when a Jira request is attempted without both basic-auth credentials.
@@ -86,13 +99,15 @@ export class JiraIssueSource implements IssueSource {
   async list(): Promise<Issue[]> {
     this.assertCredentials();
     const resources = await this.client.searchJql(buildJql(this.query));
-    return resources
-      .filter((resource) => typeof resource.key === 'string' && resource.key !== '')
-      .map((resource) => mapIssue(resource, this.connector.site));
+    return resources.filter(hasKey).map((resource) => mapIssue(resource, this.connector.site));
   }
 
   /**
    * Fetches one issue by key, for issues that dropped out of `list`.
+   *
+   * A resource with no usable key is reported as "no such issue" for the same
+   * reason `list` drops one: the key is what sessions are matched by and what
+   * the browser URL is built from.
    *
    * @param key - Tracker key of the issue.
    * @returns The issue, or null when Jira has no such issue.
@@ -102,7 +117,8 @@ export class JiraIssueSource implements IssueSource {
   async get(key: string): Promise<Issue | null> {
     this.assertCredentials();
     const resource = await this.client.getIssue(key);
-    return resource === null ? null : mapIssue(resource, this.connector.site);
+    if (resource === null || !hasKey(resource)) return null;
+    return mapIssue(resource, this.connector.site);
   }
 }
 

@@ -473,7 +473,6 @@ function buildBoard(
   });
   return {
     workspaceId,
-    name,
     playbooks: [
       {
         id: 'implement',
@@ -699,30 +698,41 @@ function boxLine(text: string): string {
 
 /**
  * Terminal output the mock replays on attach, standing in for a live TUI.
+ *
+ * The session it names is the one being attached to. A canned transcript that
+ * names another session teaches the wrong thing about the only UI harness in
+ * the repo — that the terminal is decoration rather than a view of one pty.
+ *
+ * @param sessionId - Session the attach URL named.
+ * @param issueKey - Tracker key of the issue that session works on.
+ * @param summary - One-line title of that issue.
+ * @returns The lines to replay, in order.
  */
-const TERMINAL_SCRIPT = [
-  '\x1b[90m$ claude --settings ~/.local/share/questionable-choices/sessions/qc-DOC-3847-implement/settings.json\x1b[0m',
-  '',
-  '\x1b[36m✻\x1b[0m Working on \x1b[1mDOC-3847\x1b[0m — remove the duplicated frontmatter parser',
-  '',
-  '  \x1b[32m✓\x1b[0m Read lib/content/loader/mdx-loader.tsx (412 lines)',
-  '  \x1b[32m✓\x1b[0m Read lib/content/schema/parse.ts (88 lines)',
-  '  \x1b[32m✓\x1b[0m Grep "matter(" across lib/ — 3 matches',
-  '',
-  '  Both call sites split the fence themselves. Collapsing them onto parse.ts',
-  '  keeps one engine and one fence rule, which is what the convention asks for.',
-  '',
-  `\x1b[33m╭${'─'.repeat(BOX_WIDTH)}╮\x1b[0m`,
-  boxLine('  Claude needs your permission to run:'),
-  boxLine(''),
-  boxLine('    rm -rf .next/cache'),
-  boxLine(''),
-  boxLine('   1. Yes     2. Yes, and do not ask again     3. No'),
-  `\x1b[33m╰${'─'.repeat(BOX_WIDTH)}╯\x1b[0m`,
-  '',
-  '\x1b[90m  esc to interrupt · ctrl+r to expand\x1b[0m',
-  '',
-];
+function terminalScript(sessionId: string, issueKey: string, summary: string): string[] {
+  return [
+    `\x1b[90m$ claude --settings ~/.local/share/questionable-choices/sessions/${sessionId}/settings.json\x1b[0m`,
+    '',
+    `\x1b[36m✻\x1b[0m Working on \x1b[1m${issueKey}\x1b[0m — ${summary}`,
+    '',
+    '  \x1b[32m✓\x1b[0m Read lib/content/loader/mdx-loader.tsx (412 lines)',
+    '  \x1b[32m✓\x1b[0m Read lib/content/schema/parse.ts (88 lines)',
+    '  \x1b[32m✓\x1b[0m Grep "matter(" across lib/ — 3 matches',
+    '',
+    '  Both call sites split the fence themselves. Collapsing them onto parse.ts',
+    '  keeps one engine and one fence rule, which is what the convention asks for.',
+    '',
+    `\x1b[33m╭${'─'.repeat(BOX_WIDTH)}╮\x1b[0m`,
+    boxLine('  Claude needs your permission to run:'),
+    boxLine(''),
+    boxLine('    rm -rf .next/cache'),
+    boxLine(''),
+    boxLine('   1. Yes     2. Yes, and do not ask again     3. No'),
+    `\x1b[33m╰${'─'.repeat(BOX_WIDTH)}╯\x1b[0m`,
+    '',
+    '\x1b[90m  esc to interrupt · ctrl+r to expand\x1b[0m',
+    '',
+  ];
+}
 
 /**
  * Assembles the public configuration from the mock's mutable lists.
@@ -941,8 +951,15 @@ function route(
       };
       return { status: 400, body: refusal };
     }
-    workspaces.splice(index, 1);
+    const [removed] = workspaces.splice(index, 1);
     boards.delete(workspaceId);
+    // A connector no remaining workspace references goes with it: nothing else
+    // can remove one, so an inline connector created from the dialog would
+    // otherwise be permanent.
+    if (removed !== undefined && !workspaces.some((entry) => entry.connector === removed.connector)) {
+      const orphan = connectors.findIndex((entry) => entry.id === removed.connector);
+      if (orphan >= 0) connectors.splice(orphan, 1);
+    }
     broadcast({ type: 'config', config: publicConfig() });
     return { status: 204, body: undefined };
   }
@@ -993,7 +1010,12 @@ function route(
       }
 
       if (parts[5] === 'prefill') {
-        const playbook = new URLSearchParams(search).get('playbook') ?? 'implement';
+        const playbook = new URLSearchParams(search).get('playbook');
+        if (playbook === null) {
+          // The route has nothing to render without one, and the server says so
+          // rather than picking a playbook on the caller's behalf.
+          return { status: 400, body: { error: 'playbook is required' } };
+        }
         const prefill: PrefillResponse = {
           prompt: `You are working on ${found.issue.key} — ${found.issue.summary}.\n\nRepository: kentico-docs-next\nBranch: ${found.issue.key}-${found.issue.summary.toLowerCase().split(' ').slice(0, 4).join('-')}\nWorktree: ${found.worktreePath ?? '(created on start)'}\n\nDescription\n${found.issue.summary}\n\nWhen you are done, add a Jira comment describing how to test the change.`,
           model: 'claude-opus-5',
@@ -1139,7 +1161,14 @@ function sessionEvents(sessionId: string): { status: number; body: unknown } {
             launcher: 'bootstrap-failed',
             body: {
               exitCode: 128,
-              message: `fatal: invalid reference: ${entry.issue.key}-collapse-icon-hosts`,
+              // The launcher posts the tail of the bootstrap's own output, so
+              // the mock posts a tail too rather than a one-line summary no
+              // shell ever printed.
+              message: [
+                `+ git -C /home/jakubs/repositories/kentico-docs-next worktree add --checkout -b ${entry.issue.key}-collapse-icon-hosts /home/jakubs/repositories/worktrees/${entry.issue.key} origin/main`,
+                `Preparing worktree (new branch '${entry.issue.key}-collapse-icon-hosts')`,
+                'fatal: invalid reference: origin/main',
+              ].join('\n'),
             },
           },
           state: 'failed',
@@ -1190,6 +1219,9 @@ function mockRecord(workspaceId: string, issueKey: string, entry: CardSession): 
       entry.state === 'idle' ? 'Done. The duplicated parser is gone and verify is green.' : null,
     lastExitCode: entry.lastExitCode,
     staleSince: entry.staleSince,
+    // The state change is itself a lifecycle event, and it is the last one the
+    // card carries any trace of.
+    lastEventAt: entry.stateSince,
     cache: entry.cache,
     createdAt: ago(9600),
     endedAt: entry.live ? null : ago(600),
@@ -1317,18 +1349,21 @@ function attachEvents(socket: MockSocket): void {
 }
 
 /**
- * Whether any board lists a session.
+ * Finds the issue a session works on, across every board.
  *
  * @param sessionId - Id to look for.
- * @returns True when a card carries that session.
+ * @returns The key and summary of the issue whose card carries that session, or
+ * null when no board lists it.
  */
-function knowsSession(sessionId: string): boolean {
+function issueOfSession(sessionId: string): { key: string; summary: string } | null {
   for (const board of boards.values()) {
     for (const card of board.columns.flatMap((column) => column.cards)) {
-      if (card.sessions.some((entry) => entry.id === sessionId)) return true;
+      if (card.sessions.some((entry) => entry.id === sessionId)) {
+        return { key: card.issue.key, summary: card.issue.summary };
+      }
     }
   }
-  return false;
+  return null;
 }
 
 /**
@@ -1353,7 +1388,8 @@ function attachTerminal(socket: MockSocket, sessionId: string, cols: string, row
   };
   openSockets.add(socket);
   socket.onDispose = () => openSockets.delete(socket);
-  if (!knowsSession(sessionId)) {
+  const issue = issueOfSession(sessionId);
+  if (issue === null) {
     window.setTimeout(() => {
       socket.onopen?.();
       socket.deliver(JSON.stringify({ type: 'error', message: `unknown session '${sessionId}'` }));
@@ -1374,7 +1410,7 @@ function attachTerminal(socket: MockSocket, sessionId: string, cols: string, row
     socket.onopen?.();
     write('\x1b[2J\x1b[H');
     write(`\x1b[90m[attached to ${sessionId} at ${cols}x${rows}]\x1b[0m\r\n`);
-    for (const [index, line] of TERMINAL_SCRIPT.entries()) {
+    for (const [index, line] of terminalScript(sessionId, issue.key, issue.summary).entries()) {
       window.setTimeout(() => write(`${line}\r\n`), 60 + index * 45);
     }
   }, 40);

@@ -86,8 +86,8 @@ npm run dev            # server on 4400, UI on 5173, both with reload
 
 **In dev, the dashboard is on 5173, not 4400.** Vite serves the SPA and proxies
 `/api` and `/ws` through to the server; port 4400 serves the API and the
-WebSockets but has no built SPA to hand out, so it answers any page request
-with a plain message saying so.
+WebSockets but has no built SPA to hand out, so it answers every request that
+is not `/api` or `/ws` with 503 and a message saying so.
 
 Production-style: `npm run build` then `npm start`. Now 4400 serves both the
 built SPA and the API, and 5173 is not running at all. The bookmark to use
@@ -135,7 +135,12 @@ session with its prompt, generated settings, launcher and hook event log.
 Single TypeScript package. `src/core` is pure domain (types, config schema,
 state machine, projection) with the connector interfaces; `src/connectors`
 implements them (Jira, git worktrees, claude in tmux); `src/server` is Hono
-plus WebSockets; `src/web` is Vite + React. Tests are Vitest, unit only.
+plus WebSockets; `src/web` is Vite + React. Tests are Vitest, and `test/`
+mirrors `src/` a directory at a time. They reach no tracker, no tmux and no
+listening socket; the three things they really do — drive git against a
+temporary repository, run the generated launcher under `bash` with a stub
+`curl`, and spawn one child process for the editor launcher — are named in
+`docs/spec.md` §15.
 
 `npm run verify` is the gate. Start from `docs/spec.md` before changing
 behaviour; the spec is kept current with the code.

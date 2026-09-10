@@ -7,6 +7,7 @@ import {
   normaliseSite,
   type FetchLike,
 } from '../../src/connectors/issues/jira/client.js';
+import { isPermanentSourceError } from '../../src/core/types.js';
 
 interface RecordedCall {
   url: string;
@@ -166,6 +167,36 @@ describe('JiraClient.searchJql', () => {
 
     await expect(client.searchJql('parent = DOC-100')).rejects.toBeInstanceOf(JiraTruncatedError);
     expect(calls).toHaveLength(2);
+  });
+
+  it('marks the truncated walk permanent, which is what suspends the poll timer', async () => {
+    // The manager reads the marker, not the class: any issue source can say
+    // "repeating this query changes nothing" without the server knowing it.
+    const { fetch } = recordingFetch([
+      json({ issues: [{ key: 'DOC-1' }], nextPageToken: 'same' }),
+      json({ issues: [{ key: 'DOC-2' }], nextPageToken: 'same' }),
+    ]);
+    const client = new JiraClient({
+      site: 'example.atlassian.net',
+      email: 'me@example.com',
+      token: 'secret',
+      fetch,
+      maxPages: 2,
+    });
+
+    const failure = await client.searchJql('parent = DOC-100').catch((cause: unknown) => cause);
+
+    expect(isPermanentSourceError(failure)).toBe(true);
+  });
+
+  it('does not mark an ordinary Jira failure permanent', async () => {
+    const { fetch } = recordingFetch([new Response('nope', { status: 503 })]);
+
+    const failure = await makeClient(fetch)
+      .searchJql('parent = DOC-100')
+      .catch((cause: unknown) => cause);
+
+    expect(isPermanentSourceError(failure)).toBe(false);
   });
 
   it('reports a 2xx body that is not JSON as a Jira error', async () => {

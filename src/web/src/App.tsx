@@ -6,16 +6,12 @@ import { useConfig } from './hooks/useConfig.js';
 import { useNeedsYouSignals } from './hooks/useNeedsYou.js';
 import { useNow } from './hooks/useNow.js';
 import { useSessionOwner } from './hooks/useSessionOwner.js';
+import { navigate, NAVIGATE_EVENT } from './navigation.js';
 
 /**
  * localStorage key holding the workspace the owner last looked at.
  */
 const WORKSPACE_KEY = 'qc.workspace';
-
-/**
- * Event fired after a programmatic navigation, so the router re-reads the path.
- */
-const NAVIGATE_EVENT = 'qc:navigate';
 
 /**
  * Reads the workspace the owner last looked at.
@@ -45,18 +41,6 @@ function rememberWorkspace(workspaceId: string): void {
   } catch {
     return;
   }
-}
-
-/**
- * Navigates to a path without a full page load.
- *
- * @param to - Path to navigate to, starting with a slash.
- * @returns Nothing.
- */
-export function navigate(to: string): void {
-  if (window.location.pathname === to) return;
-  window.history.pushState(null, '', to);
-  window.dispatchEvent(new Event(NAVIGATE_EVENT));
 }
 
 /**
@@ -106,6 +90,11 @@ export function App(): JSX.Element {
     rememberWorkspace(id);
   }, []);
 
+  // Following a notification into another workspace's session is not the owner
+  // choosing a board, so it must not change the one they come back to — on this
+  // tab or the next cold start.
+  const showWorkspace = useCallback((id: string) => setWorkspaceId(id), []);
+
   // The remembered workspace can vanish when it is removed elsewhere, so the
   // selection is re-derived from every configuration the server sends.
   useEffect(() => {
@@ -125,7 +114,7 @@ export function App(): JSX.Element {
   useNeedsYouSignals(board.board, openSession);
 
   const sessionId = sessionIdFromPath(path);
-  const resolvingOwner = useSessionOwner(sessionId, config, board.board, selectWorkspace);
+  const resolvingOwner = useSessionOwner(sessionId, config, board.board, showWorkspace);
 
   if (sessionId !== null) {
     return (

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   attachCommand,
-  failureHint,
+  endedHint,
   syncedAgo,
   timeInState,
   typeGlyph,
@@ -95,26 +95,46 @@ describe('attachCommand', () => {
   });
 });
 
-describe('failureHint', () => {
-  it('names the exit code the launcher reported', () => {
-    expect(failureHint('qc-DOC-1-implement', 1).label).toBe('failed, exit 1');
-    expect(failureHint('qc-DOC-1-implement', 127).label).toBe('failed, exit 127');
+describe('endedHint', () => {
+  it('names the exit code the launcher reported for a failed session', () => {
+    expect(endedHint('qc-DOC-1-implement', 'failed', 1)?.label).toBe('failed, exit 1');
+    expect(endedHint('qc-DOC-1-implement', 'failed', 127)?.label).toBe('failed, exit 127');
   });
 
   it('says only that it failed when no code reached the record', () => {
-    expect(failureHint('qc-DOC-1-implement', null).label).toBe('failed');
+    expect(endedHint('qc-DOC-1-implement', 'failed', null)?.label).toBe('failed');
   });
 
-  it('keeps a zero code, which is a real outcome and not a missing one', () => {
-    expect(failureHint('qc-DOC-1-implement', 0).label).toBe('failed, exit 0');
+  it('keeps a zero code on a failure, which is a real outcome and not a missing one', () => {
+    expect(endedHint('qc-DOC-1-implement', 'failed', 0)?.label).toBe('failed, exit 0');
   });
 
   it('points at the shell by the tmux name, which is the session id', () => {
-    expect(failureHint('qc-DOC-1-implement', 1).shell).toBe(
+    expect(endedHint('qc-DOC-1-implement', 'failed', 1)?.shell).toBe(
       'shell open in tmux qc-DOC-1-implement',
     );
-    expect(failureHint('qc-DOC-1-implement', null).shell).toBe(
+    expect(endedHint('qc-DOC-1-implement', 'failed', null)?.shell).toBe(
       'shell open in tmux qc-DOC-1-implement',
     );
+  });
+
+  it('names the exit code of a CLI that ran and died, which otherwise looks like a clean exit', () => {
+    expect(endedHint('qc-DOC-1-implement', 'exited', 1)?.label).toBe('exited, code 1');
+    expect(endedHint('qc-DOC-1-implement', 'exited', 137)?.label).toBe('exited, code 137');
+  });
+
+  it('leaves an exited session no shell to point at, because it left none open', () => {
+    expect(endedHint('qc-DOC-1-implement', 'exited', 1)?.shell).toBeNull();
+  });
+
+  it('says nothing extra about an exit the state word already describes', () => {
+    expect(endedHint('qc-DOC-1-implement', 'exited', 0)).toBeNull();
+    expect(endedHint('qc-DOC-1-implement', 'exited', null)).toBeNull();
+  });
+
+  it('says nothing about a session that has not ended, whatever code it last carried', () => {
+    expect(endedHint('qc-DOC-1-implement', 'working', 1)).toBeNull();
+    expect(endedHint('qc-DOC-1-implement', 'idle', 1)).toBeNull();
+    expect(endedHint('qc-DOC-1-implement', 'bootstrapping', null)).toBeNull();
   });
 });

@@ -13,17 +13,11 @@ describe('the state sets the web reads', () => {
 });
 
 describe('STATE_LABELS', () => {
-  it('words every state the contract can send, so no row renders undefined', () => {
-    expect(Object.keys(STATE_LABELS).sort()).toEqual([
-      'bootstrapping',
-      'exited',
-      'failed',
-      'idle',
-      'starting',
-      'waiting-permission',
-      'waiting-question',
-      'working',
-    ]);
+  // The key list is not restated here: `STATE_LABELS` is typed
+  // `Record<SessionState, string>`, so a state added to the contract and
+  // forgotten here is a compile error, which lands earlier and reads better
+  // than a failing array comparison.
+  it('gives every state it words something to render', () => {
     for (const label of Object.values(STATE_LABELS)) {
       expect(label.length).toBeGreaterThan(0);
     }

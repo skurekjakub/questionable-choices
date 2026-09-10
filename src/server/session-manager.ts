@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -7,7 +6,6 @@ import {
   DirtyWorktreeError,
   NoBranchError,
 } from '../connectors/repos/git/index.js';
-import { JiraTruncatedError } from '../connectors/issues/jira/client.js';
 import { MissingExecutableError } from '../connectors/runners/claude-tmux/index.js';
 import type {
   BoardView,
@@ -38,6 +36,7 @@ import type { SessionEvent } from '../core/state-machine.js';
 import {
   EFFORTS,
   PERMISSION_MODE_SETTINGS,
+  isPermanentSourceError,
   type Config,
   type Effort,
   type Issue,
@@ -62,6 +61,16 @@ import { messageOf } from './util.js';
 export const RECONCILE_INTERVAL_MS = 10_000;
 
 /**
+ * Channels the manager fans frames out on.
+ */
+type EventChannel = 'board' | 'session' | 'config';
+
+/**
+ * A subscriber of the manager's frames.
+ */
+export type EventListener = (frame: EventFrame) => void;
+
+/**
  * Key every configuration mutation is serialised on.
  */
 const CONFIG_LOCK_KEY = 'config';
@@ -73,9 +82,10 @@ const CONFIG_LOCK_KEY = 'config';
  * @param issueKey - Key of the issue the checkout was made for.
  * @returns The lock key.
  */
-function checkoutKey(repoId: string, issueKey: string): string {
-  // Neither an id nor an issue key may contain a slash, so it cannot be part of
-  // either half and two different pairs can never collide on one key.
+export function checkoutKey(repoId: string, issueKey: string): string {
+  // A repo id may not contain a slash (`config.ts` enforces it), so the first
+  // slash always separates the two halves and no two pairs share a key —
+  // whatever the issue key holds.
   return `${repoId}/${issueKey}`;
 }
 
@@ -85,16 +95,15 @@ function checkoutKey(repoId: string, issueKey: string): string {
 export const BOARD_DEBOUNCE_MS = 250;
 
 /**
- * Classifies a failure of `Repo.prepare` into a machine-readable reason.
+ * Classifies a failure of a checkout or a launch into a machine-readable reason.
  *
- * @param cause - Whatever `prepare` threw.
+ * @param cause - Whatever the repo or the runner threw.
  * @returns The matching `ErrorReason`, or undefined when none describes it.
  */
 export function checkoutRefusalReason(cause: unknown): ErrorReason | undefined {
   if (cause instanceof NoBranchError) return 'no-branch';
   if (cause instanceof DetachedWorktreeError) return 'detached-worktree';
   if (cause instanceof MissingExecutableError) return 'missing-executable';
-  if (cause instanceof DirtyWorktreeError) return 'dirty-worktree';
   return undefined;
 }
 
@@ -265,23 +274,56 @@ export function readDerivedCacheTtlSeconds(settingsPath: string): number {
 }
 
 /**
- * Default editor launcher: a detached process the dashboard never waits for.
- *
- * @param command - Executable to spawn.
- * @param args - Arguments, with `{{path}}` already substituted.
- * @param onError - Called with the spawn failure, which arrives asynchronously.
- * @returns Nothing.
+ * The part of a spawned child the editor launcher touches.
  */
-export const spawnDetached: EditorSpawner = (command, args, onError) => {
-  const child = spawn(command, args, { detached: true, stdio: 'ignore' });
-  // A missing executable reaches the child as an asynchronous 'error' event,
-  // never as a throw from spawn; unhandled, that event takes the whole server
-  // down and every session's state tracking with it.
-  child.on('error', onError);
-  // Without unref the editor keeps the event loop — and therefore the
-  // dashboard — alive for as long as the owner leaves the window open.
-  child.unref();
-};
+export interface DetachedChild {
+  /**
+   * Registers a listener for the child's asynchronous failures.
+   *
+   * @param event - Event name; only `error` is subscribed to.
+   * @param listener - Called with the failure.
+   * @returns Anything; the return value is not used.
+   */
+  on(event: 'error', listener: (error: Error) => void): unknown;
+  /**
+   * Detaches the child from the parent's event loop.
+   *
+   * @returns Nothing.
+   */
+  unref(): void;
+}
+
+/**
+ * How the editor launcher starts a process; replaceable in tests.
+ */
+export type DetachedSpawner = (command: string, args: string[]) => DetachedChild;
+
+/**
+ * Builds a detached editor launcher over one spawner.
+ *
+ * @param spawnChild - How to start the process; defaults to `child_process.spawn`.
+ * @returns The launcher.
+ */
+export function detachedEditorSpawner(
+  spawnChild: DetachedSpawner = (command, args) =>
+    spawn(command, args, { detached: true, stdio: 'ignore' }),
+): EditorSpawner {
+  return (command, args, onError) => {
+    const child = spawnChild(command, args);
+    // A missing executable reaches the child as an asynchronous 'error' event,
+    // never as a throw from spawn; unhandled, that event takes the whole server
+    // down and every session's state tracking with it.
+    child.on('error', onError);
+    // Without unref the editor keeps the event loop — and therefore the
+    // dashboard — alive for as long as the owner leaves the window open.
+    child.unref();
+  };
+}
+
+/**
+ * Default editor launcher: a detached process the dashboard never waits for.
+ */
+export const spawnDetached: EditorSpawner = detachedEditorSpawner();
 
 /**
  * Renders a timestamp as a compact, tmux-safe discriminator.
@@ -301,8 +343,12 @@ function compactTimestamp(nowMs: number): string {
  * issue polling, board projection and fan-out to the WebSocket layer.
  */
 export class SessionManager {
-  /** Raw channels: `board`, `session` and `config`, each carrying an `EventFrame`. */
-  readonly events = new EventEmitter();
+  /** Subscribers of each channel, every one of them taking an `EventFrame`. */
+  private readonly channels: Readonly<Record<EventChannel, Set<EventListener>>> = {
+    board: new Set(),
+    session: new Set(),
+    config: new Set(),
+  };
   /** Runner every session on every workspace runs through. */
   readonly runner: Runner;
   /** Validated configuration, as the last accepted workspace change left it. */
@@ -348,25 +394,18 @@ export class SessionManager {
     this.startedAtMs = this.now();
     this.startedAt = new Date(this.startedAtMs).toISOString();
     for (const runtime of options.workspaces) this.adopt(runtime);
-    // Every terminal and every board viewer adds two listeners, so the default
-    // ceiling of ten would warn as soon as a few tabs are open.
-    this.events.setMaxListeners(0);
   }
 
   /**
    * Subscribes to every frame the manager pushes.
    *
-   * @param listener - Called with each board or session frame.
+   * @param listener - Called with each board, session or config frame.
    * @returns A function that removes the subscription.
    */
-  subscribe(listener: (frame: EventFrame) => void): () => void {
-    this.events.on('board', listener);
-    this.events.on('session', listener);
-    this.events.on('config', listener);
+  subscribe(listener: EventListener): () => void {
+    for (const subscribers of Object.values(this.channels)) subscribers.add(listener);
     return () => {
-      this.events.off('board', listener);
-      this.events.off('session', listener);
-      this.events.off('config', listener);
+      for (const subscribers of Object.values(this.channels)) subscribers.delete(listener);
     };
   }
 
@@ -781,6 +820,7 @@ export class SessionManager {
             409,
             `${issueKey} already has a live '${playbook.id}' session`,
             `session ${clash.id} is ${clash.state}`,
+            'session-live',
           );
         }
 
@@ -815,10 +855,12 @@ export class SessionManager {
           state: 'starting',
           stateSince: startedAt,
           pending: null,
-          lastToolResultPromptId: null,
+          answeredDialog: null,
+          toolCallOpen: false,
           lastAssistantMessage: null,
           lastExitCode: null,
           staleSince: null,
+          lastEventAt: null,
           cache: null,
           createdAt: startedAt,
           endedAt: null,
@@ -854,7 +896,12 @@ export class SessionManager {
             const failed = await this.patch(current, { state: 'failed' });
             this.emitSession(failed);
             this.scheduleBoard(workspaceId);
-            throw new ActionError(409, `cannot launch ${record.id}`, messageOf(cause));
+            throw new ActionError(
+              409,
+              `cannot launch ${record.id}`,
+              messageOf(cause),
+              checkoutRefusalReason(cause),
+            );
           }
           const launched = this.store.session(record.id) ?? record;
           this.emitSession(launched);
@@ -915,7 +962,12 @@ export class SessionManager {
       try {
         await this.runner.resume(current);
       } catch (cause) {
-        throw new ActionError(409, `cannot resume ${sessionId}`, messageOf(cause));
+        throw new ActionError(
+          409,
+          `cannot resume ${sessionId}`,
+          messageOf(cause),
+          checkoutRefusalReason(cause),
+        );
       }
       const next = await this.patch(current, { state: 'starting', pending: null, endedAt: null });
       this.emitSession(next);
@@ -1061,7 +1113,7 @@ export class SessionManager {
       }
       await this.store.clearWorktree(record.repoId, record.issueKey);
       this.scheduleRepoBoards(record.repoId);
-      return { path, removed: true };
+      return { path };
     });
   }
 
@@ -1114,11 +1166,18 @@ export class SessionManager {
    *
    * @param sessionId - Session whose log to read.
    * @returns The accepted events, oldest first.
-   * @throws {ActionError} When the session is unknown.
+   * @throws {ActionError} When the session is unknown (404) or its log exists
+   *   but cannot be read (409).
    */
   async sessionEvents(sessionId: string): Promise<SessionEventsResponse> {
     this.requireSession(sessionId);
-    return { events: await this.store.readEvents(sessionId) };
+    try {
+      return { events: await this.store.readEvents(sessionId) };
+    } catch (cause) {
+      // A log the process cannot open is a refusal the owner can act on, not an
+      // internal error: the panel that reads this route shows a 4xx body.
+      throw new ActionError(409, `cannot read the event log of ${sessionId}`, messageOf(cause));
+    }
   }
 
   /**
@@ -1162,7 +1221,10 @@ export class SessionManager {
         // A session leaving the live set usually means its issue just moved in
         // the tracker, so the board's issue list is refetched rather than waited on.
         for (const runtime of this.workspacesOfRepo(before.repoId)) {
-          void this.refresh(runtime.id).catch((cause: unknown) => {
+          // `refreshNow`, not `refresh`: a session exiting is not the owner
+          // asking, so it must not lift the suspension a rejected query left
+          // on the poll timer.
+          void this.refreshNow(runtime.id).catch((cause: unknown) => {
             this.logger.warn(`refresh after ${sessionId} exited failed: ${messageOf(cause)}`);
           });
         }
@@ -1172,21 +1234,39 @@ export class SessionManager {
   }
 
   /**
-   * Flags a live record whose last state change predates this server's start.
+   * Flags a live record this server has never heard from.
+   *
+   * The judgement is on `lastEventAt`, not on `stateSince`: a session that has
+   * been `working` since before the restart and is still posting hooks is being
+   * told about, and a state that has not changed is not a state nobody can
+   * vouch for.
    *
    * @param record - The live record to judge.
    * @returns Nothing.
    */
   private async flagIfStale(record: SessionRecord): Promise<void> {
     if (record.staleSince !== null) return;
-    if (Date.parse(record.stateSince) >= this.startedAtMs) return;
+    if (this.heardFromSinceStart(record)) return;
     await this.mutateSession(record.id, async (current) => {
       if (!isLive(current.state) || current.staleSince !== null) return;
+      if (this.heardFromSinceStart(current)) return;
       const next = await this.patch(current, { staleSince: this.startedAt });
       this.logger.info(`${next.id} predates this server start; its state may be out of date`);
       this.emitSession(next);
       this.scheduleRepoBoards(next.repoId);
     });
+  }
+
+  /**
+   * Reports whether a record has produced a lifecycle event under this server.
+   *
+   * @param record - The record to judge.
+   * @returns True when the record has been heard from since the server started.
+   */
+  private heardFromSinceStart(record: SessionRecord): boolean {
+    // A record written before `lastEventAt` existed has only `stateSince` to
+    // offer, which is the question this replaced but is better than nothing.
+    return Date.parse(record.lastEventAt ?? record.stateSince) >= this.startedAtMs;
   }
 
   /**
@@ -1248,6 +1328,11 @@ export class SessionManager {
           const next = await this.patch(current, {
             state,
             pending: null,
+            // The probe just answered, so this is the most certain state the
+            // reconciler can produce; leaving it "unverified" would keep a
+            // marker nothing can ever clear on a record that receives no
+            // further events.
+            staleSince: null,
             endedAt: new Date(this.now()).toISOString(),
           });
           this.logger.info(`reconciler marked ${next.id} ${state}`);
@@ -1276,10 +1361,10 @@ export class SessionManager {
     } catch (cause) {
       listed = false;
       cache.sourceError = messageOf(cause);
-      // A truncated walk costs `JIRA_MAX_PAGES` authenticated requests and
-      // repeating it changes nothing, so it suspends the timer rather than
+      // A query the source calls permanently rejected costs the same requests
+      // every time and changes nothing, so it suspends the timer rather than
       // running every poll for as long as the server is up.
-      cache.queryRejected = cause instanceof JiraTruncatedError;
+      cache.queryRejected = isPermanentSourceError(cause);
       const message = `workspace '${runtime.id}' issue list failed: ${cache.sourceError}`;
       if (cache.queryRejected) this.logger.error(`${message} (polling suspended until a refresh)`);
       else this.logger.warn(message);
@@ -1369,8 +1454,11 @@ export class SessionManager {
   /**
    * Looks up any workspace that can act on one repo.
    *
+   * Every workspace naming a repo shares its connector and its configuration,
+   * so which of them answers is not a choice the caller can observe.
+   *
    * @param repoId - Repo the caller needs a runtime for.
-   * @returns The first workspace naming that repo.
+   * @returns One workspace naming that repo.
    * @throws {ActionError} When no workspace names it, e.g. after the last one
    *   naming it was removed.
    */
@@ -1529,13 +1617,12 @@ export class SessionManager {
    * @param frame - The frame to push.
    * @returns Nothing.
    */
-  private emit(channel: 'board' | 'session' | 'config', frame: EventFrame): void {
-    // `EventEmitter.emit` dispatches synchronously and stops at the first
-    // throw, so one viewer's socket tearing down would cost every other viewer
-    // the frame. Each subscriber therefore gets its own guard.
-    for (const listener of this.events.listeners(channel)) {
+  private emit(channel: EventChannel, frame: EventFrame): void {
+    // Dispatch is synchronous, so without a guard per subscriber one viewer's
+    // socket tearing down would cost every other viewer the frame.
+    for (const listener of [...this.channels[channel]]) {
       try {
-        (listener as (value: EventFrame) => void)(frame);
+        listener(frame);
       } catch (cause) {
         this.logger.error(`a '${channel}' subscriber threw: ${messageOf(cause)}`);
       }
@@ -1579,6 +1666,9 @@ export class SessionManager {
     if (this.boardTimers.has(workspaceId)) return;
     const timer = setTimeout(() => {
       this.boardTimers.delete(workspaceId);
+      // A workspace removed while this was queued has no board left to project,
+      // which is a removal working as intended rather than a failure to log.
+      if (!this.workspaces.has(workspaceId)) return;
       try {
         const view = this.board(workspaceId);
         this.emit('board', { type: 'board', workspaceId, view });

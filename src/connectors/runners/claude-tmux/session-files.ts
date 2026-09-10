@@ -278,6 +278,35 @@ export function claudeCommandLine(context: RunScriptContext): string {
 }
 
 /**
+ * Lines of bootstrap output the failure signal carries back.
+ *
+ * The exit code alone says nothing the card's own state pill does not; the tail
+ * of the output is what names the missing dependency or the bad reference.
+ */
+export const BOOTSTRAP_TAIL_LINES = 20;
+
+/**
+ * Name of the file the bootstrap's combined output is captured to, inside the
+ * session directory.
+ */
+export const BOOTSTRAP_LOG_FILE = 'bootstrap.log';
+
+/**
+ * Shell pipeline turning text on stdin into the body of one JSON string.
+ *
+ * Tabs become spaces and every other control character is dropped, because a
+ * raw one inside a JSON string makes the whole hook body unparseable and the
+ * server would answer 400 instead of showing the owner why their bootstrap
+ * failed. The result carries no surrounding quotes.
+ */
+const JSON_STRING_BODY = [
+  "LC_ALL=C tr '\\011' ' '",
+  "LC_ALL=C tr -d '\\000-\\010\\013\\014\\016-\\037\\177'",
+  `sed -e 's/\\\\/\\\\\\\\/g' -e 's/"/\\\\"/g'`,
+  `awk '{printf "%s\\\\n", $0}'`,
+].join(' | ');
+
+/**
  * Renders the launcher script tmux runs in the session's window.
  *
  * @param context - Everything the launcher knows about the session.
@@ -302,10 +331,14 @@ export function buildRunScript(context: RunScriptContext): string {
       '',
       "post bootstrap-start '{}'",
       '',
-      context.bootstrap,
-      'status=$?',
+      `qc_bootstrap_log=${shellQuote(`${context.dir}/${BOOTSTRAP_LOG_FILE}`)}`,
+      // Piped through tee, not redirected: the owner watching the tmux window
+      // must still see the bootstrap run, and the dashboard needs a copy.
+      `{ ${context.bootstrap}; } 2>&1 | tee "$qc_bootstrap_log"`,
+      'status=${PIPESTATUS[0]}',
       'if [ "$status" -ne 0 ]; then',
-      '  post bootstrap-failed "{\\"exitCode\\":$status}"',
+      `  qc_message=$(tail -n ${BOOTSTRAP_TAIL_LINES} "$qc_bootstrap_log" 2>/dev/null | ${JSON_STRING_BODY})`,
+      '  post bootstrap-failed "{\\"exitCode\\":$status,\\"message\\":\\"$qc_message\\"}"',
       '  exec bash',
       'fi',
     );

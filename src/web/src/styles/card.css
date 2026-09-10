@@ -143,22 +143,40 @@
   align-items: center;
   gap: var(--sp-2);
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .session-playbook {
   flex: 0 1 auto;
-  min-width: 0;
+  min-width: 4ch;
   color: var(--paper);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* Between the five-lane floor and about 1200 px the track is too narrow for
+   the playbook, the state word, the duration and the gauge on one line, and
+   flex answers that by taking a label to zero width rather than by clipping
+   it. The gauge is the one reading that keeps meaning at the left margin of a
+   line of its own, so it is the one that moves. */
+@media (max-width: 1200px) {
+  .session-line .cache {
+    flex: 1 0 100%;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-2);
+  }
+}
+
 /* The state word gives its width up first: it is one of eight known phrases,
-   while a clipped playbook label stops saying which playbook ran. */
+   while a clipped playbook label stops saying which playbook ran. The floor is
+   what stops it giving up all of it — `text-overflow` paints nothing at zero
+   width, so without this the row signals state by colour and silhouette alone,
+   which is the one thing the design forbids. */
 .session-state {
   flex: 0 4 auto;
-  min-width: 0;
+  min-width: 5ch;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -183,14 +201,17 @@
   color: var(--lamp-moss);
 }
 
+/* A second lamp rather than a chip: the sentence it stands for is 127 px wide
+   and the track it shares is ~200 px, so as words it pushed the time reading
+   off the card. It is a half-height bar — the exited silhouette, cut down —
+   because what it says is "this state may already be over". */
 .session-stale {
   flex: none;
-  padding: 2px 6px;
-  border: 1px solid #5a4318;
-  border-radius: var(--r-chip);
-  color: var(--lamp-amber);
-  font-size: var(--fs-meta);
-  white-space: nowrap;
+  width: 9px;
+  height: 4px;
+  border: 1px solid var(--lamp-amber);
+  border-radius: 1px;
+  background: none;
 }
 
 .lamp {
