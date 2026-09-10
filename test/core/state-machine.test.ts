@@ -388,6 +388,49 @@ describe('a Notification that lags the dialog it describes', () => {
     expect(late.record.state).toBe('waiting-permission');
     expect(late.notify).toBe(true);
   });
+
+  it('opens a dialog the server never heard about, even later in the same turn', () => {
+    // The dedupe keys on a prompt id, i.e. a whole turn. A tool result that
+    // closed no dialog must not blind the Notification fallback for the rest
+    // of it, or a dialog whose PermissionRequest hook was dropped is invisible.
+    const returned = reduce(
+      makeRecord({ state: 'working', pending: null }),
+      hookEvent({ hook_event_name: 'PostToolUse', tool_name: 'Read', prompt_id: PROMPT }),
+      NOW,
+    );
+    expect(returned.record.lastToolResultPromptId ?? null).toBeNull();
+
+    const late = reduce(
+      returned.record,
+      hookEvent({
+        hook_event_name: 'Notification',
+        notification_type: 'permission_prompt',
+        prompt_id: PROMPT,
+        message: 'Claude needs your permission to run Bash',
+      }),
+      NOW + 6_000,
+    );
+
+    expect(late.record.state).toBe('waiting-permission');
+    expect(late.record.pending).toEqual({
+      kind: 'permission',
+      summary: 'Claude needs your permission to run Bash',
+    });
+    expect(late.notify).toBe(true);
+  });
+
+  it.each([
+    ['claude-exit', 'working' as const, { type: 'claude-exit', exitCode: 0 } as const],
+    ['claude-start', 'exited' as const, { type: 'claude-start', mode: 'resume' } as const],
+  ])('forgets the answered turn across a %s run boundary', (_name, state, event) => {
+    // The id names a turn of one run; carrying it into the next one leaves the
+    // dedupe resting on prompt ids never repeating, which nothing guarantees.
+    const answered = makeRecord({ state, pending: null, lastToolResultPromptId: PROMPT });
+
+    const next = reduce(answered, event, NOW);
+
+    expect(next.record.lastToolResultPromptId ?? null).toBeNull();
+  });
 });
 
 describe('SessionEnd', () => {
@@ -395,6 +438,15 @@ describe('SessionEnd', () => {
     const result = reduce(makeRecord({ state }), hookEvent({ hook_event_name: 'SessionEnd' }), NOW);
     expect(result.record.state).toBe('exited');
     expect(result.record.endedAt).toBe(NOW_ISO);
+  });
+
+  it('forgets the answered turn, which belongs to a run that has ended', () => {
+    const result = reduce(
+      makeRecord({ state: 'working', lastToolResultPromptId: 'prompt-1' }),
+      hookEvent({ hook_event_name: 'SessionEnd' }),
+      NOW,
+    );
+    expect(result.record.lastToolResultPromptId ?? null).toBeNull();
   });
 });
 
@@ -454,6 +506,21 @@ describe('SessionStart', () => {
     expect(result.record.state).toBe('idle');
     expect(result.changed).toBe(true);
     expect(result.notify).toBe(false);
+  });
+
+  it('keeps a known id when the payload carries an empty one', () => {
+    // Blanking the id would make Resume impossible for the rest of the
+    // session's life: `--resume` has nothing to name.
+    const before = makeRecord({ state: 'starting', claudeSessionId: 'abc' });
+
+    const result = reduce(
+      before,
+      hookEvent({ hook_event_name: 'SessionStart', session_id: '', source: 'startup' }),
+      NOW,
+    );
+
+    expect(result.record.claudeSessionId).toBe('abc');
+    expect(result.changed).toBe(false);
   });
 
   it('leaves a resumed session that already moved on alone', () => {

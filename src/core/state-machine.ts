@@ -404,6 +404,28 @@ function closeLastRun(runs: SessionRun[], exitCode: number | null): SessionRun[]
 }
 
 /**
+ * Serialises a value with object keys sorted and `undefined` members dropped.
+ *
+ * Two records that differ only in key order or in a field explicitly set to
+ * `undefined` produce the same string, so a comparison of the two is a test of
+ * content rather than of construction order.
+ *
+ * @param value - Value to serialise.
+ * @returns The JSON text.
+ */
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, member: unknown) => {
+    if (member === null || typeof member !== 'object' || Array.isArray(member)) return member;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(member as Record<string, unknown>).sort()) {
+      const entry = (member as Record<string, unknown>)[key];
+      if (entry !== undefined) sorted[key] = entry;
+    }
+    return sorted;
+  });
+}
+
+/**
  * Applies one event to a session record.
  *
  * Unknown or out-of-order events leave the record untouched and report
@@ -428,9 +450,7 @@ export function reduce(
     const next: SessionRecord = { ...record, ...patch };
     const stateChanged = next.state !== record.state;
     if (stateChanged) next.stateSince = now;
-    // Records are small and their key order is preserved by the spread above,
-    // so a stringify comparison is a sound "did anything move" test here.
-    if (JSON.stringify(next) === JSON.stringify(record)) return unchanged;
+    if (stableJson(next) === stableJson(record)) return unchanged;
     const entered =
       stateChanged &&
       needsYou(next.state) &&
@@ -464,6 +484,7 @@ export function reduce(
       return apply({
         state: 'starting',
         pending: null,
+        lastToolResultPromptId: null,
         endedAt: null,
         runs: [...record.runs, { startedAt: now, kind: event.mode, exitCode: null }],
       });
@@ -472,6 +493,7 @@ export function reduce(
       return apply({
         state: 'exited',
         pending: null,
+        lastToolResultPromptId: null,
         endedAt: now,
         runs: closeLastRun(record.runs, event.exitCode),
       });
@@ -512,7 +534,7 @@ export function reduce(
     }
 
     case 'SessionEnd':
-      return apply({ state: 'exited', pending: null, endedAt: now });
+      return apply({ state: 'exited', pending: null, lastToolResultPromptId: null, endedAt: now });
 
     case 'UserPromptSubmit':
       return live ? apply(busy) : unchanged;
@@ -527,7 +549,13 @@ export function reduce(
     case 'PostToolUseFailure':
     case 'PermissionDenied':
       if (!live) return unchanged;
-      return apply({ ...busy, lastToolResultPromptId: hook.prompt_id ?? null });
+      // Only a result that closed a dialog the record knew about can make a
+      // later Notification stale. Remembering the turn of every tool result
+      // would blind the Notification fallback for the rest of that turn.
+      return apply({
+        ...busy,
+        lastToolResultPromptId: record.pending === null ? null : (hook.prompt_id ?? null),
+      });
 
     case 'PermissionRequest': {
       if (!live) return unchanged;

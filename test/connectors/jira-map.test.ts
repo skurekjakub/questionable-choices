@@ -274,4 +274,35 @@ describe('adfToText', () => {
     expect(adfToText(undefined)).toBe('');
     expect(adfToText(42)).toBe('');
   });
+
+  describe('a document that is not shaped like ADF', () => {
+    // One malformed description used to take the whole board down, so every
+    // shape below must degrade to less text rather than throw.
+    it.each([
+      ['content that is a string', { type: 'doc', content: 'oops' }, ''],
+      ['content that is an object', { type: 'doc', content: { type: 'text', text: 'x' } }, ''],
+      [
+        'a child that is a scalar',
+        { type: 'doc', content: [{ type: 'paragraph', content: ['oops'] }] },
+        '',
+      ],
+      [
+        'marks that are a string',
+        {
+          type: 'doc',
+          content: [
+            { type: 'paragraph', content: [{ type: 'text', text: 'kept', marks: 'oops' }] },
+          ],
+        },
+        'kept',
+      ],
+      [
+        'a codeBlock whose content is malformed',
+        { type: 'doc', content: [{ type: 'codeBlock', content: 7 }] },
+        '```\n\n```',
+      ],
+    ])('reads %s without throwing', (_name, document, expected) => {
+      expect(adfToText(document)).toBe(expected);
+    });
+  });
 });

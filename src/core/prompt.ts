@@ -20,6 +20,10 @@ const PLACEHOLDER = /\{\{([A-Za-z0-9_]+)\}\}/g;
  */
 export function renderTemplate(template: string, variables: Record<string, string>): string {
   return template.replace(PLACEHOLDER, (match, name: string) => {
+    // `Object.prototype` supplies `constructor`, `toString` and friends, all of
+    // which the placeholder pattern matches; a bare index read would render
+    // them instead of leaving the placeholder as written.
+    if (!Object.hasOwn(variables, name)) return match;
     const value = variables[name];
     return value === undefined ? match : value;
   });

@@ -476,6 +476,27 @@ export interface Repo {
    * @throws {Error} When git cannot be run.
    */
   worktreeFor(issueKey: string): Promise<WorktreeInfo | null>;
+  /**
+   * Path this repo puts an issue's worktree at.
+   *
+   * This is the single gate on an issue key used as a path segment, so a caller
+   * that needs the path must ask for it here rather than joining it itself.
+   *
+   * @param issueKey - Key of the issue.
+   * @returns The absolute worktree path.
+   * @throws {Error} When the key is not usable as a single path segment.
+   */
+  worktreePath(issueKey: string): string;
+  /**
+   * Message from the last failed refresh of the repo's remote, or null when the
+   * last one worked, none has been attempted, or the connector never fetches.
+   *
+   * A refresh failure is not a refusal: it means the refs a checkout resolves
+   * from may be stale, which the start dialog reports as a warning.
+   *
+   * @returns The failure text, or null.
+   */
+  lastFetchError?(): string | null;
 }
 
 /**

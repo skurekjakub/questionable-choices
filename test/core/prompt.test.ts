@@ -22,6 +22,17 @@ describe('renderTemplate', () => {
   ])('%s', (_name, template, variables, expected) => {
     expect(renderTemplate(template, variables)).toBe(expected);
   });
+
+  it.each(['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__'])(
+    'leaves the inherited key %s as written rather than rendering Object.prototype',
+    (name) => {
+      expect(renderTemplate(`a {{${name}}} b`, { key: 'DOC-1' })).toBe(`a {{${name}}} b`);
+    },
+  );
+
+  it('still substitutes an inherited name that the caller really supplied', () => {
+    expect(renderTemplate('{{toString}}', { toString: 'literal' })).toBe('literal');
+  });
 });
 
 describe('slug', () => {
@@ -64,6 +75,20 @@ describe('sessionName', () => {
   ])('builds %o into %s', (parts, expected) => {
     const [prefix, key, playbook] = parts as [string, string, string];
     expect(sessionName(prefix, key, playbook)).toBe(expected);
+  });
+
+  it.each([
+    ['20260909T221530', 'qc-DOC-1-implement-20260909T221530'],
+    ['2026-09-09T22:15:30', 'qc-DOC-1-implement-2026-09-09T22-15-30'],
+  ])(
+    'appends the suffix %s so a second run gets its own record and event log',
+    (suffix, expected) => {
+      expect(sessionName('qc', 'DOC-1', 'implement', suffix)).toBe(expected);
+    },
+  );
+
+  it('ignores an empty suffix', () => {
+    expect(sessionName('qc', 'DOC-1', 'implement', '')).toBe('qc-DOC-1-implement');
   });
 });
 

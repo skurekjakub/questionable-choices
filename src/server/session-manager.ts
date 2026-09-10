@@ -635,7 +635,18 @@ export class SessionManager {
       branch = known.branch;
       worktree = known.path;
     } else {
-      worktree = join(runtime.repoConfig.worktreeDir, issueKey);
+      // The connector owns the key gate, so the path is asked for rather than
+      // rebuilt here: a key that would escape `worktreeDir` is refused before
+      // it reaches the prompt.
+      try {
+        worktree = runtime.repo.worktreePath(issueKey);
+      } catch (cause) {
+        throw new ActionError(
+          400,
+          `cannot prefill ${playbookId} for ${issueKey}`,
+          messageOf(cause),
+        );
+      }
       branch =
         playbook.isolation === 'worktree'
           ? branchName(runtime.repoConfig.branchPattern, issue)
@@ -644,6 +655,12 @@ export class SessionManager {
         warnings.push(
           `no worktree is registered for ${issueKey}; its branch is resolved when the session starts`,
         );
+      }
+    }
+    if (playbook.isolation !== 'shared') {
+      const fetchError = runtime.repo.lastFetchError?.() ?? null;
+      if (fetchError !== null) {
+        warnings.push(`the repo's refs may be stale: ${fetchError}`);
       }
     }
 
