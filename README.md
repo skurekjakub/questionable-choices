@@ -72,7 +72,9 @@ Edit the config (or set `QC_CONFIG` to another path). Four blocks:
   API token.
 - `repos` — checkout path, where worktrees go, base ref, bootstrap command,
   playbooks.
-- `workspaces` — one per epic: name, epic key, which connector, which repo.
+- `workspaces` — one per epic: name, epic key, which connector, which repo, and
+  an optional `checklist` of item texts, shown in the issue drawer as a private
+  per-issue checklist that never reaches Jira.
 - `editor` — the command behind the "Open in VS Code" button. On WSL that is
   `cmd.exe /c code --remote wsl+<distro> {{path}}`.
 

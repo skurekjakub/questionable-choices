@@ -9,6 +9,7 @@ import {
 import { MissingExecutableError } from '../connectors/runners/claude-tmux/index.js';
 import type {
   BoardView,
+  ChecklistResponse,
   CreateSessionRequest,
   CreateWorkspaceRequest,
   ErrorReason,
@@ -18,11 +19,13 @@ import type {
   PublicConfigResponse,
   RemoveWorktreeResponse,
   SessionEventsResponse,
+  SetChecklistRequest,
   WireSessionRecord,
   WorkspaceSummary,
 } from '../core/api.js';
 import { CACHE_TTL_1H_SECONDS, CACHE_TTL_5M_SECONDS } from '../core/cache-clock.js';
 import {
+  ConfigError,
   applyWorkspaceChange,
   checkEnvironment,
   removeWorkspace,
@@ -1155,6 +1158,55 @@ export class SessionManager {
     const flags = await this.store.setFlags(workspaceId, issueKey, patch);
     this.scheduleBoard(workspaceId);
     return flags;
+  }
+
+  /**
+   * Reads one issue's private checklist.
+   *
+   * @param workspaceId - Workspace the issue belongs to.
+   * @param issueKey - Key of the issue.
+   * @returns One item per entry of the workspace's template, in template order;
+   *   no items at all when the workspace offers no checklist.
+   * @throws {ActionError} When the workspace is unknown.
+   */
+  async checklist(workspaceId: string, issueKey: string): Promise<ChecklistResponse> {
+    const runtime = this.requireWorkspace(workspaceId);
+    return { items: this.store.checklist(workspaceId, issueKey, runtime.config.checklist) };
+  }
+
+  /**
+   * Ticks or unticks one item of an issue's private checklist.
+   *
+   * @param workspaceId - Workspace the issue belongs to.
+   * @param issueKey - Key of the issue.
+   * @param request - Item to change and whether it is now ticked.
+   * @returns The issue's checklist after the change.
+   * @throws {ActionError} When the workspace is unknown.
+   * @throws {ConfigError} When the workspace's template does not name the label.
+   */
+  async setChecklist(
+    workspaceId: string,
+    issueKey: string,
+    request: SetChecklistRequest,
+  ): Promise<ChecklistResponse> {
+    const runtime = this.requireWorkspace(workspaceId);
+    const template = runtime.config.checklist;
+    if (!template.includes(request.label)) {
+      throw new ConfigError('Invalid checklist request', [
+        {
+          path: 'label',
+          message: `'${request.label}' is not on the checklist of workspace '${workspaceId}'`,
+        },
+      ]);
+    }
+    const items = await this.store.setChecklist(
+      workspaceId,
+      issueKey,
+      template,
+      request.label,
+      request.done,
+    );
+    return { items };
   }
 
   /**

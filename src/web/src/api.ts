@@ -1,5 +1,6 @@
 import type {
   BoardView,
+  ChecklistResponse,
   CreateSessionRequest,
   ConfigIssue,
   CreateWorkspaceRequest,
@@ -11,6 +12,7 @@ import type {
   RemoveWorktreeResponse,
   SessionAction,
   SessionEventsResponse,
+  SetChecklistRequest,
   SetFlagsRequest,
   WorkspaceSummary,
 } from '../../core/api.js';
@@ -114,6 +116,18 @@ async function post(path: string, body?: unknown): Promise<unknown> {
     method: 'POST',
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
+}
+
+/**
+ * Sends a PUT with a JSON body.
+ *
+ * @param path - Path below the origin.
+ * @param body - Value serialised as the request body.
+ * @returns The parsed response body.
+ * @throws {ApiError} When the server refuses the request.
+ */
+async function put(path: string, body: unknown): Promise<unknown> {
+  return request(path, { method: 'PUT', body: JSON.stringify(body) });
 }
 
 /**
@@ -238,6 +252,38 @@ export async function setFlags(
 ): Promise<IssueFlags> {
   const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(key)}/flags`;
   return (await post(path, body)) as IssueFlags;
+}
+
+/**
+ * Fetches the issue's private checklist.
+ *
+ * @param workspaceId - Id of the workspace the issue belongs to.
+ * @param key - Tracker key of the issue.
+ * @returns The checklist; no items when the workspace offers none.
+ * @throws {ApiError} When the server refuses the request.
+ */
+export async function getChecklist(workspaceId: string, key: string): Promise<ChecklistResponse> {
+  const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(key)}/checklist`;
+  return (await request(path)) as ChecklistResponse;
+}
+
+/**
+ * Ticks or unticks one item of the issue's private checklist.
+ *
+ * @param workspaceId - Id of the workspace the issue belongs to.
+ * @param key - Tracker key of the issue.
+ * @param body - Item to change and whether it is now ticked.
+ * @returns The whole checklist after the change.
+ * @throws {ApiError} With status 400 when the workspace's template does not
+ * name the label.
+ */
+export async function setChecklistItem(
+  workspaceId: string,
+  key: string,
+  body: SetChecklistRequest,
+): Promise<ChecklistResponse> {
+  const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/issues/${encodeURIComponent(key)}/checklist`;
+  return (await put(path, body)) as ChecklistResponse;
 }
 
 /**

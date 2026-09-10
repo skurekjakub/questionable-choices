@@ -9,7 +9,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { SessionEventLogEntry } from '../core/api.js';
+import type { ChecklistItem, SessionEventLogEntry } from '../core/api.js';
 import { SESSION_STATES, type IssueFlags, type SessionRecord } from '../core/types.js';
 import { messageOf } from './util.js';
 
@@ -33,9 +33,37 @@ export type FlagsByWorkspace = Record<string, Record<string, IssueFlags>>;
  */
 export type WorktreesByRepo = Record<string, Record<string, WorktreeRecord>>;
 
+/**
+ * Ticked checklist items of one issue, keyed by the item's own text.
+ *
+ * Only ticks are stored: an item the owner has not ticked, or has unticked, is
+ * absent rather than present with `false`.
+ */
+export type ChecklistTicks = Record<string, true>;
+
+/**
+ * Every issue's ticks, keyed by `<workspaceId>/<issueKey>`.
+ */
+export type ChecklistsByIssue = Record<string, ChecklistTicks>;
+
 const SESSIONS_FILE = 'sessions.json';
 const FLAGS_FILE = 'flags.json';
 const WORKTREES_FILE = 'worktrees.json';
+const CHECKLISTS_FILE = 'checklists.json';
+
+/**
+ * Builds the key one issue's checklist ticks are stored under.
+ *
+ * @param workspaceId - Workspace the issue belongs to.
+ * @param issueKey - Key of the issue.
+ * @returns The `<workspaceId>/<issueKey>` key.
+ */
+export function checklistKey(workspaceId: string, issueKey: string): string {
+  // A workspace id may not contain a slash (`config.ts` enforces it), so the
+  // first slash always separates the two halves and no two pairs share a key —
+  // whatever the issue key holds.
+  return `${workspaceId}/${issueKey}`;
+}
 
 /**
  * Longest string kept from a raw hook payload in the event log, in characters.
@@ -306,8 +334,8 @@ function coerceObject<T>(value: unknown): T | null {
 }
 
 /**
- * Durable state of the dashboard: session records, issue flags and the
- * checkouts it created, plus the per-session raw event log.
+ * Durable state of the dashboard: session records, issue flags, private issue
+ * checklists and the checkouts it created, plus the per-session raw event log.
  *
  * Every mutator writes its whole file through a temporary file and a rename,
  * and writes to one file are serialised, so a crash mid-write leaves the
@@ -320,6 +348,7 @@ export class Store {
   private records: SessionRecord[] = [];
   private flags: FlagsByWorkspace = {};
   private worktrees: WorktreesByRepo = {};
+  private checklists: ChecklistsByIssue = {};
   private queue: Promise<void> = Promise.resolve();
   private readonly eventDirsMade = new Set<string>();
   private readonly warn: StoreWarn;
@@ -383,6 +412,12 @@ export class Store {
     );
     this.worktrees = await readJson<WorktreesByRepo>(
       this.path(WORKTREES_FILE),
+      {},
+      coerceObject,
+      this.warn,
+    );
+    this.checklists = await readJson<ChecklistsByIssue>(
+      this.path(CHECKLISTS_FILE),
       {},
       coerceObject,
       this.warn,
@@ -559,6 +594,70 @@ export class Store {
       }
     });
     return merged;
+  }
+
+  /**
+   * One issue's checklist, projected onto a template.
+   *
+   * A tick whose item the template no longer names is dropped from the answer
+   * and left in the document: nothing rewrites the file on a read, so an item
+   * that comes back into the template brings its tick back with it.
+   *
+   * @param workspaceId - Workspace the issue belongs to.
+   * @param issueKey - Key of the issue.
+   * @param template - Item texts the workspace offers, in display order.
+   * @returns One item per template entry, in template order.
+   */
+  checklist(workspaceId: string, issueKey: string, template: readonly string[]): ChecklistItem[] {
+    const ticks = this.checklists[checklistKey(workspaceId, issueKey)] ?? {};
+    return template.map((label) => ({ label, done: ticks[label] === true }));
+  }
+
+  /**
+   * Ticks or unticks one checklist item and persists the file.
+   *
+   * An item set back to false is removed rather than stored, so
+   * `checklists.json` holds only the ticks the owner actually set.
+   *
+   * @param workspaceId - Workspace the issue belongs to.
+   * @param issueKey - Key of the issue whose checklist changes.
+   * @param template - Item texts the workspace offers, in display order; the
+   *   caller is the one that refuses a label the template does not name.
+   * @param label - Item to tick or untick.
+   * @param done - Whether the item is now ticked.
+   * @returns The issue's checklist after the change, projected onto `template`.
+   * @throws {Error} When the file cannot be written.
+   */
+  async setChecklist(
+    workspaceId: string,
+    issueKey: string,
+    template: readonly string[],
+    label: string,
+    done: boolean,
+  ): Promise<ChecklistItem[]> {
+    const key = checklistKey(workspaceId, issueKey);
+    let items!: ChecklistItem[];
+    // Memory is changed inside the queued work, so the object the write
+    // serialises is the object as it is at that instant. Ticking before the
+    // queue drains would let a later write carry a tick this one had failed on
+    // and undone, and the owner told the tick was refused would find it back on
+    // the next boot.
+    await this.enqueue(async () => {
+      const previous = this.checklists[key];
+      const merged: ChecklistTicks = { ...(previous ?? {}) };
+      if (done) merged[label] = true;
+      else delete merged[label];
+      this.checklists[key] = merged;
+      try {
+        await writeJsonAtomic(this.path(CHECKLISTS_FILE), this.checklists);
+      } catch (cause) {
+        if (previous === undefined) delete this.checklists[key];
+        else this.checklists[key] = previous;
+        throw cause;
+      }
+      items = template.map((entry) => ({ label: entry, done: merged[entry] === true }));
+    });
+    return items;
   }
 
   /**

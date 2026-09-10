@@ -4,11 +4,13 @@ import { join } from 'node:path';
 import { Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type {
+  ConfigIssue,
   CreateSessionRequest,
   CreateWorkspaceRequest,
   ErrorResponse,
   NewConnectorRequest,
   RemoveWorktreeRequest,
+  SetChecklistRequest,
   SetFlagsRequest,
 } from '../core/api.js';
 import { ConfigError } from '../core/config.js';
@@ -127,6 +129,28 @@ function createWorkspaceRequestOf(body: Record<string, unknown>): CreateWorkspac
 }
 
 /**
+ * Reads the checklist change a `PUT .../checklist` body describes.
+ *
+ * @param body - The parsed body.
+ * @returns The request.
+ * @throws {ConfigError} When either field is missing or the wrong type, with one
+ *   issue per offending field so a UI can place it.
+ */
+function setChecklistRequestOf(body: Record<string, unknown>): SetChecklistRequest {
+  const issues: ConfigIssue[] = [];
+  const label = body['label'];
+  const done = body['done'];
+  if (typeof label !== 'string' || label === '') {
+    issues.push({ path: 'label', message: 'label must be a non-empty string' });
+  }
+  if (typeof done !== 'boolean') {
+    issues.push({ path: 'done', message: 'done must be a boolean' });
+  }
+  if (issues.length > 0) throw new ConfigError('Invalid checklist request', issues);
+  return { label: label as string, done: done as boolean };
+}
+
+/**
  * Builds the Hono app: REST routes, hook ingress, WebSocket endpoints and the
  * built SPA with a history-mode fallback.
  *
@@ -213,6 +237,16 @@ export function createApp(deps: AppDeps): Hono {
       ...(typeof body['done'] === 'boolean' ? { done: body['done'] } : {}),
     };
     return c.json(await manager.setFlags(c.req.param('id'), c.req.param('key'), patch));
+  });
+
+  app.get('/api/workspaces/:id/issues/:key/checklist', async (c) =>
+    c.json(await manager.checklist(c.req.param('id'), c.req.param('key'))),
+  );
+
+  app.put('/api/workspaces/:id/issues/:key/checklist', async (c) => {
+    const body = (await readJsonObject(c)) ?? {};
+    const request = setChecklistRequestOf(body);
+    return c.json(await manager.setChecklist(c.req.param('id'), c.req.param('key'), request));
   });
 
   app.post('/api/workspaces/:id/issues/:key/open-editor', async (c) => {

@@ -94,6 +94,7 @@ export function makeWorkspace(overrides: Partial<WorkspaceConfig> = {}): Workspa
     connector: 'tracker',
     repo: 'app',
     reviewStatuses: ['Ready for review'],
+    checklist: [],
     pollSeconds: 120,
     ...overrides,
   };

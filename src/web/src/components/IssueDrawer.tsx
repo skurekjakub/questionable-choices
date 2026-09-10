@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import type {
   Card,
+  ChecklistItem,
   IssueDetailResponse,
   PlaybookSummary,
   SessionAction,
 } from '../../../core/api.js';
 import {
   errorMessage,
+  getChecklist,
   getIssue,
   isForceableRemoval,
   openEditor,
   removeWorktree,
   sessionAction,
+  setChecklistItem,
 } from '../api.js';
 import { attachCommand, timeInState, typeGlyph } from '../format.js';
 import { useFocusTrap } from '../hooks/useFocusTrap.js';
@@ -216,6 +219,9 @@ export function IssueDrawer({
   onOpenSession: (sessionId: string) => void;
 }): JSX.Element {
   const [detail, setDetail] = useState<IssueDetailResponse | null>(null);
+  const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
+  const [checklistError, setChecklistError] = useState<string | null>(null);
+  const [toggling, setToggling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -241,6 +247,19 @@ export function IssueDrawer({
         if (loadToken.current !== token) return;
         setError(errorMessage(cause));
         setLoadFailed(true);
+      });
+    getChecklist(workspaceId, card.issue.key)
+      .then((next) => {
+        if (loadToken.current !== token) return;
+        setChecklist(next.items);
+        setChecklistError(null);
+      })
+      .catch(() => {
+        // A checklist that cannot be read leaves the section out, which is what
+        // a workspace with no template looks like too; the drawer's own error
+        // note belongs to the issue, and the checklist is not the issue.
+        if (loadToken.current !== token) return;
+        setChecklist([]);
       });
   }, [workspaceId, card.issue.key]);
 
@@ -281,6 +300,31 @@ export function IssueDrawer({
         setForceTarget(isForceableRemoval(cause) ? sessionId : null);
       })
       .finally(() => setBusy(false));
+  };
+
+  const toggleChecklist = (label: string, done: boolean): void => {
+    const before = checklist;
+    // The tick lands before the PUT answers, so the box never lags the click;
+    // a refusal puts the whole list back, because the server's answer is the
+    // only thing that says what the checklist now is.
+    setChecklist(before.map((item) => (item.label === label ? { ...item, done } : item)));
+    setChecklistError(null);
+    setToggling(label);
+    const token = loadToken.current;
+    setChecklistItem(workspaceId, card.issue.key, { label, done })
+      .then((next) => {
+        if (loadToken.current !== token) return;
+        setChecklist(next.items);
+      })
+      .catch((cause: unknown) => {
+        if (loadToken.current !== token) return;
+        setChecklist(before);
+        setChecklistError(errorMessage(cause));
+      })
+      .finally(() => {
+        if (loadToken.current !== token) return;
+        setToggling(null);
+      });
   };
 
   const labelFor = (playbookId: string): string =>
@@ -360,6 +404,36 @@ export function IssueDrawer({
               <p className="empty">Loading the description.</p>
             )}
           </section>
+
+          {checklist.length === 0 ? null : (
+            <section className="section">
+              <h3>Checklist</h3>
+              {checklistError === null ? null : (
+                <p className="error-note" role="alert">
+                  {checklistError}
+                </p>
+              )}
+              <ul className="checklist">
+                {checklist.map((item) => (
+                  <li key={item.label}>
+                    <label className="checklist-item">
+                      <input
+                        type="checkbox"
+                        checked={item.done}
+                        disabled={toggling !== null}
+                        onChange={(event) => toggleChecklist(item.label, event.target.checked)}
+                      />
+                      <span
+                        className={item.done ? 'checklist-text checklist-done' : 'checklist-text'}
+                      >
+                        {item.label}
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           <section className="section">
             <h3>Checkout</h3>

@@ -5,6 +5,7 @@ import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type {
   BoardView,
+  ChecklistResponse,
   ErrorResponse,
   EventFrame,
   IssueDetailResponse,
@@ -57,6 +58,22 @@ async function post(app: Hono, path: string, body?: unknown): Promise<Response> 
 }
 
 /**
+ * Puts a JSON body to a route.
+ *
+ * @param app - App under test.
+ * @param path - Route path.
+ * @param body - Body to send.
+ * @returns The response.
+ */
+async function put(app: Hono, path: string, body: unknown): Promise<Response> {
+  return app.request(path, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
  * Reads one session's current state through the issue drawer.
  *
  * @param app - App under test.
@@ -73,6 +90,7 @@ async function stateOf(app: Hono, sessionId: string): Promise<string | undefined
 describe('HTTP API', () => {
   let dir: string;
   let configPath: string;
+  let config: Config;
   let app: Hono;
   let runner: FakeRunner;
   let repo: FakeRepo;
@@ -84,7 +102,7 @@ describe('HTTP API', () => {
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'qc-app-'));
     configPath = join(dir, 'config.json');
-    const config = makeConfig(dir);
+    config = makeConfig(dir);
     store = new Store(dir);
     await store.load();
     runner = new FakeRunner();
@@ -365,6 +383,99 @@ describe('HTTP API', () => {
   it('sets issue flags and reports them back', async () => {
     const response = await post(app, '/api/workspaces/ws/issues/DOC-1/flags', { review: true });
     expect(await response.json()).toEqual({ review: true });
+  });
+
+  describe('the checklist routes', () => {
+    const TEMPLATE = ['Read the issue live', 'npm run verify is green'];
+
+    /**
+     * Gives the app's one workspace a checklist template.
+     *
+     * @returns Nothing.
+     * @throws {Error} When the test config has no workspace to install it on.
+     */
+    const installChecklist = (): void => {
+      const workspace = config.workspaces['ws'];
+      if (workspace === undefined) throw new Error('the test config has no workspace ws');
+      workspace.checklist = TEMPLATE;
+    };
+
+    it('answers 200 with an empty list for a workspace that offers no checklist', async () => {
+      const response = await app.request('/api/workspaces/ws/issues/DOC-1/checklist');
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ items: [] });
+    });
+
+    it('answers 200 with the template and 404 for an unknown workspace', async () => {
+      installChecklist();
+      const response = await app.request('/api/workspaces/ws/issues/DOC-1/checklist');
+      expect(response.status).toBe(200);
+      expect((await response.json()) as ChecklistResponse).toEqual({
+        items: TEMPLATE.map((label) => ({ label, done: false })),
+      });
+      expect((await app.request('/api/workspaces/ghost/issues/DOC-1/checklist')).status).toBe(404);
+    });
+
+    it('answers 200 with the ticked checklist and reads it back', async () => {
+      installChecklist();
+      const response = await put(app, '/api/workspaces/ws/issues/DOC-1/checklist', {
+        label: 'npm run verify is green',
+        done: true,
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()) as ChecklistResponse).toEqual({
+        items: [
+          { label: 'Read the issue live', done: false },
+          { label: 'npm run verify is green', done: true },
+        ],
+      });
+      const reread = await app.request('/api/workspaces/ws/issues/DOC-1/checklist');
+      expect((await reread.json()) as ChecklistResponse).toEqual({
+        items: [
+          { label: 'Read the issue live', done: false },
+          { label: 'npm run verify is green', done: true },
+        ],
+      });
+    });
+
+    it('answers 400 with an issue naming the field for a label off the template', async () => {
+      installChecklist();
+      const response = await put(app, '/api/workspaces/ws/issues/DOC-1/checklist', {
+        label: 'Ship it',
+        done: true,
+      });
+      expect(response.status).toBe(400);
+      expect((await response.json()) as ErrorResponse).toMatchObject({
+        issues: [{ path: 'label' }],
+      });
+    });
+
+    it.each([
+      ['a missing label', { done: true }, 'label', 'label must be a non-empty string'],
+      ['an empty label', { label: '', done: true }, 'label', 'label must be a non-empty string'],
+      [
+        'a label that is not a string',
+        { label: 7, done: true },
+        'label',
+        'label must be a non-empty string',
+      ],
+      ['a missing done', { label: 'Read the issue live' }, 'done', 'done must be a boolean'],
+      [
+        'a done that is not a boolean',
+        { label: 'Read the issue live', done: 'yes' },
+        'done',
+        'done must be a boolean',
+      ],
+    ])('answers 400 for %s, against the field itself', async (_name, body, path, message) => {
+      installChecklist();
+      const response = await put(app, '/api/workspaces/ws/issues/DOC-1/checklist', body);
+      expect(response.status).toBe(400);
+      const refusal = (await response.json()) as ErrorResponse;
+      // The message has to be the one about the shape of the body, not the
+      // manager's "that item is not on the checklist": a field the request
+      // never sent is not a field the owner got wrong.
+      expect(refusal.issues).toContainEqual({ path, message });
+    });
   });
 
   it('answers open-editor with 204 once a checkout exists and 409 before', async () => {

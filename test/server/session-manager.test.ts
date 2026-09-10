@@ -689,6 +689,85 @@ describe('SessionManager', () => {
     });
   });
 
+  describe('checklist', () => {
+    const TEMPLATE = ['Read the issue live', 'npm run verify is green'];
+
+    /**
+     * Gives the harness's one workspace a checklist template.
+     *
+     * @param items - Template to install, in display order.
+     * @returns Nothing.
+     * @throws {Error} When the harness config has no workspace to install it on.
+     */
+    const installChecklist = (items: string[]): void => {
+      const workspace = h.config.workspaces['ws'];
+      if (workspace === undefined) throw new Error('the harness config has no workspace ws');
+      workspace.checklist = items;
+    };
+
+    it('answers no items when the workspace offers no checklist', async () => {
+      expect(await h.manager.checklist('ws', 'DOC-1')).toEqual({ items: [] });
+    });
+
+    it('answers one unticked item per template entry, in template order', async () => {
+      installChecklist(TEMPLATE);
+      expect(await h.manager.checklist('ws', 'DOC-1')).toEqual({
+        items: [
+          { label: 'Read the issue live', done: false },
+          { label: 'npm run verify is green', done: false },
+        ],
+      });
+    });
+
+    it('ticks an item and reports the whole checklist back', async () => {
+      installChecklist(TEMPLATE);
+      const response = await h.manager.setChecklist('ws', 'DOC-1', {
+        label: 'npm run verify is green',
+        done: true,
+      });
+      expect(response).toEqual({
+        items: [
+          { label: 'Read the issue live', done: false },
+          { label: 'npm run verify is green', done: true },
+        ],
+      });
+      expect(await h.manager.checklist('ws', 'DOC-1')).toEqual(response);
+    });
+
+    it('keeps one issue’s ticks off another issue', async () => {
+      installChecklist(TEMPLATE);
+      await h.manager.setChecklist('ws', 'DOC-1', { label: 'Read the issue live', done: true });
+      expect(await h.manager.checklist('ws', 'DOC-2')).toEqual({
+        items: TEMPLATE.map((label) => ({ label, done: false })),
+      });
+    });
+
+    it('refuses a label the template does not name, against the label field', async () => {
+      installChecklist(TEMPLATE);
+      await expect(
+        h.manager.setChecklist('ws', 'DOC-1', { label: 'Ship it', done: true }),
+      ).rejects.toMatchObject({
+        name: 'ConfigError',
+        issues: [{ path: 'label', message: expect.stringContaining('Ship it') }],
+      });
+    });
+
+    it('writes nothing for a label the template does not name', async () => {
+      installChecklist(TEMPLATE);
+      await expect(
+        h.manager.setChecklist('ws', 'DOC-1', { label: 'Ship it', done: true }),
+      ).rejects.toThrow();
+      await expect(readFile(join(h.dir, 'checklists.json'), 'utf8')).rejects.toThrow();
+    });
+
+    it('answers 404 for an unknown workspace on both routes', async () => {
+      await expect(h.manager.checklist('nope', 'DOC-1')).rejects.toMatchObject({ status: 404 });
+      await expect(
+        h.manager.setChecklist('nope', 'DOC-1', { label: 'Read the issue live', done: true }),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
   describe('open-editor', () => {
     it('refuses when the issue has no checkout', async () => {
       await expect(h.manager.openEditor('ws', 'DOC-1')).rejects.toMatchObject({ status: 409 });
