@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../src/web/src/api.js';
-import { AddWorkspaceDialog } from '../../src/web/src/components/AddWorkspaceDialog.js';
+import {
+  AddWorkspaceDialog,
+  STILL_ADDING_SENTENCE,
+} from '../../src/web/src/components/AddWorkspaceDialog.js';
 
 vi.mock('../../src/web/src/api.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/web/src/api.js')>()),
@@ -184,6 +187,44 @@ describe('AddWorkspaceDialog', () => {
     expect(closed).toBe(0);
     expect(screen.queryByText(/Closing discards it/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Adding' })).toBeTruthy();
+  });
+
+  it('lets a second dismissal abandon a create request that never answers', async () => {
+    // Nothing lowers `saving` for a request the server accepts and never
+    // answers, and every way out routes through the same guard, so a first
+    // dismissal that only refuses would seal the dialog until a reload.
+    let closed = 0;
+    let refuse: ((cause: unknown) => void) | null = null;
+    vi.mocked(createWorkspace).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        }),
+    );
+    open(() => {
+      closed += 1;
+    });
+    type('Name', 'Docs Next');
+    type('Epic key', 'DOC-3807');
+    fireEvent.click(screen.getByRole('button', { name: 'Add workspace' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Adding' })).toBeTruthy());
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(closed).toBe(0);
+    expect(screen.getByText(STILL_ADDING_SENTENCE)).toBeTruthy();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(closed).toBe(1);
+    // The dismissal is not the discard confirmation: there is nothing left to
+    // keep, because the dialog is going whatever the request answers.
+    expect(screen.queryByText(/Closing discards it/)).toBeNull();
+
+    // The workspace is still created; what the owner abandoned is waiting for
+    // the answer, so nothing it says lands in a dialog they have dismissed.
+    await act(async () => {
+      refuse?.(new Error('the epic could not be read'));
+    });
+    expect(screen.queryByText(/the epic could not be read/)).toBeNull();
   });
 
   it('hands focus on when the button holding it unmounts itself', () => {

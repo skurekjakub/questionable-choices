@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type JSX } from 'react';
+import { useCallback, useEffect, useRef, useState, type JSX } from 'react';
 import { Board } from './components/Board.js';
 import { SessionView } from './components/SessionView.js';
 import { useBoard } from './hooks/useBoard.js';
@@ -111,15 +111,23 @@ export function App(): JSX.Element {
   const onSessionRoute = sessionId !== null;
 
   // A workspace the session route resolved is on screen without being the
-  // owner's choice, so leaving that route puts the remembered board back —
-  // otherwise the switcher and the next cold start disagree about which epic
-  // the dashboard is showing.
+  // owner's choice, so leaving that route puts back the board a cold start
+  // would open — the remembered one, or the first when nothing was ever
+  // remembered. Otherwise the switcher and the next cold start disagree about
+  // which epic the dashboard is showing.
+  const wasOnSessionRoute = useRef(onSessionRoute);
   useEffect(() => {
-    if (onSessionRoute || config === null) return;
+    if (config === null) return;
+    // Only the transition off the route restores: firing on every later
+    // configuration would take the board back off an owner who has since
+    // picked another one from the switcher.
+    const left = wasOnSessionRoute.current && !onSessionRoute;
+    wasOnSessionRoute.current = onSessionRoute;
+    if (!left) return;
     const remembered = readRememberedWorkspace();
-    if (remembered === null) return;
-    if (!config.workspaces.some((workspace) => workspace.id === remembered)) return;
-    setWorkspaceId(remembered);
+    const known =
+      remembered !== null && config.workspaces.some((workspace) => workspace.id === remembered);
+    setWorkspaceId(known ? remembered : (config.workspaces[0]?.id ?? null));
   }, [onSessionRoute, config]);
 
   const board = useBoard(workspaceId);

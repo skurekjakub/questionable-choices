@@ -27,6 +27,12 @@ const DEFAULT_REVIEW_STATUSES = 'Ready for review';
 const NEW_CONNECTOR = '__new__';
 
 /**
+ * What a dismissal refused over the create request tells the owner.
+ */
+export const STILL_ADDING_SENTENCE =
+  'The workspace is still being added, so the dialog is holding on for the answer. Dismiss it again to leave without one.';
+
+/**
  * Attributes a control carries while the server holds it at fault.
  */
 interface FaultAttributes {
@@ -60,7 +66,9 @@ function FieldNote({ id, message }: { id: string; message: string | null }): JSX
  * Validation problems are placed against the field their path names; anything
  * that names no field stays in the dialog's error note. Once anything has been
  * filled in, dismissing the dialog asks for confirmation rather than throwing
- * the form away.
+ * the form away. A dismissal over the create request is refused once and
+ * honoured the second time, which abandons the request: the workspace is still
+ * created, and its answer is dropped rather than acted on.
  *
  * @param props - Component props.
  * @param props.repos - Repos configured in the file, which the UI cannot add to.
@@ -92,11 +100,13 @@ export function AddWorkspaceDialog({
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<ConfigIssue[]>([]);
   const [saving, setSaving] = useState(false);
+  const [refusedDismissal, setRefusedDismissal] = useState(false);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const prefix = useId();
   const keepEditing = useRef<HTMLButtonElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   const wasConfirming = useRef(false);
+  const abandoned = useRef(false);
 
   // Only typing counts. A select is never blank, so "changed from its default"
   // is not work worth confirming away: picking the other repo and picking the
@@ -117,8 +127,19 @@ export function AddWorkspaceDialog({
   const requestClose = useCallback(() => {
     // The workspace is created whether or not this dialog is on screen, so
     // closing over the request in flight loses the 201 that would select it and
-    // the 400 that would name the field to fix.
-    if (saving) return;
+    // the 400 that would name the field to fix. Nothing lowers `saving` for a
+    // request that never answers, though, and every way out routes through
+    // here: the second dismissal abandons the request rather than sealing the
+    // dialog until the tab is reloaded.
+    if (saving) {
+      if (!refusedDismissal) {
+        setRefusedDismissal(true);
+        return;
+      }
+      abandoned.current = true;
+      onClose();
+      return;
+    }
     if (confirmingDiscard) {
       setConfirmingDiscard(false);
       return;
@@ -128,7 +149,7 @@ export function AddWorkspaceDialog({
       return;
     }
     onClose();
-  }, [saving, confirmingDiscard, dirty, onClose]);
+  }, [saving, refusedDismissal, confirmingDiscard, dirty, onClose]);
   const dialog = useFocusTrap<HTMLDivElement>(requestClose);
 
   // The confirmation is announced from a live region; without moving focus a
@@ -239,14 +260,21 @@ export function AddWorkspaceDialog({
         : { connector }),
       ...(statuses.length > 0 ? { reviewStatuses: statuses } : {}),
     };
+    abandoned.current = false;
+    setRefusedDismissal(false);
     setSaving(true);
     createWorkspace(body)
-      .then(onAdded)
+      .then((workspace) => {
+        if (!abandoned.current) onAdded(workspace);
+      })
       .catch((cause: unknown) => {
+        if (abandoned.current) return;
         setError(errorHeadline(cause));
         setIssues(cause instanceof ApiError ? cause.issues : []);
       })
-      .finally(() => setSaving(false));
+      .finally(() => {
+        if (!abandoned.current) setSaving(false);
+      });
   };
 
   return (
@@ -277,6 +305,13 @@ export function AddWorkspaceDialog({
         </div>
 
         <div className="dialog-body">
+          {/* The live region is mounted empty and filled later: a region that
+              arrives with its content already in it announces nothing. */}
+          <div role="status">
+            {refusedDismissal && saving ? (
+              <p className="empty empty-inline">{STILL_ADDING_SENTENCE}</p>
+            ) : null}
+          </div>
           <div className="dialog-grid">
             <label className="field">
               <span>Name</span>

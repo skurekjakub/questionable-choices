@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../src/web/src/api.js';
 import { SessionView } from '../../src/web/src/components/SessionView.js';
@@ -84,10 +84,14 @@ afterEach(() => {
 describe('SessionView terminal boundary', () => {
   it('degrades to the attach command when the terminal chunk cannot be loaded', async () => {
     open();
-    await waitFor(() => expect(screen.getByText(/The terminal could not be loaded/)).toBeTruthy());
+    const notice = await screen.findByText(/The terminal could not be loaded/);
     // The command is the whole point of the scoped boundary: it does the same
-    // job as the terminal it is standing in for.
-    expect(screen.getAllByText('tmux attach -t qc-DOC-1-implement').length).toBeGreaterThan(0);
+    // job as the terminal it is standing in for. The session header renders the
+    // same command, so the assertion is scoped to the panel that replaced the
+    // terminal — otherwise the header alone satisfies it.
+    const host = notice.closest('.terminal-host');
+    expect(host).not.toBeNull();
+    expect(within(host as HTMLElement).getByText('tmux attach -t qc-DOC-1-implement')).toBeTruthy();
     // A whole-dashboard panel here would take the board and the event socket
     // down over one missing chunk.
     expect(screen.queryByText(/The dashboard stopped rendering/)).toBeNull();

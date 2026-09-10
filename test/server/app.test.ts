@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type {
   BoardView,
   ErrorResponse,
+  EventFrame,
   IssueDetailResponse,
   PrefillResponse,
   PublicConfigResponse,
@@ -77,13 +78,14 @@ describe('HTTP API', () => {
   let repo: FakeRepo;
   let source: FakeIssueSource;
   let manager: SessionManager;
+  let store: Store;
   let editorCalls: Array<{ command: string; args: string[] }>;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'qc-app-'));
     configPath = join(dir, 'config.json');
     const config = makeConfig(dir);
-    const store = new Store(dir);
+    store = new Store(dir);
     await store.load();
     runner = new FakeRunner();
     source = new FakeIssueSource('ws', [makeIssue({ description: 'the full description' })]);
@@ -258,6 +260,37 @@ describe('HTTP API', () => {
     expect(again.status).toBe(409);
     const body = (await again.json()) as ErrorResponse;
     expect(body.error).toContain('DOC-1');
+  });
+
+  it('keeps lastEventAt off the wire, on the drawer and on the session frame', async () => {
+    // `WireSessionRecord` is `Omit<…>`, which is a compile-time type: nothing
+    // deletes the property, so a record handed straight to a response carries
+    // it and the contract is a comment. `staleSince` is the answer a client
+    // renders and nothing outside the server may derive that answer itself.
+    const frames: EventFrame[] = [];
+    const unsubscribe = manager.subscribe((frame) => frames.push(frame));
+    try {
+      await post(app, '/api/workspaces/ws/issues/DOC-1/sessions', CREATE);
+      await post(app, '/api/hooks/qc-DOC-1-implement/UserPromptSubmit', { prompt: 'go' });
+    } finally {
+      unsubscribe();
+    }
+    // The field is on the record the store holds, so absence on the wire is a
+    // strip rather than a record that never had one.
+    expect(store.session('qc-DOC-1-implement')?.lastEventAt).toBeTypeOf('string');
+
+    const detail = (await (
+      await app.request('/api/workspaces/ws/issues/DOC-1')
+    ).json()) as IssueDetailResponse;
+    const listed = detail.sessions.find((record) => record.id === 'qc-DOC-1-implement');
+    expect(listed).toBeDefined();
+    expect(listed === undefined ? [] : Object.keys(listed)).not.toContain('lastEventAt');
+
+    const sessionFrames = frames.filter((frame) => frame.type === 'session');
+    expect(sessionFrames.length).toBeGreaterThan(0);
+    for (const frame of sessionFrames) {
+      expect(Object.keys(frame.record)).not.toContain('lastEventAt');
+    }
   });
 
   describe('session actions', () => {

@@ -9,7 +9,8 @@ import {
   TRUNCATION_MARKER_KEY,
   writeJsonAtomic,
 } from '../../src/server/store.js';
-import type { SessionRecord, SessionState } from '../../src/core/types.js';
+import type { WorktreeRecord } from '../../src/server/store.js';
+import type { IssueFlags, SessionRecord, SessionState } from '../../src/core/types.js';
 import { makeRecord } from '../core/helpers.js';
 
 describe('Store', () => {
@@ -410,6 +411,99 @@ describe('Store', () => {
       state: string;
     }>;
     expect(persisted.map((record) => record.state)).toEqual(['working']);
+  });
+
+  it('never leaves a flag on disk that the caller was told was refused', async () => {
+    // Every writer has to change memory inside its own queued work, not at the
+    // call: an entry recorded early is serialised by whatever write runs first,
+    // so the caller is told the write failed while the value is already on disk
+    // and comes back on the next boot.
+    const store = new Store(dir);
+    await store.load();
+    const seeded = (await store.setFlags('ws', 'DOC-9', { done: true })) as IssueFlags & {
+      toJSON?: () => unknown;
+    };
+    let serialisations = 0;
+    seeded.toJSON = () => {
+      serialisations += 1;
+      if (serialisations > 1) throw new Error('ENOSPC: no space left on device');
+      const { toJSON: _drop, ...rest } = seeded;
+      return rest;
+    };
+
+    const first = store.setFlags('ws', 'DOC-1', { done: true });
+    const second = store.setFlags('ws', 'DOC-2', { review: true });
+    await expect(first).resolves.toEqual({ done: true });
+    await expect(second).rejects.toThrow('ENOSPC');
+
+    expect(store.flagsOf('ws')['DOC-2']).toBeUndefined();
+    const persisted = JSON.parse(await readFile(join(dir, 'flags.json'), 'utf8')) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(Object.keys(persisted['ws'] ?? {})).toEqual(['DOC-9', 'DOC-1']);
+  });
+
+  it('never leaves a checkout on disk that the caller was told was refused', async () => {
+    const store = new Store(dir);
+    await store.load();
+    const seeded: WorktreeRecord & { toJSON?: () => unknown } = {
+      path: '/w/DOC-9',
+      branch: 'DOC-9-x',
+    };
+    await store.setWorktree('app', 'DOC-9', seeded);
+    let serialisations = 0;
+    seeded.toJSON = () => {
+      serialisations += 1;
+      if (serialisations > 1) throw new Error('ENOSPC: no space left on device');
+      const { toJSON: _drop, ...rest } = seeded;
+      return rest;
+    };
+
+    const first = store.setWorktree('app', 'DOC-1', { path: '/w/DOC-1', branch: 'DOC-1-x' });
+    const second = store.setWorktree('app', 'DOC-2', { path: '/w/DOC-2', branch: 'DOC-2-x' });
+    await first;
+    await expect(second).rejects.toThrow('ENOSPC');
+
+    // A checkout on disk the start was told it did not make is a "Remove
+    // worktree" button offering to delete a directory nothing created.
+    expect(store.worktree('app', 'DOC-2')).toBeUndefined();
+    const persisted = JSON.parse(await readFile(join(dir, 'worktrees.json'), 'utf8')) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(Object.keys(persisted['app'] ?? {})).toEqual(['DOC-9', 'DOC-1']);
+  });
+
+  it('never drops a checkout from disk that the caller was told it kept', async () => {
+    const store = new Store(dir);
+    await store.load();
+    await store.setWorktree('app', 'DOC-1', { path: '/w/DOC-1', branch: 'DOC-1-x' });
+    await store.setWorktree('app', 'DOC-2', { path: '/w/DOC-2', branch: 'DOC-2-x' });
+    const seeded: WorktreeRecord & { toJSON?: () => unknown } = {
+      path: '/w/DOC-9',
+      branch: 'DOC-9-x',
+    };
+    await store.setWorktree('app', 'DOC-9', seeded);
+    let serialisations = 0;
+    seeded.toJSON = () => {
+      serialisations += 1;
+      if (serialisations > 1) throw new Error('ENOSPC: no space left on device');
+      const { toJSON: _drop, ...rest } = seeded;
+      return rest;
+    };
+
+    const first = store.clearWorktree('app', 'DOC-1');
+    const second = store.clearWorktree('app', 'DOC-2');
+    await first;
+    await expect(second).rejects.toThrow('ENOSPC');
+
+    expect(store.worktree('app', 'DOC-2')?.path).toBe('/w/DOC-2');
+    const persisted = JSON.parse(await readFile(join(dir, 'worktrees.json'), 'utf8')) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(Object.keys(persisted['app'] ?? {})).toEqual(['DOC-2', 'DOC-9']);
   });
 
   it('removes the temporary file when the rename it was written for fails', async () => {

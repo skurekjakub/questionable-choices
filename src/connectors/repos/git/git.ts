@@ -1,9 +1,13 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 
 /**
- * Largest amount of git output that is captured, in bytes.
+ * Largest amount of git output that is captured, in characters.
+ *
+ * The cap counts UTF-16 code units across stdout and stderr together, not
+ * bytes per stream, so non-ASCII output trips it at fewer bytes than the
+ * number suggests.
  */
-export const GIT_MAX_BUFFER = 16 * 1024 * 1024;
+const GIT_MAX_BUFFER = 16 * 1024 * 1024;
 
 /**
  * Milliseconds a network-bound git invocation may run before it is killed.
@@ -75,13 +79,6 @@ export class GitError extends Error {
     this.exitCode = exitCode;
     this.stderr = stderr;
   }
-}
-
-interface ExecFailure {
-  code?: number | string | undefined;
-  killed?: boolean | undefined;
-  stdout?: string | undefined;
-  stderr?: string | undefined;
 }
 
 /**
@@ -158,7 +155,7 @@ export function gitAttempt(
           ok: false,
           exitCode: null,
           stdout,
-          stderr: `produced more than ${String(GIT_MAX_BUFFER)} bytes of output`,
+          stderr: `produced more than ${String(GIT_MAX_BUFFER)} characters of output`,
         });
         return;
       }

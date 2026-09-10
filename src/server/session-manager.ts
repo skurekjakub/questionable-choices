@@ -18,6 +18,7 @@ import type {
   PublicConfigResponse,
   RemoveWorktreeResponse,
   SessionEventsResponse,
+  WireSessionRecord,
   WorkspaceSummary,
 } from '../core/api.js';
 import { CACHE_TTL_1H_SECONDS, CACHE_TTL_5M_SECONDS } from '../core/cache-clock.js';
@@ -74,6 +75,21 @@ export type EventListener = (frame: EventFrame) => void;
  * Key every configuration mutation is serialised on.
  */
 const CONFIG_LOCK_KEY = 'config';
+
+/**
+ * Drops the server's own bookkeeping from a record, leaving the wire form.
+ *
+ * `Omit` is a compile-time type, so the field has to be removed from the value
+ * as well: a record handed straight to a response or a frame carries every
+ * property it holds, whatever the declared type says.
+ *
+ * @param record - The record as the store holds it.
+ * @returns The same record without `lastEventAt`.
+ */
+function toWire(record: SessionRecord): WireSessionRecord {
+  const { lastEventAt: _lastEventAt, ...wire } = record;
+  return wire;
+}
 
 /**
  * Key that everything touching one issue's checkout is serialised on.
@@ -686,15 +702,16 @@ export class SessionManager {
    *
    * @param repoId - Repo the sessions were worked in.
    * @param issueKey - Key of the issue.
-   * @returns The records, newest first.
+   * @returns The records in wire form, newest first.
    */
-  private sessionsFor(repoId: string, issueKey: string): SessionRecord[] {
+  private sessionsFor(repoId: string, issueKey: string): WireSessionRecord[] {
     return this.store
       .sessions()
       .filter(
         (record) => record.repoId === repoId && record.issueKey === issueKey && !record.archived,
       )
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map(toWire);
   }
 
   /**
@@ -971,7 +988,12 @@ export class SessionManager {
           checkoutRefusalReason(cause),
         );
       }
-      const next = await this.patch(current, { state: 'starting', pending: null, endedAt: null });
+      const next = await this.patch(current, {
+        state: 'starting',
+        pending: null,
+        hint: null,
+        endedAt: null,
+      });
       this.emitSession(next);
       this.scheduleRepoBoards(next.repoId);
       return next;
@@ -1214,6 +1236,10 @@ export class SessionManager {
             event: raw,
             state: result.record.state,
           });
+          // The suppression is per failure run, not per session: a log that
+          // comes back and fails again is a second gap in the transcript and
+          // has to be reported as one.
+          this.eventLogFailures.delete(sessionId);
         } catch (cause) {
           // The transcript is a debugging aid; letting its failure out would
           // 500 every hook of a session whose directory went unwritable and
@@ -1620,7 +1646,7 @@ export class SessionManager {
    * @returns Nothing.
    */
   private emitSession(record: SessionRecord): void {
-    this.emit('session', { type: 'session', record });
+    this.emit('session', { type: 'session', record: toWire(record) });
   }
 
   /**

@@ -427,7 +427,11 @@ export class Store {
    * exits before the queue drains loses it: memory and disk disagreed for
    * exactly as long as it took to exit.
    *
-   * @returns Nothing, once the queue is empty.
+   * Only the document writers are queued. `appendEvent` writes its line
+   * directly, so an append still in flight when this resolves can be lost —
+   * a hole in a transcript, never in a record.
+   *
+   * @returns Nothing, once every queued document write has finished.
    */
   async flush(): Promise<void> {
     await this.queue;
@@ -526,26 +530,34 @@ export class Store {
    * @throws {Error} When the file cannot be written.
    */
   async setFlags(workspaceId: string, issueKey: string, patch: IssueFlags): Promise<IssueFlags> {
-    const perWorkspace = this.flags[workspaceId] ?? {};
-    const merged: IssueFlags = { ...(perWorkspace[issueKey] ?? {}) };
-    if (patch.review !== undefined) {
-      if (patch.review) merged.review = true;
-      else delete merged.review;
-    }
-    if (patch.done !== undefined) {
-      if (patch.done) merged.done = true;
-      else delete merged.done;
-    }
-    const previous = perWorkspace[issueKey];
-    perWorkspace[issueKey] = merged;
-    this.flags[workspaceId] = perWorkspace;
-    try {
-      await this.enqueue(() => writeJsonAtomic(this.path(FLAGS_FILE), this.flags));
-    } catch (cause) {
-      if (previous === undefined) delete perWorkspace[issueKey];
-      else perWorkspace[issueKey] = previous;
-      throw cause;
-    }
+    let merged!: IssueFlags;
+    // Memory is changed inside the queued work, so the object the write
+    // serialises is the object as it is at that instant. Merging before the
+    // queue drains would let a later write carry a patch this one had failed on
+    // and undone, and the caller told the save was refused would find it back
+    // on the next boot.
+    await this.enqueue(async () => {
+      const perWorkspace = this.flags[workspaceId] ?? {};
+      merged = { ...(perWorkspace[issueKey] ?? {}) };
+      if (patch.review !== undefined) {
+        if (patch.review) merged.review = true;
+        else delete merged.review;
+      }
+      if (patch.done !== undefined) {
+        if (patch.done) merged.done = true;
+        else delete merged.done;
+      }
+      const previous = perWorkspace[issueKey];
+      perWorkspace[issueKey] = merged;
+      this.flags[workspaceId] = perWorkspace;
+      try {
+        await writeJsonAtomic(this.path(FLAGS_FILE), this.flags);
+      } catch (cause) {
+        if (previous === undefined) delete perWorkspace[issueKey];
+        else perWorkspace[issueKey] = previous;
+        throw cause;
+      }
+    });
     return merged;
   }
 
@@ -580,17 +592,24 @@ export class Store {
    * @throws {Error} When the file cannot be written.
    */
   async setWorktree(repoId: string, issueKey: string, worktree: WorktreeRecord): Promise<void> {
-    const perRepo = this.worktrees[repoId] ?? {};
-    const previous = perRepo[issueKey];
-    perRepo[issueKey] = worktree;
-    this.worktrees[repoId] = perRepo;
-    try {
-      await this.enqueue(() => writeJsonAtomic(this.path(WORKTREES_FILE), this.worktrees));
-    } catch (cause) {
-      if (previous === undefined) delete perRepo[issueKey];
-      else perRepo[issueKey] = previous;
-      throw cause;
-    }
+    // Memory is changed inside the queued work, so the object the write
+    // serialises is the object as it is at that instant. Recording the checkout
+    // before the queue drains would let a later write commit an entry this one
+    // had failed on and undone, and the dashboard would offer to remove a
+    // worktree it was told it never made.
+    await this.enqueue(async () => {
+      const perRepo = this.worktrees[repoId] ?? {};
+      const previous = perRepo[issueKey];
+      perRepo[issueKey] = worktree;
+      this.worktrees[repoId] = perRepo;
+      try {
+        await writeJsonAtomic(this.path(WORKTREES_FILE), this.worktrees);
+      } catch (cause) {
+        if (previous === undefined) delete perRepo[issueKey];
+        else perRepo[issueKey] = previous;
+        throw cause;
+      }
+    });
   }
 
   /**
@@ -602,16 +621,24 @@ export class Store {
    * @throws {Error} When the file cannot be written.
    */
   async clearWorktree(repoId: string, issueKey: string): Promise<void> {
-    const perRepo = this.worktrees[repoId];
-    if (perRepo === undefined || perRepo[issueKey] === undefined) return;
-    const previous = perRepo[issueKey];
-    delete perRepo[issueKey];
-    try {
-      await this.enqueue(() => writeJsonAtomic(this.path(WORKTREES_FILE), this.worktrees));
-    } catch (cause) {
-      perRepo[issueKey] = previous;
-      throw cause;
-    }
+    // Memory is changed inside the queued work, so the object the write
+    // serialises is the object as it is at that instant. Forgetting the
+    // checkout before the queue drains would let a later write commit a removal
+    // this one had failed on and undone, and the app would lose a worktree that
+    // still exists on disk.
+    await this.enqueue(async () => {
+      const perRepo = this.worktrees[repoId];
+      if (perRepo === undefined) return;
+      const previous = perRepo[issueKey];
+      if (previous === undefined) return;
+      delete perRepo[issueKey];
+      try {
+        await writeJsonAtomic(this.path(WORKTREES_FILE), this.worktrees);
+      } catch (cause) {
+        perRepo[issueKey] = previous;
+        throw cause;
+      }
+    });
   }
 
   /**

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { StartDialog } from '../../src/web/src/components/StartDialog.js';
+import { StartDialog, STILL_STARTING_SENTENCE } from '../../src/web/src/components/StartDialog.js';
 import { DROPPED_SENTENCE } from '../../src/web/src/model.js';
 import { card, cardSession, publicConfig } from './fixtures.js';
 import './jsdom-gaps.js';
@@ -75,6 +75,40 @@ describe('StartDialog', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(closed).toBe(0);
     expect(screen.getByRole('button', { name: 'Starting' })).toBeTruthy();
+  });
+
+  it('lets a second dismissal abandon a start request that never answers', async () => {
+    // Nothing lowers `starting` for a request the server accepts and never
+    // answers, and every way out routes through the same guard, so a first
+    // dismissal that only refuses would seal the dialog until a reload.
+    let closed = 0;
+    let refuse: ((cause: unknown) => void) | null = null;
+    vi.mocked(createSession).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        }),
+    );
+    open(() => {
+      closed += 1;
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start session' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Start session' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Starting' })).toBeTruthy());
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(closed).toBe(0);
+    expect(screen.getByText(STILL_STARTING_SENTENCE)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(closed).toBe(1);
+
+    // The request runs on; what the owner abandoned is waiting for its answer,
+    // so nothing it says is reported into a dialog they have dismissed.
+    await act(async () => {
+      refuse?.(new Error('the runner refused the session'));
+    });
+    expect(screen.queryByText(/the runner refused the session/)).toBeNull();
   });
 
   it('closes on Escape while nothing is in flight', async () => {

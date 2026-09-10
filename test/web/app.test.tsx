@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BoardView } from '../../src/core/api.js';
+import type { BoardView, EventFrame } from '../../src/core/api.js';
 import { App } from '../../src/web/src/App.js';
 import { navigate } from '../../src/web/src/navigation.js';
 import { boardListing, publicConfig } from './fixtures.js';
@@ -38,6 +38,13 @@ class SilentSocket {
   onerror: (() => void) | null = null;
 
   /**
+   * Records the socket so a test can push frames the server would have sent.
+   */
+  constructor() {
+    sockets.push(this);
+  }
+
+  /**
    * Closes the socket, telling the consumer once.
    *
    * @returns Nothing.
@@ -46,6 +53,26 @@ class SilentSocket {
     this.onclose?.();
     this.onclose = null;
   }
+}
+
+/**
+ * Every shared event socket opened so far, newest last. The stream outlives a
+ * test, so the newest socket is the one the app is listening to.
+ */
+const sockets: SilentSocket[] = [];
+
+/**
+ * Pushes one frame down the shared event stream, as the server would.
+ *
+ * @param frame - Frame to deliver.
+ * @returns A promise that settles once React has rendered the result.
+ * @throws {Error} When no socket is listening.
+ */
+async function push(frame: EventFrame): Promise<void> {
+  const socket = sockets.at(-1);
+  if (socket?.onmessage == null) throw new Error('nothing is listening to the event stream');
+  const deliver = socket.onmessage;
+  await act(async () => deliver({ data: JSON.stringify(frame) }));
 }
 
 /**
@@ -109,6 +136,31 @@ describe('App', () => {
       expect(vi.mocked(getBoard).mock.calls.some((call) => call[0] === 'migration')).toBe(true),
     );
     expect(vi.mocked(getBoard).mock.calls.some((call) => call[0] === 'docs')).toBe(false);
+  });
+
+  it('keeps the board a session URL resolved when a later configuration arrives', async () => {
+    // The remembered board must not overwrite the one the session on screen
+    // belongs to: the terminal would go with it.
+    window.localStorage.setItem('qc.workspace', 'docs');
+    window.history.pushState(null, '', '/session/qc-DOC-9-implement');
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('terminal')).toBeTruthy());
+
+    await push({ type: 'config', config: publicConfig(['docs', 'migration']) });
+    expect(screen.getByTestId('terminal')).toBeTruthy();
+    expect(vi.mocked(getBoard).mock.calls.at(-1)?.[0]).toBe('migration');
+  });
+
+  it('opens the first workspace on leaving a session route with nothing remembered', async () => {
+    // A resolved workspace that stays on screen is the board the switcher
+    // shows while the next cold start opens another one.
+    window.history.pushState(null, '', '/session/qc-DOC-9-implement');
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('terminal')).toBeTruthy());
+
+    await act(async () => navigate('/'));
+    await waitFor(() => expect(vi.mocked(getBoard).mock.calls.at(-1)?.[0]).toBe('docs'));
+    expect(remembered()).toBeNull();
   });
 
   it('falls back to the first workspace when the remembered one has been removed', async () => {

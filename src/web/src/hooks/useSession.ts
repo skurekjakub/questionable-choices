@@ -58,7 +58,8 @@ function findOnBoard(
  *
  * The board supplies the issue key, so a session opened by URL resolves only
  * once the board it belongs to has loaded. A loaded board that lists no such
- * session settles as not found rather than loading forever.
+ * session settles as not found rather than loading forever. Nothing loaded for
+ * one session is ever reported for another: a new id starts from nothing.
  *
  * @param sessionId - Id of the session to follow.
  * @param board - Latest board view, used to locate the session's card.
@@ -74,6 +75,20 @@ export function useSession(sessionId: string, board: BoardView | null): SessionC
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
+  const [loadedFor, setLoadedFor] = useState(sessionId);
+
+  // Every route into a session renders the same component, so this instance —
+  // and everything below it — survives the navigation from one session to the
+  // next. Without this reset the previous session's record and issue are what
+  // the header states, for as long as the new detail is in flight.
+  if (loadedFor !== sessionId) {
+    setLoadedFor(sessionId);
+    setRecord(null);
+    setIssue(null);
+    setDetailWorktree(null);
+    setError(null);
+    setLoading(true);
+  }
 
   // A board that has loaded and does not list the session is the answer, not a
   // step towards one: no later frame will introduce it.

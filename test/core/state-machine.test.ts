@@ -471,22 +471,33 @@ describe('a Notification never moves the session', () => {
     expect(late.notify).toBe(false);
   });
 
-  it.each([
-    ['UserPromptSubmit', hookEvent({ hook_event_name: 'UserPromptSubmit' })],
-    ['PreToolUse', hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash' })],
-    ['Stop', hookEvent({ hook_event_name: 'Stop' })],
-    ['claude-exit', { type: 'claude-exit', exitCode: 0 } as SessionEvent],
-  ])('is cleared by the next %s', (_name, event) => {
+  it.each<[string, SessionEvent, boolean]>([
+    ['UserPromptSubmit', hookEvent({ hook_event_name: 'UserPromptSubmit' }), true],
+    ['PreToolUse', hookEvent({ hook_event_name: 'PreToolUse', tool_name: 'Bash' }), true],
+    ['Stop', hookEvent({ hook_event_name: 'Stop' }), true],
+    ['claude-exit', { type: 'claude-exit', exitCode: 0 } as SessionEvent, true],
+    // A SessionStart whose id the record already has patches nothing, so the
+    // reducer answers `unchanged` before it ever reaches the clear. It is the
+    // one lifecycle event that leaves a hint standing, and the rule is written
+    // as "the next event the reducer accepts", not "the next event".
+    [
+      'SessionStart the reducer refuses',
+      hookEvent({ hook_event_name: 'SessionStart', session_id: 'claude-1', source: 'startup' }),
+      false,
+    ],
+  ])('is cleared by the next %s only when the reducer accepts it', (_name, event, clears) => {
+    const hint = { summary: 'Claude needs your permission', at: NOW_ISO };
     const hinted = makeRecord({
       state: 'working',
       pending: null,
-      hint: { summary: 'Claude needs your permission', at: NOW_ISO },
+      claudeSessionId: 'claude-1',
+      hint,
     });
 
     const next = reduce(hinted, event, NOW + 1_000);
 
-    expect(next.changed).toBe(true);
-    expect(next.record.hint).toBeNull();
+    expect(next.changed).toBe(clears);
+    expect(next.record.hint).toEqual(clears ? null : hint);
   });
 
   it('is left alone by a status-line payload, which is not a lifecycle event', () => {
@@ -524,6 +535,34 @@ describe('a Notification never moves the session', () => {
     );
 
     expect(result.record.hint?.summary).toBe('Claude sent a notification');
+  });
+});
+
+describe('a hook payload carrying a field that is not the type it is declared as', () => {
+  // §8.2: the payload is asserted, not parsed, so a field read without
+  // narrowing takes whatever the body carried. A throw out of `reduce` is
+  // unrecoverable in a way a wrong value is not: the launcher posts hooks with
+  // `curl … || true`, so the 500 is discarded and the event is lost from the
+  // record and from `events.jsonl` with nothing left to say it happened.
+  it.each<[string, string, Record<string, unknown>, boolean]>([
+    ['message', 'Notification', { message: { text: 'needs you' } }, true],
+    ['tool_name', 'PermissionRequest', { tool_name: 7, tool_input: { command: 'ls' } }, true],
+    ['session_id', 'SessionStart', { session_id: 42, source: 'startup' }, false],
+    ['last_assistant_message', 'Stop', { last_assistant_message: ['done'] }, true],
+  ])('is absorbed when %s arrives on a %s', (_field, name, body, changed) => {
+    const hook = asHookEvent(name, body);
+    if (hook === null) throw new Error(`asHookEvent refused ${name}, which is a test bug`);
+    const record = makeRecord({ state: 'working', pending: null, claudeSessionId: 'claude-1' });
+
+    const result = reduce(record, { type: 'hook', hook }, NOW);
+
+    expect(result.changed).toBe(changed);
+    // Every field the reducer may write from the payload still holds the type
+    // the record declares, so nothing downstream is handed the raw value.
+    expect(result.record.claudeSessionId).toBe('claude-1');
+    expect(result.record.hint?.summary ?? '').toBeTypeOf('string');
+    expect(result.record.pending?.summary ?? '').toBeTypeOf('string');
+    expect(result.record.lastAssistantMessage ?? '').toBeTypeOf('string');
   });
 });
 
