@@ -390,6 +390,11 @@ export interface WorkspaceConfig extends WorkspaceQuery {
   connector: string;
   /** Id of the repo the sessions are worked in. */
   repo: string;
+  /**
+   * Template of the private per-issue checklist, in display order. Empty when
+   * the workspace offers no checklist.
+   */
+  checklist: string[];
   /** Poll interval in seconds. */
   pollSeconds: number;
 }

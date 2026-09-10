@@ -61,6 +61,11 @@
       "connector": "kentico-jira",
       "repo": "docs-workspace",
       "reviewStatuses": ["Ready for review"],
+      "checklist": [
+        "Read the Jira issue live, not from the card",
+        "npm run verify is green in the worktree",
+        "\"How to test\" comment is on the issue"
+      ],
       "pollSeconds": 120
     },
     "docs-nextjs-migration": {

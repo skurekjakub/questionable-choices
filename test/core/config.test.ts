@@ -114,11 +114,17 @@ describe('the shipped example', () => {
     ]);
   });
 
-  it('defaults the review statuses and the poll interval of a bare workspace', () => {
+  it('defaults the review statuses, the checklist and the poll interval of a bare workspace', () => {
     const config = parseConfig(exampleDocument(), { home: HOME });
     const workspace = config.workspaces['docs-nextjs-migration'];
     expect(workspace?.reviewStatuses).toEqual(['Ready for review']);
+    expect(workspace?.checklist).toEqual([]);
     expect(workspace?.pollSeconds).toBe(120);
+  });
+
+  it('carries the checklist template of the workspace that names one', () => {
+    const config = parseConfig(exampleDocument(), { home: HOME });
+    expect(config.workspaces['docs-nextjs']?.checklist).toHaveLength(3);
   });
 
   it('round-trips through serializeConfig', () => {
@@ -191,6 +197,70 @@ describe('defaults', () => {
     const workspaces = document['workspaces'] as Record<string, Record<string, unknown>>;
     (workspaces['ws'] as Record<string, unknown>)['jql'] = 'project = DOC';
     expect(parseConfig(document, { home: HOME }).workspaces['ws']?.jql).toBe('project = DOC');
+  });
+});
+
+describe('the checklist template', () => {
+  /**
+   * Builds the minimal document with one workspace carrying a checklist.
+   *
+   * @param checklist - Value to write into the workspace's `checklist` field.
+   * @returns The document.
+   */
+  const withChecklist = (checklist: unknown): Record<string, unknown> => {
+    const document = minimal();
+    const workspaces = document['workspaces'] as Record<string, Record<string, unknown>>;
+    (workspaces['ws'] as Record<string, unknown>)['checklist'] = checklist;
+    return document;
+  };
+
+  it('accepts a list of items and keeps their order', () => {
+    const config = parseConfig(withChecklist(['Read the issue', 'Verify', 'Comment']), {
+      home: HOME,
+    });
+    expect(config.workspaces['ws']?.checklist).toEqual(['Read the issue', 'Verify', 'Comment']);
+  });
+
+  it('defaults to no checklist when the workspace names none', () => {
+    expect(parseConfig(minimal(), { home: HOME }).workspaces['ws']?.checklist).toEqual([]);
+  });
+
+  it('refuses an empty item, naming its index', () => {
+    expect(issuesOf(withChecklist(['Read the issue', '']))).toContain(
+      'workspaces.ws.checklist[1]: checklist item must not be empty',
+    );
+  });
+
+  it('refuses a checklist that is not a list, rather than throwing on it', () => {
+    expect(issuesOf(withChecklist('Read the issue')).map((issue) => issue.split(':')[0])).toContain(
+      'workspaces.ws.checklist',
+    );
+  });
+
+  it('refuses a duplicate item, naming the index of the repeat', () => {
+    expect(issuesOf(withChecklist(['Verify', 'Read the issue', 'Verify']))).toContain(
+      "workspaces.ws.checklist[2]: duplicate checklist item 'Verify'",
+    );
+  });
+
+  it('round-trips through serializeConfig', () => {
+    const config = parseConfig(withChecklist(['Read the issue', 'Verify']), { home: HOME });
+    const written = JSON.parse(JSON.stringify(serializeConfig(config))) as unknown;
+    expect(parseConfig(written, { home: '' }).workspaces['ws']?.checklist).toEqual([
+      'Read the issue',
+      'Verify',
+    ]);
+  });
+
+  it('keeps the surviving workspace’s checklist when another is removed', () => {
+    const document = withChecklist(['Read the issue', 'Verify']);
+    const workspaces = document['workspaces'] as Record<string, Record<string, unknown>>;
+    workspaces['other'] = { name: 'Other', epic: 'DOC-2', connector: 'tracker', repo: 'app' };
+    const config = parseConfig(document, { home: HOME });
+    expect(removeWorkspace(config, 'other').workspaces['ws']?.checklist).toEqual([
+      'Read the issue',
+      'Verify',
+    ]);
   });
 });
 
@@ -477,6 +547,7 @@ describe('applyWorkspaceChange', () => {
       connector: 'tracker',
       repo: 'app',
       reviewStatuses: ['Ready for review'],
+      checklist: [],
       pollSeconds: 120,
     });
     expect(Object.keys(config.workspaces)).toEqual(['ws']);

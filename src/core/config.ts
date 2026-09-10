@@ -147,24 +147,42 @@ const connectorSchema = z.strictObject({
   tokenEnv: nonEmpty('tokenEnv'),
 });
 
-const workspaceSchema = z.strictObject({
-  name: nonEmpty('workspace name'),
-  epic: z
-    .string()
-    .regex(
-      /^([A-Za-z][A-Za-z0-9]*-\d+|\d+)$/,
-      'epic must be an issue key such as DOC-3807, or a numeric issue id',
-    ),
-  jql: nonEmpty('jql').optional(),
-  connector: nonEmpty('connector'),
-  repo: nonEmpty('repo'),
-  reviewStatuses: z.array(nonEmpty('review status')).default(DEFAULT_REVIEW_STATUSES),
-  pollSeconds: z
-    .number()
-    .int()
-    .min(10, 'pollSeconds must be at least 10')
-    .default(DEFAULT_POLL_SECONDS),
-});
+const workspaceSchema = z
+  .strictObject({
+    name: nonEmpty('workspace name'),
+    epic: z
+      .string()
+      .regex(
+        /^([A-Za-z][A-Za-z0-9]*-\d+|\d+)$/,
+        'epic must be an issue key such as DOC-3807, or a numeric issue id',
+      ),
+    jql: nonEmpty('jql').optional(),
+    connector: nonEmpty('connector'),
+    repo: nonEmpty('repo'),
+    reviewStatuses: z.array(nonEmpty('review status')).default(DEFAULT_REVIEW_STATUSES),
+    checklist: z.array(nonEmpty('checklist item')).default([]),
+    pollSeconds: z
+      .number()
+      .int()
+      .min(10, 'pollSeconds must be at least 10')
+      .default(DEFAULT_POLL_SECONDS),
+  })
+  .check((ctx) => {
+    const seen = new Set<string>();
+    // A tick is stored under the item's own text, so two items spelled the same
+    // would share one tick and appear to toggle together.
+    ctx.value.checklist.forEach((item, index) => {
+      if (seen.has(item)) {
+        ctx.issues.push({
+          code: 'custom',
+          message: `duplicate checklist item '${item}'`,
+          path: ['checklist', index],
+          input: item,
+        });
+      }
+      seen.add(item);
+    });
+  });
 
 const idSchema = (label: string): z.ZodString =>
   z.string().regex(/^[a-z0-9][a-z0-9-]*$/, idRuleMessage(label));
@@ -483,6 +501,7 @@ export function applyWorkspaceChange(config: Config, request: CreateWorkspaceReq
       request.reviewStatuses !== undefined && request.reviewStatuses.length > 0
         ? request.reviewStatuses
         : [...DEFAULT_REVIEW_STATUSES],
+    checklist: [],
     pollSeconds: DEFAULT_POLL_SECONDS,
   };
   try {
