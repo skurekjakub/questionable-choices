@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { SessionState } from '../../src/core/api.js';
 import { lampFor } from '../../src/web/src/components/Lamp.js';
-import { STATE_LABELS } from '../../src/web/src/model.js';
+import { STATE_LABELS, type SessionState } from '../../src/web/src/model.js';
 
 /**
  * Every state the contract can send, read off the label table so a new one

@@ -1,10 +1,5 @@
-import type {
-  BoardView,
-  Card,
-  CardSession,
-  PublicConfigResponse,
-  SessionState,
-} from '../../src/core/api.js';
+import type { BoardView, Card, CardSession, PublicConfigResponse } from '../../src/core/api.js';
+import type { SessionState } from '../../src/web/src/model.js';
 
 /**
  * A fixed instant the fixtures below are stamped with, so a test that reads a

@@ -30,8 +30,6 @@ function detail(key: string, sessions: IssueDetailResponse['sessions']): IssueDe
       labels: [],
       url: `https://example.atlassian.net/browse/${key}`,
       description: 'the description',
-      assignee: null,
-      priority: null,
       updated: FIXTURE_NOW,
     },
     sessions,
@@ -104,7 +102,12 @@ describe('drawerSessions', () => {
       card('DOC-1', [killed]),
       detail('DOC-1', [
         record('qc-DOC-1-implement', {
-          cache: { expiresAt: FIXTURE_NOW, ttlSeconds: 300, source: 'statusline' },
+          cache: {
+            expiresAt: Date.parse(FIXTURE_NOW),
+            ttlSeconds: 300,
+            source: 'statusline',
+            warm: true,
+          },
         }),
       ]),
     );
