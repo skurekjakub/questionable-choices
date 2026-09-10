@@ -1,7 +1,16 @@
-import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionEventLogEntry } from '../core/api.js';
-import type { IssueFlags, SessionRecord } from '../core/types.js';
+import { SESSION_STATES, type IssueFlags, type SessionRecord } from '../core/types.js';
 import { messageOf } from './util.js';
 
 /**
@@ -46,6 +55,14 @@ export const EVENT_STRING_MAX_LENGTH = 4096;
 export const EVENT_MEMBERS_MAX = 200;
 
 /**
+ * Key the object cap records the number of dropped keys under.
+ *
+ * Lengthened by repetition when the payload already carries it, so the marker
+ * can never overwrite a key the payload actually sent.
+ */
+export const TRUNCATION_MARKER_KEY = '…';
+
+/**
  * Caps the size of a raw event payload: string length, array length and the
  * number of keys on an object.
  *
@@ -71,7 +88,11 @@ function capPayload(value: unknown): unknown {
     for (const [key, member] of entries.slice(0, EVENT_MEMBERS_MAX))
       capped[key] = capPayload(member);
     if (entries.length > EVENT_MEMBERS_MAX) {
-      capped['…'] = `[truncated ${String(entries.length - EVENT_MEMBERS_MAX)} keys]`;
+      // A payload may carry any key at all, including the marker's, so the
+      // marker is lengthened until it names nothing the object already kept.
+      let marker = TRUNCATION_MARKER_KEY;
+      while (marker in capped) marker += TRUNCATION_MARKER_KEY;
+      capped[marker] = `[truncated ${String(entries.length - EVENT_MEMBERS_MAX)} keys]`;
     }
     return capped;
   }
@@ -158,7 +179,39 @@ async function readJson<T>(
 }
 
 /**
+ * Picks a rejection path that names no file yet.
+ *
+ * @param path - Absolute path of the document being set aside.
+ * @returns The plain `<name>.rejected`, or a timestamped one when it is taken.
+ */
+async function freeRejectedPath(path: string): Promise<string> {
+  const plain = `${path}${REJECTED_SUFFIX}`;
+  try {
+    await stat(plain);
+  } catch {
+    return plain;
+  }
+  // The copy from a previous rejection is the owner's original document; a
+  // second boot against a second bad edit must not rename over it.
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.\d+Z$/, '');
+  for (let attempt = 0; ; attempt += 1) {
+    const suffix = attempt === 0 ? stamp : `${stamp}-${String(attempt)}`;
+    const candidate = `${path}.${suffix}${REJECTED_SUFFIX}`;
+    try {
+      await stat(candidate);
+    } catch {
+      return candidate;
+    }
+  }
+}
+
+/**
  * Renames a document the store refused, so the next write cannot destroy it.
+ *
+ * An existing rejection is never overwritten: the copy is timestamped instead.
  *
  * @param path - Absolute path of the refused document.
  * @param why - Why it was refused, for the log line.
@@ -166,8 +219,8 @@ async function readJson<T>(
  * @returns Nothing; a rename that itself fails is reported and swallowed.
  */
 async function setAside(path: string, why: string, warn: StoreWarn): Promise<void> {
-  const kept = `${path}${REJECTED_SUFFIX}`;
   try {
+    const kept = await freeRejectedPath(path);
     await rename(path, kept);
     warn(`${path} was not used because ${why}; it has been kept as ${kept}`);
   } catch (cause) {
@@ -189,9 +242,34 @@ function isSessionRecord(value: unknown): value is SessionRecord {
     typeof record.id === 'string' &&
     typeof record.issueKey === 'string' &&
     typeof record.repoId === 'string' &&
+    // A state outside the set is worse than a missing one: the reconciler skips
+    // it for ever, the clash check ignores it, and the lamp table has no entry.
     typeof record.state === 'string' &&
+    (SESSION_STATES as readonly string[]).includes(record.state) &&
     typeof record.stateSince === 'string'
   );
+}
+
+/**
+ * Names one dropped member of the sessions document, for the warning.
+ *
+ * @param value - The member the shape check refused.
+ * @returns Its `id` when it has a usable one, or a stand-in.
+ */
+function droppedId(value: unknown): string {
+  if (typeof value !== 'object' || value === null) return '<not an object>';
+  const id = (value as { id?: unknown }).id;
+  return typeof id === 'string' && id !== '' ? id : '<no id>';
+}
+
+/**
+ * What a read of the sessions document produced.
+ */
+interface CoercedRecords {
+  /** The members that are usable session records, in document order. */
+  records: SessionRecord[];
+  /** Ids of the members that were dropped; empty when none were. */
+  dropped: string[];
 }
 
 /**
@@ -199,18 +277,22 @@ function isSessionRecord(value: unknown): value is SessionRecord {
  *
  * The outermost shape decides whether the document is usable at all; a single
  * malformed member is dropped, because one hand-edit must not cost the rest.
+ * The caller sets the whole document aside when anything was dropped, so the
+ * next write cannot destroy what the drop discarded.
  *
  * @param value - The parsed document.
- * @param warn - Where dropped members are reported.
- * @returns The usable records, or null when the document is not an array.
+ * @returns The usable records and the ids of the dropped members, or null when
+ *   the document is not an array.
  */
-function coerceRecords(value: unknown, warn: StoreWarn): SessionRecord[] | null {
+function coerceRecords(value: unknown): CoercedRecords | null {
   if (!Array.isArray(value)) return null;
-  const kept = value.filter(isSessionRecord);
-  if (kept.length !== value.length) {
-    warn(`${String(value.length - kept.length)} session record(s) were dropped as unusable`);
+  const records: SessionRecord[] = [];
+  const dropped: string[] = [];
+  for (const member of value) {
+    if (isSessionRecord(member)) records.push(member);
+    else dropped.push(droppedId(member));
   }
-  return kept;
+  return { records, dropped };
 }
 
 /**
@@ -257,21 +339,42 @@ export class Store {
   /**
    * Creates the data directory and reads whatever is already in it.
    *
-   * A document that is missing, unparseable or not the shape its file holds is
-   * treated as empty and kept as `<name>.rejected`, so the next write cannot
-   * destroy it and the dashboard still boots.
+   * A document that is unparseable or not the shape its file holds is treated
+   * as empty and kept as `<name>.rejected`, so the next write cannot destroy it
+   * and the dashboard still boots; an existing rejection is never overwritten.
+   * A sessions document whose *members* are not all usable records is treated
+   * the same way: the usable ones are kept in memory, the whole document is set
+   * aside, and the dropped members are named in the warning. A missing document
+   * is simply empty and nothing is renamed.
+   *
+   * Temporary files left by a process that died mid-write are swept here, since
+   * nothing else ever cleans the data directory.
    *
    * @returns Nothing.
    * @throws {Error} When the data directory cannot be created.
    */
   async load(): Promise<void> {
     await mkdir(join(this.dataDir, 'sessions'), { recursive: true });
+    await this.sweepTemporaries();
+    let dropped: string[] = [];
     this.records = await readJson<SessionRecord[]>(
       this.path(SESSIONS_FILE),
       [],
-      (value) => coerceRecords(value, this.warn),
+      (value) => {
+        const coerced = coerceRecords(value);
+        if (coerced === null) return null;
+        dropped = coerced.dropped;
+        return coerced.records;
+      },
       this.warn,
     );
+    if (dropped.length > 0) {
+      await setAside(
+        this.path(SESSIONS_FILE),
+        `${String(dropped.length)} of its members are not usable session records (${dropped.join(', ')})`,
+        this.warn,
+      );
+    }
     this.flags = await readJson<FlagsByWorkspace>(
       this.path(FLAGS_FILE),
       {},
@@ -294,6 +397,40 @@ export class Store {
    */
   private path(name: string): string {
     return join(this.dataDir, name);
+  }
+
+  /**
+   * Removes the temporary files a process that died mid-write left behind.
+   *
+   * `writeJsonAtomic` cleans up after a failed rename, but not after a SIGKILL
+   * or a `process.exit` between the write and the rename.
+   *
+   * @returns Nothing; a directory that cannot be listed is left alone.
+   */
+  private async sweepTemporaries(): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(this.dataDir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (!name.endsWith('.tmp')) continue;
+      await rm(this.path(name), { force: true });
+    }
+  }
+
+  /**
+   * Waits for every write already queued to finish.
+   *
+   * A hook answered 204 has its `saveSession` on the queue, and a shutdown that
+   * exits before the queue drains loses it: memory and disk disagreed for
+   * exactly as long as it took to exit.
+   *
+   * @returns Nothing, once the queue is empty.
+   */
+  async flush(): Promise<void> {
+    await this.queue;
   }
 
   /**
@@ -339,25 +476,31 @@ export class Store {
    * @throws {Error} When the file cannot be written.
    */
   async saveSession(record: SessionRecord): Promise<void> {
-    const index = this.records.findIndex((existing) => existing.id === record.id);
-    const previous = index === -1 ? undefined : this.records[index];
-    if (index === -1) this.records.push(record);
-    else this.records[index] = record;
-    // Memory is what every later read answers from, so a failed write has to
-    // take the in-memory value with it; otherwise the dashboard shows a session
-    // that vanishes on the next boot. The undo is by identity, never by array
-    // snapshot: a snapshot taken before a concurrent save would drop that
-    // save's record along with this one's.
-    try {
-      await this.enqueue(() => writeJsonAtomic(this.path(SESSIONS_FILE), this.records));
-    } catch (cause) {
-      const current = this.records.findIndex((existing) => existing.id === record.id);
-      if (current !== -1) {
-        if (previous === undefined) this.records.splice(current, 1);
-        else this.records[current] = previous;
+    // Memory is changed inside the queued work, so the array the write
+    // serialises is the array as it is at that instant. Inserting before the
+    // queue drains would let a later write pick the record up again after this
+    // one had failed and been undone, and the caller told the save was refused
+    // would find it back on the next boot.
+    await this.enqueue(async () => {
+      const index = this.records.findIndex((existing) => existing.id === record.id);
+      const previous = index === -1 ? undefined : this.records[index];
+      if (index === -1) this.records.push(record);
+      else this.records[index] = record;
+      try {
+        await writeJsonAtomic(this.path(SESSIONS_FILE), this.records);
+      } catch (cause) {
+        // Memory is what every later read answers from, so a failed write has
+        // to take the in-memory value with it. The undo is by identity, never
+        // by array index: a save of the same id that landed in between is the
+        // one memory must keep.
+        const current = this.records.findIndex((existing) => existing.id === record.id);
+        if (current !== -1 && this.records[current] === record) {
+          if (previous === undefined) this.records.splice(current, 1);
+          else this.records[current] = previous;
+        }
+        throw cause;
       }
-      throw cause;
-    }
+    });
   }
 
   /**

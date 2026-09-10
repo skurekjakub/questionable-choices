@@ -343,12 +343,8 @@ function compactTimestamp(nowMs: number): string {
  * issue polling, board projection and fan-out to the WebSocket layer.
  */
 export class SessionManager {
-  /** Subscribers of each channel, every one of them taking an `EventFrame`. */
-  private readonly channels: Readonly<Record<EventChannel, Set<EventListener>>> = {
-    board: new Set(),
-    session: new Set(),
-    config: new Set(),
-  };
+  /** Everyone subscribed to the manager's frames. */
+  private readonly listeners = new Set<EventListener>();
   /** Runner every session on every workspace runs through. */
   readonly runner: Runner;
   /** Validated configuration, as the last accepted workspace change left it. */
@@ -374,6 +370,8 @@ export class SessionManager {
   private readonly checkoutLock = new KeyedMutex();
   private reconcileTimer: NodeJS.Timeout | null = null;
   private reconciling = false;
+  /** Sessions whose event log has already been reported as unwritable. */
+  private readonly eventLogFailures = new Set<string>();
 
   /**
    * Builds a manager over already-constructed connectors.
@@ -403,9 +401,9 @@ export class SessionManager {
    * @returns A function that removes the subscription.
    */
   subscribe(listener: EventListener): () => void {
-    for (const subscribers of Object.values(this.channels)) subscribers.add(listener);
+    this.listeners.add(listener);
     return () => {
-      for (const subscribers of Object.values(this.channels)) subscribers.delete(listener);
+      this.listeners.delete(listener);
     };
   }
 
@@ -781,8 +779,9 @@ export class SessionManager {
    *
    * The record is persisted before the runner is invoked, so a crash between
    * the two leaves a record the reconciler can close instead of an orphan
-   * tmux session. The whole sequence holds the lock of the session name it
-   * would take, so two simultaneous starts cannot both pass the liveness check.
+   * tmux session. The checkout sequence holds the lock of the base session name
+   * and the issue's checkout lock, so two simultaneous starts cannot both pass
+   * the liveness check; the tracker is read before either is taken.
    *
    * @param workspaceId - Workspace the issue belongs to.
    * @param issueKey - Key of the issue to work on.
@@ -806,6 +805,11 @@ export class SessionManager {
     const baseId = sessionName(this.config.runner.tmuxPrefix, issueKey, playbook.id);
 
     const repoId = runtime.config.repo;
+    // Read before the locks: the tracker is a remote with its own 15 s
+    // deadline, and nothing in the critical section below depends on the issue
+    // being fetched inside it. Holding the checkout lock across it would make a
+    // slow tracker block every removal of the same checkout.
+    const issue = await this.requireIssue(workspaceId, issueKey);
     // The session lock keeps two starts of the same playbook apart; the
     // checkout lock keeps this start apart from a removal of the very
     // directory it is preparing.
@@ -824,7 +828,6 @@ export class SessionManager {
           );
         }
 
-        const issue = await this.requireIssue(workspaceId, issueKey);
         let checkout;
         try {
           checkout = await runtime.repo.prepare(issue, playbook, {
@@ -1205,11 +1208,23 @@ export class SessionManager {
         derivedCacheTtlSeconds: this.derivedCacheTtlSeconds,
       });
       if (result.changed || event.type !== 'statusline') {
-        await this.store.appendEvent(sessionId, {
-          at: new Date(nowMs).toISOString(),
-          event: raw,
-          state: result.record.state,
-        });
+        try {
+          await this.store.appendEvent(sessionId, {
+            at: new Date(nowMs).toISOString(),
+            event: raw,
+            state: result.record.state,
+          });
+        } catch (cause) {
+          // The transcript is a debugging aid; letting its failure out would
+          // 500 every hook of a session whose directory went unwritable and
+          // freeze that card for good, because a hook is never retried.
+          if (!this.eventLogFailures.has(sessionId)) {
+            this.eventLogFailures.add(sessionId);
+            this.logger.error(
+              `cannot append to the event log of ${sessionId}, carrying on without it: ${messageOf(cause)}`,
+            );
+          }
+        }
       }
       if (!result.changed) return result.record;
 
@@ -1365,8 +1380,12 @@ export class SessionManager {
       // running every poll for as long as the server is up.
       cache.queryRejected = isPermanentSourceError(cause);
       const message = `workspace '${runtime.id}' issue list failed: ${cache.sourceError}`;
-      if (cache.queryRejected) this.logger.error(`${message} (polling suspended until a refresh)`);
-      else this.logger.warn(message);
+      if (cache.queryRejected) {
+        // The marker is duck-typed, so anything carrying `permanent: true` can
+        // suspend the timer; naming the class is what makes that traceable.
+        const raised = cause instanceof Error ? cause.constructor.name : typeof cause;
+        this.logger.error(`${message} (polling suspended by ${raised} until a refresh)`);
+      } else this.logger.warn(message);
     }
     // While the source is down the previously fetched session-only issues are
     // the only ones there are, so they are kept rather than refetched.
@@ -1570,7 +1589,13 @@ export class SessionManager {
   }
 
   /**
-   * Writes a set of fields onto a record, stamping `stateSince` on a state change.
+   * Writes a set of fields onto a record, stamping `stateSince` on a state
+   * change and `lastEventAt` on every write.
+   *
+   * The stamp says "this record's state is this server's own doing", which is
+   * as true of an owner action or a reconciler verdict as of a hook, and is
+   * what keeps `flagIfStale` from badging a session the owner has just
+   * relaunched as unverified.
    *
    * @param record - The record before the change.
    * @param fields - Fields to overwrite.
@@ -1581,8 +1606,9 @@ export class SessionManager {
     record: SessionRecord,
     fields: Partial<SessionRecord>,
   ): Promise<SessionRecord> {
-    const next: SessionRecord = { ...record, ...fields };
-    if (next.state !== record.state) next.stateSince = new Date(this.now()).toISOString();
+    const now = new Date(this.now()).toISOString();
+    const next: SessionRecord = { ...record, lastEventAt: now, ...fields };
+    if (next.state !== record.state) next.stateSince = now;
     await this.store.saveSession(next);
     return next;
   }
@@ -1617,9 +1643,12 @@ export class SessionManager {
    * @returns Nothing.
    */
   private emit(channel: EventChannel, frame: EventFrame): void {
-    // Dispatch is synchronous, so without a guard per subscriber one viewer's
-    // socket tearing down would cost every other viewer the frame.
-    for (const listener of [...this.channels[channel]]) {
+    // The live set, not a copy: a subscriber that unsubscribes during the
+    // fan-out — which is what a socket closing does — must not still be called.
+    // Mutation during iteration is defined for `Set`.
+    for (const listener of this.listeners) {
+      // Dispatch is synchronous, so without a guard per subscriber one viewer's
+      // socket tearing down would cost every other viewer the frame.
       try {
         listener(frame);
       } catch (cause) {

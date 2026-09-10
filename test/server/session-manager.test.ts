@@ -149,10 +149,12 @@ async function drain(turns = 200): Promise<void> {
  * @param condition - What the test is waiting for.
  * @param label - Named in the failure when the condition never holds.
  * @returns Nothing.
- * @throws {Error} When the condition still does not hold after two seconds.
+ * @throws {Error} When the condition still does not hold after five seconds.
  */
 async function waitFor(condition: () => boolean, label: string): Promise<void> {
-  const deadline = Date.now() + 2000;
+  // Wall clock on a machine running the whole suite in parallel workers: the
+  // bound exists to name the failure, not to measure how fast the work was.
+  const deadline = Date.now() + 5000;
   while (!condition()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
     await new Promise((resolve) => setImmediate(resolve));
@@ -380,6 +382,23 @@ describe('SessionManager', () => {
       expect(record.state).toBe('starting');
       expect(record.endedAt).toBeNull();
       expect(h.runner.resumed).toHaveLength(1);
+    });
+
+    it('carries the runner’s machine-readable reason onto a refused resume', async () => {
+      // Start and resume both probe the CLI, so `missing-executable` is
+      // reachable on either; a UI that branches on the reason needs both.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.applyEvent(
+        'qc-DOC-1-implement',
+        { type: 'hook', hook: { hook_event_name: 'SessionStart', session_id: 'abc' } },
+        {},
+      );
+      h.runner.resumeError = new MissingExecutableError('claude');
+
+      await expect(h.manager.resumeSession('qc-DOC-1-implement')).rejects.toMatchObject({
+        status: 409,
+        reason: 'missing-executable',
+      });
     });
 
     it('kills a session and closes its record', async () => {
@@ -985,6 +1004,40 @@ describe('SessionManager', () => {
       expect(h.store.session(secondId)?.claudeSessionId).toBe('from-hook');
     });
 
+    it('does not hold the checkout lock across the tracker fetch', async () => {
+      // The tracker is a remote with its own deadline, and nothing in the
+      // critical section depends on the issue being read inside it: a slow
+      // tracker must not queue every removal of the same checkout behind it.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.killSession('qc-DOC-1-implement');
+      await h.manager.archiveSession('qc-DOC-1-implement');
+      h.clock.ms += 60_000;
+      // Emptied and refetched, so the start has to reach the tracker for the
+      // issue rather than answering out of the workspace's cache.
+      h.source.issues = [];
+      await h.manager.refresh('ws');
+      const { held, release } = gate();
+      let fetching = false;
+      h.source.get = async (key: string) => {
+        fetching = true;
+        h.source.getCalls.push(key);
+        await held;
+        return makeIssue({ key });
+      };
+
+      const start = h.manager.startSession('ws', 'DOC-1', START);
+      await waitFor(() => fetching, 'the start to reach the tracker');
+      const removal = h.manager
+        .removeWorktree('qc-DOC-1-implement', false)
+        .catch(() => 'refused' as const);
+      await drain();
+
+      // The removal ran to its own answer while the tracker was still holding.
+      await expect(removal).resolves.toBeDefined();
+      release();
+      await start;
+    });
+
     it('holds a removal of the checkout a start is preparing', async () => {
       const first = await h.manager.startSession('ws', 'DOC-1', START);
       await h.manager.killSession(first.id);
@@ -1083,6 +1136,49 @@ describe('SessionManager', () => {
       expect(h.source.listCalls).toBe(suspended);
     });
 
+    it('stops polling for any error that marks itself permanent, not only Jira’s', async () => {
+      // The marker is the seam: a connector author raises one without
+      // importing Jira code, and testing it with the class it was extracted
+      // from proves only that the class still works.
+      h.source.listError = Object.assign(new Error('the query names no project'), {
+        permanent: true,
+      });
+      await h.manager.start();
+      expect(h.logger.lines.join('\n')).toContain('polling suspended');
+      const suspended = h.source.listCalls;
+      h.source.listError = null;
+
+      await vi.advanceTimersByTimeAsync(h.config.workspaces['ws']!.pollSeconds * 3000);
+
+      expect(h.source.listCalls).toBe(suspended);
+    });
+
+    it('keeps polling for an error that marks itself transient', async () => {
+      // `permanent: false` is the natural way to say "try again"; a marker read
+      // as "is the property there at all" would suspend on it.
+      h.source.listError = Object.assign(new Error('the tracker timed out'), {
+        permanent: false,
+      });
+      await h.manager.start();
+      const failed = h.source.listCalls;
+      h.source.listError = null;
+
+      await vi.advanceTimersByTimeAsync(h.config.workspaces['ws']!.pollSeconds * 1000);
+
+      expect(h.source.listCalls).toBeGreaterThan(failed);
+    });
+
+    it('names the class that suspended the poll timer', async () => {
+      class QueryTooWideError extends Error {
+        readonly permanent = true;
+      }
+      h.source.listError = new QueryTooWideError('too many results');
+
+      await h.manager.start();
+
+      expect(h.logger.lines.join('\n')).toContain('QueryTooWideError');
+    });
+
     it('resumes polling once the owner asks for a refresh', async () => {
       h.source.listError = new JiraTruncatedError('parent = DOC-100', 50, 5000);
       await h.manager.start();
@@ -1122,8 +1218,11 @@ describe('SessionManager', () => {
         await held;
         return snapshot;
       };
+      // Against a captured baseline, not against 1: the harness's own first
+      // refresh is what makes a literal right today, and nothing says so.
+      const baseline = h.source.listCalls;
       const first = h.manager.refresh('ws');
-      await waitFor(() => h.source.listCalls > 1, 'the first refresh to reach the source');
+      await waitFor(() => h.source.listCalls > baseline, 'the first refresh to reach the source');
       h.clock.ms += 1000;
       h.source.issues = [makeIssue(), makeIssue({ key: 'DOC-2', summary: 'Added later' })];
       const second = h.manager.refresh('ws');
@@ -1204,6 +1303,27 @@ describe('SessionManager', () => {
       expect(record?.staleSince).toBeNull();
     });
 
+    it('leaves a session the owner has just resumed unflagged', async () => {
+      // The record's `lastEventAt` is from the previous process, so without a
+      // stamp on the owner's own action the next reconcile pass badges a
+      // session started three seconds ago as "unverified since restart".
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const survivor = h.store.session('qc-DOC-1-implement') as SessionRecord;
+      await h.store.saveSession({
+        ...survivor,
+        state: 'exited',
+        stateSince: new Date(h.clock.ms - 3_600_000).toISOString(),
+        lastEventAt: new Date(h.clock.ms - 3_600_000).toISOString(),
+        claudeSessionId: 'abc',
+      });
+
+      await h.manager.resumeSession('qc-DOC-1-implement');
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+      await h.manager.reconcile();
+
+      expect(h.store.session('qc-DOC-1-implement')?.staleSince).toBeNull();
+    });
+
     it('flags a record once, not once per reconcile pass', async () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       const survivor = h.store.session('qc-DOC-1-implement') as SessionRecord;
@@ -1234,6 +1354,46 @@ describe('SessionManager', () => {
         detail: 'EACCES: permission denied',
       });
     });
+
+    it('applies the event anyway when the log cannot be appended to', async () => {
+      // The transcript is a debugging aid. Letting its failure out 500s every
+      // hook of that session, and a hook is fire-and-forget: the card would
+      // freeze at whatever state it last reached while the session ran on.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.store.appendEvent = async () => {
+        throw Object.assign(new Error('EACCES: sessions/qc-DOC-1-implement'), { code: 'EACCES' });
+      };
+
+      const record = await h.manager.applyEvent(
+        'qc-DOC-1-implement',
+        { type: 'hook', hook: { hook_event_name: 'UserPromptSubmit' } },
+        {},
+      );
+
+      expect(record.state).toBe('working');
+      expect(h.store.session('qc-DOC-1-implement')?.state).toBe('working');
+      expect(h.logger.lines.join('\n')).toContain('cannot append to the event log');
+    });
+
+    it('reports an unwritable log once per session, not once per event', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.store.appendEvent = async () => {
+        throw new Error('EACCES: sessions/qc-DOC-1-implement');
+      };
+
+      for (const hook of ['UserPromptSubmit', 'Stop', 'UserPromptSubmit'] as const) {
+        await h.manager.applyEvent(
+          'qc-DOC-1-implement',
+          { type: 'hook', hook: { hook_event_name: hook } },
+          {},
+        );
+      }
+
+      const complaints = h.logger.lines.filter((line) =>
+        line.includes('cannot append to the event log'),
+      );
+      expect(complaints).toHaveLength(1);
+    });
   });
 
   describe('fan-out', () => {
@@ -1255,8 +1415,9 @@ describe('SessionManager', () => {
         return [...h.source.issues];
       };
 
+      const baseline = h.source.listCalls;
       const refresh = h.manager.refresh('second').catch(() => undefined);
-      await waitFor(() => h.source.listCalls > 1, 'the refresh to reach the source');
+      await waitFor(() => h.source.listCalls > baseline, 'the refresh to reach the source');
       await h.manager.removeWorkspace('second');
       release();
       await refresh;
@@ -1281,6 +1442,30 @@ describe('SessionManager', () => {
       expect(boards).toHaveLength(1);
       expect(boards[0]?.type === 'board' && boards[0].workspaceId).toBe('ws');
       unsubscribe();
+    });
+
+    it('still reaches the later subscribers when one unsubscribes during the fan-out', async () => {
+      // `/ws/events` unsubscribes from inside its own close handler, and a
+      // fan-out over a copy of the set would deliver the frame to a socket that
+      // has already gone — while iterating a copy after a delete during the
+      // loop is exactly what skips the next listener.
+      await settle();
+      const seen: string[] = [];
+      const unsubscribeSecond: Array<() => void> = [];
+      const first = h.manager.subscribe(() => {
+        seen.push('first');
+        unsubscribeSecond[0]?.();
+      });
+      const second = h.manager.subscribe(() => seen.push('second'));
+      unsubscribeSecond.push(second);
+      const third = h.manager.subscribe(() => seen.push('third'));
+
+      await h.manager.startSession('ws', 'DOC-1', START);
+
+      expect(seen).toEqual(['first', 'third']);
+      first();
+      second();
+      third();
     });
 
     it('pushes a session frame as soon as a record changes', async () => {
