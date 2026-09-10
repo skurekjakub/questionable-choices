@@ -163,7 +163,8 @@ losing their words.
   the server has not heard confirmed since it restarted. On the card row it sits
   at the right-hand end, with the duration and the done marker rather than next
   to the state lamp, because the row reads left to right as the spec's sentence
-  does: playbook, state, time in state, done, unverified, may-need-you, gauge.
+  does: playbook, state, compacting, model, time in state, done, unverified,
+  may-need-you, gauge.
   In the session
   header it sits inside the state pill, which is the one thing the header says
   about state. It is a marker rather than a word because the sentence it stands
@@ -190,6 +191,22 @@ losing their words.
   column of them would be nothing but motion. Under `prefers-reduced-motion` the
   animation is replaced by a static outer ring, so the distinction survives
   without motion.
+- **Model and "compacting"** — two readings rather than signals, so both are
+  `--paper-faint` next to the state word and neither gets a colour, a lamp or a
+  lane of its own. The model id is mono, being a machine identifier like the
+  branch and the key. "compacting" says the dashboard is typing at a session
+  that is otherwise sitting at its prompt: the state word stays "your turn",
+  because that is still what the session is doing between the keystrokes.
+- **Compact** — the one control that appears and disappears with a reading
+  rather than with a state. It is offered only on an idle session whose cache
+  has gone cold, because what it costs is exactly the re-read that has already
+  become unavoidable; on any other session it would be a button that spends
+  money for nothing. On the card it sits outside the row's own click target —
+  a button inside a button is not a control the browser gives the keyboard —
+  and it keeps its width while every reading beside it gives way, because a
+  Compact button clipped to its icon is a different button. Its tooltip carries
+  the whole sentence, including the model switch, which is the part an owner
+  would not expect.
 - **Cache gauge** — the one gauge in the product, and the only decorative
   flourish that survives. A 28 px hairline depletes with
   `secondsLeft / ttlSeconds`, falling back to the five-minute default when the

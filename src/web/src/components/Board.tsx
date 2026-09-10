@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState, type JSX } from 'react';
 import type { BoardView, Card as CardModel } from '../../../core/api.js';
-import { deleteWorkspace, errorMessage, openEditor, setFlags } from '../api.js';
+import { deleteWorkspace, errorMessage, openEditor, postCompact, setFlags } from '../api.js';
 import type { PublicConfigResponse } from '../../../core/api.js';
 import { AddWorkspaceDialog } from './AddWorkspaceDialog.js';
 import { BoardHeader } from './BoardHeader.js';
@@ -93,6 +93,10 @@ export function Board({
         setActionError(errorMessage(cause)),
       );
     },
+    compact: (sessionId) =>
+      postCompact(sessionId)
+        .then(() => setActionError(null))
+        .catch((cause: unknown) => setActionError(errorMessage(cause))),
     setFlag: (card, flag, value) => {
       if (workspaceId === null) return;
       setFlags(workspaceId, card.issue.key, { [flag]: value })

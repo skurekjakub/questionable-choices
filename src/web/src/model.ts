@@ -7,6 +7,7 @@ import type {
   PrefillResponse,
   PublicRunnerConfig,
 } from '../../core/api.js';
+import { describeCache } from '../../core/cache-clock.js';
 
 /**
  * A persisted session as the API reports it.
@@ -79,6 +80,30 @@ export { LIVE_STATES, NEEDS_YOU_STATES } from '../../core/api.js';
  */
 export const DROPPED_SENTENCE =
   'This issue has left the board — the epic’s query no longer returns it. What is shown is the card as it was opened.';
+
+/**
+ * Word shown next to the state of a session the dashboard is compacting.
+ */
+export const COMPACTING_LABEL = 'compacting';
+
+/**
+ * Reports whether a session can be compacted right now.
+ *
+ * A compaction is typed into the prompt, so it needs a session sitting at one;
+ * and it costs a full re-read of the context, so it is only worth offering once
+ * the prompt cache has gone cold and that re-read is going to happen anyway.
+ *
+ * @param session - State, cache and compaction flag of the session.
+ * @param nowMs - Current time in epoch milliseconds; the cache is a countdown.
+ * @returns True when the Compact action should be offered.
+ */
+export function compactable(
+  session: { state: SessionState; cache: SessionCache | null; compacting: boolean },
+  nowMs: number,
+): boolean {
+  if (session.state !== 'idle' || session.compacting) return false;
+  return describeCache(session.cache, nowMs).state === 'cold';
+}
 
 /**
  * Words shown next to a session's state lamp.

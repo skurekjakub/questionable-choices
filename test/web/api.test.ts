@@ -5,6 +5,7 @@ import {
   errorHeadline,
   errorMessage,
   isForceableRemoval,
+  postCompact,
   removeWorktree,
 } from '../../src/web/src/api.js';
 
@@ -25,6 +26,42 @@ function refuseWith(status: number, body: ErrorResponse | string): void {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('postCompact', () => {
+  it('posts to the session’s compact route and reads the 202 body', async () => {
+    // 202, not 200: the sequence has only been accepted. A client that treated
+    // anything but 200 as a refusal would report a started compaction as an error.
+    const calls: Array<{ path: string; init: RequestInit | undefined }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (path: string, init?: RequestInit) => {
+        calls.push({ path, init });
+        return new Response(JSON.stringify({ id: 'qc-DOC-1-implement' }), {
+          status: 202,
+          headers: { 'content-type': 'application/json' },
+        });
+      }),
+    );
+
+    const record = await postCompact('qc-DOC-1-implement');
+
+    expect(calls[0]?.path).toBe('/api/sessions/qc-DOC-1-implement/compact');
+    expect(calls[0]?.init?.method).toBe('POST');
+    expect(record.id).toBe('qc-DOC-1-implement');
+  });
+
+  it('raises the server’s refusal with its reason', async () => {
+    refuseWith(409, {
+      error: 'qc-DOC-1-implement is working, not idle',
+      reason: 'not-idle',
+    });
+
+    await expect(postCompact('qc-DOC-1-implement')).rejects.toMatchObject({
+      status: 409,
+      reason: 'not-idle',
+    });
+  });
 });
 
 describe('isForceableRemoval', () => {

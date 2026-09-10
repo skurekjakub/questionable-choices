@@ -984,8 +984,14 @@ Board:
   tab stop.
 - Card: type glyph then key (mono) — glyph first, everywhere — summary (two
   lines max), Jira status chip, labels (max 3 + "+n"), then one row per
-  non-archived session: playbook, state, `time in state`, a done marker, an
+  non-archived session: playbook, state, `compacting` while one is running, the
+  model the session is on, `time in state`, a done marker, an
   unverified-since-restart marker, a may-need-you marker, and the cache gauge.
+  The model and `compacting` are secondary readings and carry no colour of their
+  own. A **Compact** button (icon plus the word, with the whole sentence in its
+  `title`) sits at the end of the row, outside the row's own click target, and
+  only when the session is `idle`, has no compaction running, and its cache
+  reads cold; it disables itself while its own POST is in flight.
   The state reads
   `failed, exit N` and `exited, code N` for a non-zero code, with the tmux
   hint in its `title`. The unverified and may-need-you markers are lamp-style
@@ -1020,9 +1026,11 @@ Board:
 Session view:
 
 - Terminal fills ~75 %; header, in this order: Back, key, playbook, state
-  pill (carrying the ended-state label, the unverified marker and the
-  may-need-you marker), branch, cache countdown, then Interrupt · Kill ·
-  Resume. Resume appears for any
+  pill (carrying the ended-state label, `compacting` while one is running, the
+  unverified marker and the may-need-you marker), the model the session is on,
+  branch, cache countdown, then Compact · Interrupt · Kill ·
+  Resume. Compact appears under the same rule as on the card — `idle`, no
+  compaction running, cache cold. Resume appears for any
   non-live state, `failed` included, and is disabled while the record has no
   Claude session id or the issue detail has not loaded yet.
 - Right panel: issue summary/description, status chip, labels, Jira link,
@@ -1123,6 +1131,16 @@ the new one. It is not durability: nothing is fsynced.
   reaches the record and `CardSession.lastExitCode` only while the record is
   still `bootstrapping`: a signal that arrives after the reconciler has already
   closed the record is refused, so its code lives in the log alone.
+- A Compact that fails at any step (§5.6) → the marker is cleared and the
+  record's `hint` becomes `Compact failed: <what went wrong>`, which the card's
+  may-need-you marker and the session header's state pill already render. It is
+  a hint rather than a state because the session is exactly where it was: at the
+  prompt, with nothing sent. The wordings are "the CLI does not offer the model
+  X", "the status line never reported the model X", "the CLI never reported the
+  compaction starting", "the compaction did not finish in ten minutes", "the
+  session ended during the compaction" and, from the reconciler, "the dashboard
+  stopped driving it". A session left on the compact model is the second-order
+  failure of the last two, and the card's model reading is what shows it.
 - The listening socket cannot be opened, for any reason → the cause is logged
   and the process exits 1. Without a socket it serves nothing, and the signal
   handlers keep the event loop alive, so it must not stay up.

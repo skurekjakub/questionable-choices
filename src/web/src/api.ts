@@ -315,6 +315,22 @@ export async function sessionAction(
 }
 
 /**
+ * Asks the server to compact a session.
+ *
+ * The answer is a 202: the record comes back with its compaction marker set,
+ * and the sequence behind it — switch model, `/compact`, switch back — runs on
+ * afterwards, reporting through the session frames on the event socket.
+ *
+ * @param sessionId - Id of the session to compact.
+ * @returns The record with its compaction marker set.
+ * @throws {ApiError} With status 409 and reason `not-idle` when the session is
+ * not at the prompt, or `compacting` when one is already running.
+ */
+export async function postCompact(sessionId: string): Promise<SessionRecord> {
+  return (await post(`/api/sessions/${encodeURIComponent(sessionId)}/compact`)) as SessionRecord;
+}
+
+/**
  * Removes the worktree a session runs in.
  *
  * @param sessionId - Id of the session whose worktree should go.

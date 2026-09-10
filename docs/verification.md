@@ -251,6 +251,28 @@ playbook, state and time in state; the pending summary appears only in the
 session header and the drawer. With several sessions waiting, the Needs you
 column cannot be triaged without opening each one.
 
+**An auto-compaction is not tracked.** Claude Code compacts on its own when the
+context fills, and it arrives on exactly the hooks a Compact does —
+`PreCompact`, then `SubagentStop` / `SessionStart{source:"compact"}` /
+`PostCompact` — with `trigger: "auto"` where a typed one carries `"manual"`.
+Nothing on the record moves for it: the dashboard is not driving it, cannot
+cancel it, and has no model to put back, so `PreCompact` only ever stamps a
+marker that a Compact already created (spec §5.3). The consequence: a session
+that auto-compacts is silent for the ~20 s it takes, the card reads "your turn"
+throughout, and the event log is the only place it shows up. Acting on it would
+mean a card saying "compacting" about an action the owner never took.
+
+**A `/model` the owner types by hand rewrites their global default, and the
+dashboard does not undo that one.** Every successful `/model` prints `Set model
+to … and saved as your default for new sessions` and rewrites `"model"` in
+`~/.claude/settings.json` — the owner's real settings, which every session on
+the machine reads, not the session's own `--settings` override. A Compact
+snapshots that key and puts it back (spec §5.6 step 7), because its own two
+switches are the dashboard's doing. A switch the owner types inside a session
+is not, and nothing snapshots it: their global default silently becomes
+whatever they last switched a session to. The fix for that one is one more
+`/model` in any session.
+
 **Vite dev logs two WebSocket warnings on load.** React StrictMode mounts the
 effect twice, so the first socket is closed before its handshake completes.
 Harmless, and absent from a production build.
