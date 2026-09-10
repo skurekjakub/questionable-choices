@@ -124,9 +124,23 @@
 
 .session-row {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
   width: 100%;
+  min-width: 0;
+}
+
+.session-row + .session-row {
+  border-top: 1px solid rgba(43, 58, 66, 0.55);
+}
+
+.session-open {
+  display: flex;
+  flex-direction: column;
   align-items: stretch;
+  /* The readings shrink; the Compact button beside them does not. */
+  flex: 1 1 auto;
+  min-width: 0;
   gap: var(--sp-1);
   padding: var(--sp-1) 0;
   font-size: var(--fs-row);
@@ -134,8 +148,34 @@
   min-height: 28px;
 }
 
-.session-row + .session-row {
-  border-top: 1px solid rgba(43, 58, 66, 0.55);
+/* Both the model id and the compacting word are readings rather than controls,
+   so they give their width up before the state and the playbook do. */
+.session-model {
+  flex: 0 2 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--paper-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-compacting {
+  flex: 0 3 auto;
+  min-width: 0;
+  color: var(--paper-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The row's one control, so it keeps its width while every reading beside it
+   gives way — a Compact button clipped to its icon is a different button. */
+.compact-button {
+  flex: none;
+  gap: var(--sp-1);
+  padding: 2px var(--sp-2);
+  font-size: var(--fs-row);
 }
 
 .session-line {

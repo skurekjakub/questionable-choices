@@ -6,14 +6,22 @@ import {
   getSessionEvents,
   isForceableRemoval,
   openEditor,
+  postCompact,
   removeWorktree,
   sessionAction,
 } from '../api.js';
 import { failureReason } from '../failure.js';
 import { attachCommand, endedHint } from '../format.js';
 import { useSession } from '../hooks/useSession.js';
-import { LIVE_STATES, NEEDS_YOU_STATES, STATE_LABELS } from '../model.js';
+import {
+  COMPACTING_LABEL,
+  LIVE_STATES,
+  NEEDS_YOU_STATES,
+  STATE_LABELS,
+  compactable,
+} from '../model.js';
 import { CacheReadout } from './CacheReadout.js';
+import { CompactButton } from './CompactButton.js';
 import { LabelChips, StatusChip } from './Chips.js';
 import { CopyButton } from './CopyButton.js';
 import { ErrorBoundary } from './ErrorBoundary.js';
@@ -136,6 +144,12 @@ export function SessionView({
   // The record carries the whole notification and the card only its summary, so
   // the two shapes of the same field are reduced here rather than at the marker.
   const hint = record !== null ? (record.hint?.summary ?? null) : (cardSession?.hint ?? null);
+  // Same two shapes again: the record holds the whole compaction and the card
+  // only whether there is one, and the record's own `model` is the launch model
+  // rather than the one the session is on.
+  const compacting =
+    record !== null ? record.compacting !== null : (cardSession?.compacting ?? false);
+  const model = record !== null ? record.currentModel : (cardSession?.model ?? null);
 
   const ended = shown === null ? null : endedHint(sessionId, shown.state, shown.lastExitCode);
 
@@ -227,6 +241,7 @@ export function SessionView({
           <span className="state-pill" data-alert={needsYou}>
             <Lamp state={shown.state} />
             {ended?.label ?? STATE_LABELS[shown.state]}
+            {compacting ? <span className="session-compacting">{COMPACTING_LABEL}</span> : null}
             {shown.staleSince == null ? null : <StaleMarker />}
             {hint === null ? null : <HintMarker summary={hint} />}
             {shown.pending === null ? null : (
@@ -234,9 +249,24 @@ export function SessionView({
             )}
           </span>
         )}
+        {model === null ? null : <span className="session-model">{model}</span>}
         {shown?.branch == null ? null : <span className="branch">{shown.branch}</span>}
         <CacheReadout cache={shown?.cache ?? null} nowMs={nowMs} />
         <span className="header-spacer" />
+        {shown !== null &&
+        compactable({ state: shown.state, cache: shown.cache, compacting }, nowMs) ? (
+          <CompactButton
+            onCompact={() =>
+              postCompact(sessionId)
+                .then(() => {
+                  setActionError(null);
+                  reload();
+                })
+                .catch((cause: unknown) => setActionError(errorMessage(cause)))
+            }
+            label={`Compact ${sessionId}`}
+          />
+        ) : null}
         <button
           type="button"
           className="btn"

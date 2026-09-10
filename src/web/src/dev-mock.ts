@@ -127,6 +127,8 @@ function session(overrides: Partial<CardSession> & Pick<CardSession, 'id' | 'sta
     staleSince: null,
     hint: null,
     cache: null,
+    model: 'claude-opus-5',
+    compacting: false,
     done: false,
     live,
     needsYou,
@@ -979,6 +981,62 @@ function removeWorktree(sessionId: string, force: boolean): { status: number; bo
 }
 
 /**
+ * Seconds the mock spends pretending to compact before it flips the marker off.
+ */
+const MOCK_COMPACT_SECONDS = 3;
+
+/**
+ * Accepts a compaction, refusing it the way the server refuses it.
+ *
+ * The real sequence takes as long as the compaction does and reports only over
+ * the event socket, so the mock does the same: a 202 now, and the marker off
+ * with a warm cache a few seconds later.
+ *
+ * @param sessionId - Session to compact.
+ * @returns The 202 record, or the 409 refusal the server would send.
+ */
+function compact(sessionId: string): { status: number; body: unknown } {
+  for (const board of boards.values()) {
+    for (const card of board.columns.flatMap((column) => column.cards)) {
+      const found = card.sessions.find((candidate) => candidate.id === sessionId);
+      if (found === undefined) continue;
+      if (found.compacting) {
+        const refusal: ErrorResponse = {
+          error: `${sessionId} is already being compacted`,
+          detail: 'wait for it to finish, or kill the session',
+          reason: 'compacting',
+        };
+        return { status: 409, body: refusal };
+      }
+      if (found.state !== 'idle') {
+        const refusal: ErrorResponse = {
+          error: `${sessionId} is ${found.state}, not idle`,
+          detail: 'a compaction is typed into the prompt, so the session has to be sitting at one',
+          reason: 'not-idle',
+        };
+        return { status: 409, body: refusal };
+      }
+      found.compacting = true;
+      broadcast({ type: 'board', workspaceId: board.workspaceId, view: board });
+      window.setTimeout(() => {
+        found.compacting = false;
+        found.cache = warmCache(3400, 3600);
+        // Both frames, as the server sends both: the session route renders the
+        // record and never rebuilds it from a board frame, so a board-only
+        // broadcast leaves that view saying "compacting" for good.
+        broadcast({
+          type: 'session',
+          record: mockRecord(board.workspaceId, card.issue.key, found),
+        });
+        broadcast({ type: 'board', workspaceId: board.workspaceId, view: board });
+      }, MOCK_COMPACT_SECONDS * 1000);
+      return { status: 202, body: mockRecord(board.workspaceId, card.issue.key, found) };
+    }
+  }
+  return { status: 404, body: { error: `unknown session '${sessionId}'` } };
+}
+
+/**
  * Projects one issue's ticks onto its workspace's checklist template.
  *
  * @param workspaceId - Workspace the issue belongs to.
@@ -1228,6 +1286,7 @@ function route(
       return { status: 404, body: { error: `The mock has no route for ${method} ${path}` } };
     }
     if (action === 'remove-worktree') return removeWorktree(sessionId, body?.['force'] === true);
+    if (action === 'compact') return compact(sessionId);
     for (const board of boards.values()) {
       for (const entry of board.columns.flatMap((column) => column.cards)) {
         const found = entry.sessions.find((candidate) => candidate.id === sessionId);
@@ -1374,6 +1433,7 @@ function mockRecord(workspaceId: string, issueKey: string, entry: CardSession): 
     cwd: `/home/jakubs/repositories/worktrees/${issueKey}`,
     branch: entry.branch,
     model: 'claude-opus-5',
+    currentModel: entry.model,
     effort: 'high',
     permissionMode: 'acceptEdits',
     prompt: `You are working on ${issueKey}.`,
@@ -1387,6 +1447,14 @@ function mockRecord(workspaceId: string, issueKey: string, entry: CardSession): 
     staleSince: entry.staleSince,
     hint: entry.hint === null ? null : { summary: entry.hint, at: entry.stateSince },
     cache: entry.cache,
+    compacting: entry.compacting
+      ? {
+          restoreModel: 'claude-opus-5',
+          globalDefault: 'claude-fable-5-1',
+          startedAt: null,
+          requestedAt: new Date().toISOString(),
+        }
+      : null,
     createdAt: ago(9600),
     endedAt: entry.live ? null : ago(600),
     done: entry.done,

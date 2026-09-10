@@ -25,13 +25,41 @@ export interface PromptCachePayload {
 }
 
 /**
+ * The `model` block of a Claude Code status-line payload.
+ */
+export interface StatuslineModelPayload {
+  /** Model id, as `claude --model` spells it. */
+  id?: string | undefined;
+  /** Model name as the TUI shows it, e.g. `Sonnet 5`. */
+  display_name?: string | undefined;
+}
+
+/**
  * The parts of a Claude Code status-line payload this app reads.
  */
 export interface StatuslinePayload {
   /** Claude Code's own session id. */
   session_id?: string | undefined;
+  /** The model the session is on; absent from an older CLI's payload. */
+  model?: StatuslineModelPayload | null | undefined;
   /** Prompt-cache block; absent until the session has made its first request. */
   prompt_cache?: PromptCachePayload | null | undefined;
+}
+
+/**
+ * Reads the model id out of a status-line payload.
+ *
+ * A `/model` switch emits no hook, so this is the only report that one
+ * happened; the payload is the CLI's, so a missing or non-string id is a
+ * payload this app cannot read rather than a model with no name.
+ *
+ * @param payload - The status-line payload as the hook posted it.
+ * @returns The model id, or null when the payload names none.
+ */
+export function modelFromStatusline(payload: StatuslinePayload): string | null {
+  const model = payload.model;
+  if (model === undefined || model === null) return null;
+  return typeof model.id === 'string' && model.id !== '' ? model.id : null;
 }
 
 /**

@@ -140,6 +140,30 @@ export interface SessionHint {
 }
 
 /**
+ * A compaction the dashboard asked for and is still driving.
+ *
+ * Its presence is what tells an owner-driven `/compact` from one Claude Code
+ * started by itself: an auto-compaction arrives on the same hooks and finds no
+ * marker, so nothing on the record moves for it.
+ */
+export interface SessionCompaction {
+  /** Model the session is put back on when the compaction ends. */
+  restoreModel: string;
+  /**
+   * The owner's global default model as it stood when the sequence began, or
+   * null when their settings named none.
+   *
+   * `/model` rewrites that global on every switch, so the value is carried here
+   * to be put back — including by a server that restarts mid-sequence.
+   */
+  globalDefault: string | null;
+  /** ISO timestamp of the `PreCompact` hook, or null before one arrives. */
+  startedAt: string | null;
+  /** ISO timestamp at which the compaction was asked for. */
+  requestedAt: string;
+}
+
+/**
  * Where a session's prompt-cache figures came from.
  *
  * `statusline` means a real status-line payload; `derived` means the value was
@@ -194,8 +218,19 @@ export interface SessionRecord {
   cwd: string;
   /** Branch the session works on; null for isolation `shared`. */
   branch: string | null;
-  /** Model id passed to the CLI. */
+  /**
+   * Model id passed to the CLI, and the one a resume relaunches on. It is the
+   * session's own model: a `/model` switch inside the session does not move it.
+   */
   model: string;
+  /**
+   * Model the session is on now, as the last status-line payload reported it,
+   * or null before any payload has arrived.
+   *
+   * A `/model` switch emits no hook at all, so the status line is the only
+   * signal that one happened.
+   */
+  currentModel: string | null;
   /** Reasoning effort passed to the CLI. */
   effort: Effort;
   /** Permission mode passed to the CLI, or `'default'` when no flag was passed. */
@@ -244,6 +279,15 @@ export interface SessionRecord {
   lastEventAt: string | null;
   /** Prompt-cache state, or null before anything reported one. */
   cache: SessionCache | null;
+  /**
+   * The compaction the dashboard is driving on this session, or null when it is
+   * driving none.
+   *
+   * It is the whole state of the sequence: while it is set the session is being
+   * typed at, and clearing it is what says the session is back at its own model
+   * and at the prompt.
+   */
+  compacting: SessionCompaction | null;
   /** ISO timestamp of record creation. */
   createdAt: string;
   /** ISO timestamp at which the process ended, or null while it runs. */
@@ -294,6 +338,11 @@ export interface RunnerConfig {
   defaultEffort: Effort;
   /** Permission mode preselected when the playbook names none. */
   defaultPermissionMode: PermissionModeSetting;
+  /**
+   * Model a session is switched to for the duration of a `/compact`, so the
+   * summarising turn is not paid for at the session's own model's rate.
+   */
+  compactModel: string;
 }
 
 /**
@@ -659,6 +708,32 @@ export interface Runner {
    * @throws {Error} When tmux refuses the send.
    */
   interrupt(sessionId: string): Promise<void>;
+  /**
+   * Types one line into the session and submits it.
+   *
+   * The text is delivered literally, so a leading slash reaches the CLI as the
+   * slash command it spells rather than as a key name. An empty text submits
+   * alone, which is how a confirmation dialog already on screen is answered.
+   *
+   * @param sessionId - Id of the session to type into.
+   * @param text - Line to type; empty to submit with nothing typed.
+   * @returns Nothing.
+   * @throws {Error} When the runner refuses the send.
+   */
+  sendLine(sessionId: string, text: string): Promise<void>;
+  /**
+   * Reads what is on the session's screen right now.
+   *
+   * A CLI that answers only on screen — a refusal, a confirmation dialog — can
+   * be read no other way. Nothing about the text is a contract, so a caller
+   * must treat a phrase it does not find as "not on screen", never as "not
+   * true".
+   *
+   * @param sessionId - Id of the session to read.
+   * @returns The visible contents of the session's pane.
+   * @throws {Error} When the runner cannot read the session.
+   */
+  capturePane(sessionId: string): Promise<string>;
   /**
    * Kills the session's tmux session.
    *

@@ -15,7 +15,13 @@ import type {
 } from '../core/api.js';
 import { ConfigError } from '../core/config.js';
 import { registerHookRoutes } from './hooks.js';
-import { ActionError, consoleLogger, type Logger, type SessionManager } from './session-manager.js';
+import {
+  ActionError,
+  consoleLogger,
+  toWire,
+  type Logger,
+  type SessionManager,
+} from './session-manager.js';
 import { registerWebSocketRoutes, type UpgradeWebSocketFn } from './terminal-ws.js';
 import { messageOf, readJsonObject } from './util.js';
 
@@ -272,6 +278,14 @@ export function createApp(deps: AppDeps): Hono {
   app.post('/api/sessions/:id/archive', async (c) =>
     c.json(await manager.archiveSession(c.req.param('id'))),
   );
+
+  app.post('/api/sessions/:id/compact', async (c) => {
+    // 202, not 200: the record answered here has only been accepted and marked.
+    // The sequence it starts runs for as long as the compaction takes, and its
+    // outcome reaches the caller over the event socket.
+    const record = await manager.compactSession(c.req.param('id'));
+    return c.json(toWire(record), 202);
+  });
 
   app.post('/api/sessions/:id/remove-worktree', async (c) => {
     const body = (await readJsonObject(c)) ?? {};

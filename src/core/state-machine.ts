@@ -4,6 +4,7 @@ import {
   cacheChanged,
   cacheDerived,
   cacheFromStatusline,
+  modelFromStatusline,
 } from './cache-clock.js';
 import type { StatuslinePayload } from './cache-clock.js';
 import type { SessionRecord, SessionRun, SessionState } from './types.js';
@@ -178,6 +179,34 @@ export interface StopHookEvent extends HookEventBase {
 }
 
 /**
+ * Payload of the `PreCompact` hook, which fires as a compaction is asked for.
+ *
+ * It is the "started" edge and not a promise that anything will be compacted: a
+ * context too small to compact raises it and then refuses on screen, with no
+ * further hook at all.
+ */
+export interface PreCompactHookEvent extends HookEventBase {
+  /** Hook discriminator. */
+  hook_event_name: 'PreCompact';
+  /** `manual` for a typed `/compact`, `auto` for one Claude Code started itself. */
+  trigger?: string | undefined;
+  /** Extra instructions the `/compact` argument carried, when it had any. */
+  custom_instructions?: string | null | undefined;
+}
+
+/**
+ * Payload of the `PostCompact` hook, which fires once the new context exists.
+ */
+export interface PostCompactHookEvent extends HookEventBase {
+  /** Hook discriminator. */
+  hook_event_name: 'PostCompact';
+  /** `manual` for a typed `/compact`, `auto` for one Claude Code started itself. */
+  trigger?: string | undefined;
+  /** The summary the compaction produced, in full. */
+  compact_summary?: string | undefined;
+}
+
+/**
  * Payload of the `SessionEnd` hook.
  */
 export interface SessionEndHookEvent extends HookEventBase {
@@ -200,7 +229,22 @@ export type HookEvent =
   | PermissionDeniedHookEvent
   | NotificationHookEvent
   | StopHookEvent
+  | PreCompactHookEvent
+  | PostCompactHookEvent
   | SessionEndHookEvent;
+
+/**
+ * Value `PreCompact` and `PostCompact` carry for a compaction the owner typed,
+ * as opposed to one Claude Code started for itself.
+ */
+export const MANUAL_COMPACT_TRIGGER = 'manual';
+
+/**
+ * Value `SessionStart.source` carries on the session that a compaction
+ * produced. It arrives ~20 ms before `PostCompact` and says the same thing, so
+ * whichever comes first is the end of the compaction.
+ */
+export const COMPACT_SESSION_SOURCE = 'compact';
 
 /**
  * Hook names the generated settings file subscribes to.
@@ -215,6 +259,8 @@ export const HOOK_EVENT_NAMES = [
   'PermissionDenied',
   'Notification',
   'Stop',
+  'PreCompact',
+  'PostCompact',
   'SessionEnd',
 ] as const;
 
@@ -372,6 +418,8 @@ type SessionPatch = Partial<
     | 'lastExitCode'
     | 'staleSince'
     | 'cache'
+    | 'currentModel'
+    | 'compacting'
     | 'endedAt'
     | 'runs'
   >
@@ -517,9 +565,13 @@ export function reduce(
       return apply({ state: 'idle', pending: null, lastAssistantMessage: null }, false);
 
     case 'statusline': {
+      const patch: SessionPatch = {};
       const cache = cacheFromStatusline(event.payload);
-      if (cache === null || !cacheChanged(record.cache, cache)) return unchanged;
-      return apply({ cache });
+      if (cache !== null && cacheChanged(record.cache, cache)) patch.cache = cache;
+      const model = modelFromStatusline(event.payload);
+      if (model !== null && model !== record.currentModel) patch.currentModel = model;
+      if (Object.keys(patch).length === 0) return unchanged;
+      return apply(patch);
     }
 
     case 'hook':
@@ -600,6 +652,22 @@ export function reduce(
         false,
       );
     }
+
+    case 'PreCompact': {
+      const marker = record.compacting;
+      // A compaction nobody asked for arrives on the same hook and finds no
+      // marker. It is proof the session is alive and nothing else: there is no
+      // sequence to time, and a card that showed "compacting" for it would be
+      // showing an action the owner never took and cannot cancel.
+      if (marker === null || marker === undefined) return apply({}, false);
+      if (marker.startedAt !== null) return apply({}, false);
+      return apply({ compacting: { ...marker, startedAt: now } }, false);
+    }
+
+    case 'PostCompact':
+      // The end of the compaction, but not the end of the sequence: the model
+      // still has to be switched back, so the marker is the manager's to clear.
+      return apply({}, false);
 
     case 'Stop': {
       if (!live) return unchanged;

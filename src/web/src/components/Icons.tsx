@@ -112,6 +112,23 @@ export function CloseIcon(): JSX.Element {
 }
 
 /**
+ * Two arrows closing on a rule, used for the Compact action.
+ *
+ * @returns The compact glyph.
+ */
+export function CompactIcon(): JSX.Element {
+  return (
+    <Glyph>
+      <path d="M2.6 8h10.8" />
+      <path d="M8 2.2v3.4" />
+      <path d="M6.2 3.8 8 5.6l1.8-1.8" />
+      <path d="M8 13.8v-3.4" />
+      <path d="M6.2 12.2 8 10.4l1.8 1.8" />
+    </Glyph>
+  );
+}
+
+/**
  * Arrow pointing out of a box, used for links that leave the app.
  *
  * @returns The external-link glyph.

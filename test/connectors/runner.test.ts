@@ -16,10 +16,14 @@ import {
   TMUX_HEIGHT,
   TMUX_WIDTH,
   attachArgv,
+  capturePaneArgv,
   hasSessionArgv,
   killSessionArgv,
   newSessionArgv,
+  sendEnterArgv,
   sendEscapeArgv,
+  sendLineArgvs,
+  sendLiteralArgv,
   tmuxCommandLine,
   windowSizeArgv,
 } from '../../src/connectors/runners/claude-tmux/tmux.js';
@@ -34,6 +38,7 @@ const RUNNER_CONFIG: RunnerConfig = {
   defaultModel: 'claude-fable-5-1',
   defaultEffort: 'high',
   defaultPermissionMode: 'acceptEdits',
+  compactModel: 'claude-sonnet-5',
 };
 
 let root = '';
@@ -113,6 +118,26 @@ describe('tmux argument builders', () => {
 
   it('renders a command line for error messages', () => {
     expect(tmuxCommandLine(hasSessionArgv('s'))).toBe('tmux has-session -t s');
+  });
+
+  it('keeps the literal text and the submit in two separate invocations', () => {
+    // `-l` makes every argument after it literal, key names included:
+    // `send-keys -l '/compact' Enter` types the word `Enter` into the box.
+    expect(sendLineArgvs('s', '/compact')).toEqual([
+      ['send-keys', '-t', 's', '-l', '/compact'],
+      ['send-keys', '-t', 's', 'Enter'],
+    ]);
+    expect(sendLiteralArgv('s', '/compact')).not.toContain('Enter');
+  });
+
+  it('submits with nothing typed for an empty line', () => {
+    // Answering a dialog already on screen: `send-keys -l ''` would be a second
+    // invocation that types nothing, which is a call to make tmux fail for free.
+    expect(sendLineArgvs('s', '')).toEqual([sendEnterArgv('s')]);
+  });
+
+  it('prints the visible pane to stdout', () => {
+    expect(capturePaneArgv('s')).toEqual(['capture-pane', '-p', '-t', 's']);
   });
 });
 

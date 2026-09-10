@@ -174,7 +174,28 @@ type is `claude-tmux`.
 
 1. Implement `Runner` from `src/core/types.ts` under
    `src/connectors/runners/<type>/`: `start`, `resume`, `attach`, `interrupt`,
-   `kill`, `isAlive`.
+   `kill`, `isAlive`, `sendLine`, `capturePane`.
+   - `sendLine(sessionId, text)` types one line and submits it. The text is
+     delivered **literally**, so a leading slash arrives as the slash command it
+     spells; an empty text submits with nothing typed, which is how a
+     confirmation dialog already on screen is answered. In tmux that takes two
+     invocations, the literal text and then the key:
+
+     ```bash
+     tmux send-keys -t <id> -l '/compact'
+     tmux send-keys -t <id> Enter
+     ```
+
+     They cannot be one call. `-l` makes every later argument literal, key names
+     included, so appending `Enter` to the first types the five characters that
+     spell it.
+
+   - `capturePane(sessionId)` returns what is on the session's screen. It exists
+     because the CLI answers some things only on screen, with no hook and no
+     status-line change at all: a model id it does not know, a context too small
+     to compact, a "Switch model?" confirmation. Nothing about the text is a
+     contract, so a caller treats a phrase it does not find as "not on screen",
+     never as "not true", and never waits on one without a deadline.
 2. Report lifecycle through the hook ingress rather than by scraping the
    screen: `POST /api/hooks/:sessionId/launcher/<signal>` for
    `bootstrap-start`, `bootstrap-failed` (with `exitCode` and a `message`

@@ -213,6 +213,7 @@ async function main(): Promise<void> {
   const { runner, repos, workspaces } = buildConnectors(config, home, (sessionId) =>
     store.sessionDir(sessionId),
   );
+  const claudeSettingsPath = join(home, '.claude', 'settings.json');
   const manager = new SessionManager({
     config,
     configPath,
@@ -220,7 +221,8 @@ async function main(): Promise<void> {
     runner,
     workspaces,
     createRuntime: (next, workspaceId) => buildWorkspaceRuntime(next, workspaceId, repos),
-    derivedCacheTtlSeconds: readDerivedCacheTtlSeconds(join(home, '.claude', 'settings.json')),
+    derivedCacheTtlSeconds: readDerivedCacheTtlSeconds(claudeSettingsPath),
+    claudeSettingsPath,
     logger: consoleLogger,
   });
   const app = createApp({

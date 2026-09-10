@@ -17,10 +17,12 @@ import {
 import {
   TMUX_TERM,
   attachArgv,
+  capturePaneArgv,
   hasSessionArgv,
   killSessionArgv,
   newSessionArgv,
   sendEscapeArgv,
+  sendLineArgvs,
   tmux,
   tmuxAttempt,
   windowSizeArgv,
@@ -438,6 +440,29 @@ export class ClaudeTmuxRunner implements Runner {
    */
   async interrupt(sessionId: string): Promise<void> {
     await tmux(sendEscapeArgv(sessionId));
+  }
+
+  /**
+   * Types one line into the session and submits it.
+   *
+   * @param sessionId - Id of the session to type into.
+   * @param text - Line to type; empty to submit with nothing typed.
+   * @returns Nothing.
+   * @throws {TmuxError} When tmux refuses either send.
+   */
+  async sendLine(sessionId: string, text: string): Promise<void> {
+    for (const argv of sendLineArgvs(sessionId, text)) await tmux(argv);
+  }
+
+  /**
+   * Reads the session's visible pane.
+   *
+   * @param sessionId - Id of the session to read.
+   * @returns The pane contents as tmux printed them.
+   * @throws {TmuxError} When tmux refuses the capture.
+   */
+  async capturePane(sessionId: string): Promise<string> {
+    return (await tmux(capturePaneArgv(sessionId))).stdout;
   }
 
   /**

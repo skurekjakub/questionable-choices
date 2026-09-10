@@ -66,8 +66,11 @@ mkdir -p ~/.config/questionable-choices
 cp config.example.json ~/.config/questionable-choices/config.json
 ```
 
-Edit the config (or set `QC_CONFIG` to another path). Four blocks:
+Edit the config (or set `QC_CONFIG` to another path). Five blocks:
 
+- `runner` — which CLI to launch, the models the picker offers and their
+  defaults, plus `compactModel` (default `claude-sonnet-5`), the model a
+  session is switched to for the length of a Compact and switched back from.
 - `connectors` — Jira site plus the names of the env vars holding email and
   API token. Put the values in `~/.config/questionable-choices/.env`
   (`JIRA_EMAIL_KENTICO_JIRA=you@example.com`, one per line); the server loads

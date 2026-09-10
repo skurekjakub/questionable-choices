@@ -1,8 +1,9 @@
 import type { JSX } from 'react';
 import type { Card as CardModel, CardSession, PlaybookSummary } from '../../../core/api.js';
 import { endedHint, timeInState, typeGlyph } from '../format.js';
-import { STATE_LABELS } from '../model.js';
+import { COMPACTING_LABEL, STATE_LABELS, compactable } from '../model.js';
 import { CacheReadout } from './CacheReadout.js';
+import { CompactButton } from './CompactButton.js';
 import { LabelChips, StatusChip } from './Chips.js';
 import { EditorIcon } from './Icons.js';
 import { HintMarker, Lamp, StaleMarker, type LampTone } from './Lamp.js';
@@ -20,6 +21,13 @@ export interface CardHandlers {
   openSession: (sessionId: string) => void;
   /** Opens the issue's checkout in the desktop editor. */
   openEditor: (card: CardModel) => void;
+  /**
+   * Starts a compaction of one session.
+   *
+   * @param sessionId - Session to compact.
+   * @returns Nothing, once the server has accepted or refused it.
+   */
+  compact: (sessionId: string) => Promise<void>;
   /** Sets or clears one of the owner's per-issue flags. */
   setFlag: (card: CardModel, flag: 'review' | 'done', value: boolean) => void;
 }
@@ -64,31 +72,45 @@ function SessionRow({
   playbookLabel,
   nowMs,
   onOpen,
+  onCompact,
 }: {
   session: CardSession;
   playbookLabel: string;
   nowMs: number;
   onOpen: () => void;
+  onCompact: () => Promise<void>;
 }): JSX.Element {
   const ended = endedHint(session.id, session.state, session.lastExitCode);
   return (
-    <button type="button" className="session-row card-open" onClick={onOpen}>
-      <span className="session-line">
-        <Lamp state={session.state} />
-        <span className="session-playbook">{playbookLabel}</span>
-        <span className="session-state" title={ended?.shell ?? undefined}>
-          {ended?.label ?? STATE_LABELS[session.state]}
+    <div className="session-row">
+      {/* The Compact button is a sibling of the row rather than a child of it:
+          a button inside a button is not a control the browser will give the
+          keyboard, whatever it looks like. */}
+      <button type="button" className="session-open card-open" onClick={onOpen}>
+        <span className="session-line">
+          <Lamp state={session.state} />
+          <span className="session-playbook">{playbookLabel}</span>
+          <span className="session-state" title={ended?.shell ?? undefined}>
+            {ended?.label ?? STATE_LABELS[session.state]}
+          </span>
+          {session.compacting ? (
+            <span className="session-compacting">{COMPACTING_LABEL}</span>
+          ) : null}
+          {session.model === null ? null : <span className="session-model">{session.model}</span>}
+          <span className="session-time">{timeInState(session.stateSince, nowMs)}</span>
+          {session.done ? <span className="session-done">done</span> : null}
+          {session.staleSince === null ? null : <StaleMarker />}
+          {session.hint === null ? null : <HintMarker summary={session.hint} />}
+          <CacheReadout cache={session.cache} nowMs={nowMs} />
         </span>
-        <span className="session-time">{timeInState(session.stateSince, nowMs)}</span>
-        {session.done ? <span className="session-done">done</span> : null}
-        {session.staleSince === null ? null : <StaleMarker />}
-        {session.hint === null ? null : <HintMarker summary={session.hint} />}
-        <CacheReadout cache={session.cache} nowMs={nowMs} />
-      </span>
-      {session.needsYou && session.pending !== null ? (
-        <span className="session-pending">{session.pending.summary}</span>
+        {session.needsYou && session.pending !== null ? (
+          <span className="session-pending">{session.pending.summary}</span>
+        ) : null}
+      </button>
+      {compactable(session, nowMs) ? (
+        <CompactButton onCompact={onCompact} label={`Compact ${session.id}`} />
       ) : null}
-    </button>
+    </div>
   );
 }
 
@@ -161,6 +183,7 @@ export function Card({
               playbookLabel={labelFor(session.playbookId)}
               nowMs={nowMs}
               onOpen={() => handlers.openSession(session.id)}
+              onCompact={() => handlers.compact(session.id)}
             />
           ))}
         </div>

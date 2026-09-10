@@ -17,7 +17,8 @@
     ],
     "defaultModel": "claude-fable-5-1",
     "defaultEffort": "high",
-    "defaultPermissionMode": "bypassPermissions"
+    "defaultPermissionMode": "bypassPermissions",
+    "compactModel": "claude-sonnet-5"
   },
   "connectors": {
     "kentico-jira": {

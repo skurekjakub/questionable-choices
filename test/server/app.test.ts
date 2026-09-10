@@ -121,6 +121,7 @@ describe('HTTP API', () => {
       workspaces: [makeRuntime(config, 'ws', source, repo)],
       createRuntime: (next, workspaceId) => makeRuntime(next, workspaceId, source, repo),
       derivedCacheTtlSeconds: 300,
+      claudeSettingsPath: join(dir, 'claude-settings.json'),
       spawnEditor: (command, args) => editorCalls.push({ command, args }),
       logger: new RecordingLogger(),
     });
@@ -337,6 +338,42 @@ describe('HTTP API', () => {
         await post(app, '/api/sessions/qc-DOC-1-implement/unmark-done')
       ).json()) as SessionRecord;
       expect(unmarked.done).toBe(false);
+    });
+
+    it('accepts a compaction of an idle session with a 202 and the wire record', async () => {
+      await post(app, '/api/hooks/qc-DOC-1-implement/Stop', {});
+      expect(await stateOf(app, 'qc-DOC-1-implement')).toBe('idle');
+
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/compact');
+
+      // 202, not 200: the sequence has only been accepted, and runs on for as
+      // long as the compaction takes.
+      expect(response.status).toBe(202);
+      const body = (await response.json()) as SessionRecord;
+      expect(body.compacting).not.toBeNull();
+      expect(Object.keys(body)).not.toContain('lastEventAt');
+    });
+
+    it('refuses a compaction of a session that is not at the prompt', async () => {
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/compact');
+
+      expect(response.status).toBe(409);
+      expect((await response.json()) as ErrorResponse).toMatchObject({ reason: 'not-idle' });
+      expect(runner.lines).toEqual([]);
+    });
+
+    it('refuses a second compaction of the same session', async () => {
+      await post(app, '/api/hooks/qc-DOC-1-implement/Stop', {});
+      await post(app, '/api/sessions/qc-DOC-1-implement/compact');
+
+      const response = await post(app, '/api/sessions/qc-DOC-1-implement/compact');
+
+      expect(response.status).toBe(409);
+      expect((await response.json()) as ErrorResponse).toMatchObject({ reason: 'compacting' });
+    });
+
+    it('answers 404 for a compaction of a session it does not have', async () => {
+      expect((await post(app, '/api/sessions/qc-nothing/compact')).status).toBe(404);
     });
 
     it('refuses to resume a session that never reported a Claude session id', async () => {

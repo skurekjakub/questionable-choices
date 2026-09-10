@@ -135,6 +135,11 @@ runner
                            suffixed with a timestamp when that name is taken (§5.1)
   models[]                 {id,label} shown in the picker
   defaultModel / defaultEffort / defaultPermissionMode
+  compactModel             model a session is switched to for the length of a Compact
+                           (§5.5) and switched back from; default 'claude-sonnet-5'.
+                           Must be one of `models` or exactly that default: it is
+                           never picked in a dialog, so a configuration that ignores
+                           compaction must not have to name it
 connectors{id}
   type                     'jira'
   site, emailEnv, tokenEnv
@@ -214,7 +219,11 @@ interface SessionRecord {
   repoId: string; // sessions belong to a repo and an issue, not to a workspace
   cwd: string;
   branch: string | null; // null for isolation 'shared'
-  model: string;
+  model: string; // what the CLI was launched with, and what a resume relaunches on
+  // The model the session is on now, from the status line's `model.id`. A
+  // `/model` switch emits no hook at all, so the status line is the only report
+  // that one happened, and it never rewrites `model` above (§9).
+  currentModel: string | null;
   effort: Effort;
   permissionMode: PermissionModeSetting; // includes 'default', which passes no flag
   prompt: string; // exactly what was sent
@@ -240,6 +249,15 @@ interface SessionRecord {
     ttlSeconds: number;
     warm: boolean;
     source: 'statusline' | 'derived';
+  } | null;
+  // The compaction the dashboard is driving on this session (§5.5 Compact), or
+  // null when it is driving none. Its presence is what tells an owner-driven
+  // /compact from an auto-compaction, which arrives on the same hooks.
+  compacting: {
+    restoreModel: string; // model the session goes back on when the sequence ends
+    globalDefault: string | null; // ~/.claude/settings.json `model` before the sequence
+    startedAt: string | null; // ISO, from PreCompact; null before one arrives
+    requestedAt: string; // ISO, when the compaction was asked for
   } | null;
   createdAt: string;
   endedAt: string | null;
@@ -293,9 +311,25 @@ Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 | hook PermissionDenied                           | any live                                | working            | clear pending                                                                                                                     |
 | hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl                                                       |
 | action interrupt                                | working, waiting-\*                     | idle               | the runner sent Escape; no hook reports an interrupt; `pending` and `lastAssistantMessage` cleared                                |
+| hook PreCompact                                 | any                                     | unchanged          | `compacting.startedAt` when a `compacting` marker exists; nothing else, and no marker is ever created (see below)                 |
+| hook PostCompact                                | any                                     | unchanged          | nothing; the marker is the manager's to clear (§5.5 Compact)                                                                      |
 | hook SessionEnd                                 | any                                     | exited             | endedAt                                                                                                                           |
 | launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                                                                         |
-| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9); never stamps `lastEventAt`, never clears `staleSince`                                             |
+| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` and `currentModel` from `model.id` (§9); never stamps `lastEventAt`, never clears `staleSince`          |
+
+**Neither compaction hook changes `state`.** A compaction leaves the session at
+the prompt: nothing was submitted, so a card that moved to Working for one
+would be reporting a turn that does not exist. Both are still lifecycle events
+— each stamps `lastEventAt`, clears `hint` and clears `staleSince`, because a
+hook arriving is proof the session is alive.
+
+**`PreCompact` never creates a `compacting` marker.** Claude Code compacts on
+its own when the context fills, and that arrives on exactly the same hook. The
+dashboard is not driving it, cannot cancel it and has no model to switch back
+to, so an auto-compaction is logged like any other event and moves nothing;
+`docs/verification.md` records the limit. `PreCompact` is also not a promise
+that anything will be compacted: a context too small to compact raises it and
+then refuses on screen with no further hook at all.
 
 **A Notification never changes `state`.** It lags the dialog it describes by
 ~6 s, carries only `notification_type` and a generic message, and nothing on it
@@ -364,6 +398,29 @@ the release is what they are pinned to:
   `working`.
 - PostToolUseFailure was never emitted in the probe run; the row stays because
   it costs nothing, but no state may depend on it.
+
+Compaction was measured separately, on 2026-09-10 against Claude Code 2.1.267,
+and is kept as `test/fixtures/compaction-events.jsonl`:
+
+- `/compact` emits **`PreCompact`** 14–44 ms after the Enter that ran it,
+  `trigger: "manual"` (an auto-compaction would carry `"auto"`; none was
+  observed), `custom_instructions: null`.
+- A real compaction then emits, 17.5 s later on a 40 k context and all within
+  43 ms of each other: `SubagentStop`, `SessionStart` with `source: "compact"`,
+  and `PostCompact` with the whole `compact_summary`. All four events of one
+  compaction share a `prompt_id`, which is the only field that ties them
+  together — `session_id` and `transcript_path` do **not** change across a
+  compaction.
+- **Compaction runs as an unnamed subagent** (`SubagentStop` with
+  `agent_type: ""`), so it cannot be told from a real subagent by hook name,
+  which is what a settings file matches on. The dashboard does not subscribe to
+  `SubagentStop`.
+- A context too small to compact emits `PreCompact` and then **nothing**: the
+  pane prints `Not enough messages to compact.` and no `SubagentStop`,
+  `SessionStart` or `PostCompact` follows. A driver waiting on the end of the
+  compaction hangs for ever without a timeout and a look at the pane.
+- **`/model` emits no hook at all**, in either direction: the status line is
+  the only report that a model switch happened (§9).
 
 ### 5.4 Actions
 
@@ -454,6 +511,81 @@ the release is what they are pinned to:
    Resume, Kill, Interrupt — stamps it too, so a session the owner has just
    relaunched is never badged as unverified.
 
+### 5.6 Compact
+
+One click on a live session whose prompt cache has gone cold and whose state is
+`idle`: switch it to a cheaper model, run `/compact`, switch it back, leave it
+at the prompt, send nothing else. The point is that the summarising turn — the
+most expensive single turn a session takes, because it re-reads the whole
+context — is not paid for at the session's own model's rate.
+
+`POST /api/sessions/:id/compact` (§11) validates and answers **202** with the
+record as soon as the marker is on it. Everything after that runs on and reports
+through the record: the sequence takes minutes, and a request held open for it
+would be a request nothing can cancel.
+
+Only the checks and the marking hold the session's lock. Every wait in the
+sequence is for a hook or a status-line payload, and each of those has to take
+that same lock to arrive, so holding it across a wait would deadlock the thing
+being waited for.
+
+1. **Snapshot the owner's global default.** Read `~/.claude/settings.json` and
+   keep its `model` key, or null, on the marker. `/model` **rewrites that file
+   on every switch** — the owner's real settings, not the session's `--settings`
+   override — so the sequence has to put it back, and the value lives on the
+   marker rather than in memory so a server that restarts mid-sequence can
+   still do it.
+2. **Set `compacting` on the record and broadcast**, so the card says
+   "compacting" from the moment the POST answers rather than from whenever the
+   first hook happens to arrive.
+3. **Switch to `runner.compactModel`.** Type `/model <id>`; poll the pane for up
+   to 2 s for `Switch model?` and submit once if it is there — the dialog is
+   conditional, raised only when the conversation is already cached for the
+   model being left. Then wait up to 5 s more for a status-line payload whose
+   `model.id` is the new one. The status line does not tick at all while the
+   dialog is open, which is why the two budgets are separate.
+   A session already on the compact model skips this step and step 5 entirely:
+   asking for a switch to the model it is on would rewrite the owner's global
+   default for nothing.
+   **On failure** — the pane shows `Model '<id>' not found`, or no payload
+   carries the id — the sequence stops before `/compact`, step 6 clears the
+   marker with a `hint` reading "Compact failed: …", and step 7 still runs.
+4. **`/compact`.** Type it and submit; no Escape. Wait up to 5 s for
+   `PreCompact`. Then wait for `PostCompact` or `SessionStart{source:"compact"}`,
+   whichever comes first, with a ceiling of **10 minutes**. If nothing follows
+   within 5 s, read the pane: `Not enough messages to compact.` is a **finished
+   no-op**, not a hang, and the sequence carries on to step 5.
+5. **Switch back** to the model the session was on when the compaction was
+   asked for, the same way as step 3. Skipped when the session is no longer
+   live: typing at a session that has gone would wait out the switch deadline
+   for a status line that will never tick again.
+6. **Clear `compacting` and broadcast.** A failure at any step leaves a `hint`
+   of `Compact failed: <what went wrong>`, which is what the card's
+   may-need-you marker and the session header then show.
+7. **Put the global default back.** If `~/.claude/settings.json` no longer holds
+   the snapshot, rewrite **only** its `model` key — parse, set or delete, write
+   the whole document back atomically at two-space indent — so every other
+   setting survives. A document that cannot be parsed is left exactly as it is
+   and the refusal is logged: rewriting one the server cannot read would cost
+   the owner every setting in it. Step 7 runs on every exit path, including the
+   deadline, an error and a session that ended mid-sequence.
+
+Timeouts and their measurements: `Enter` → `PreCompact` 44 ms (budget 5 s);
+switch → status line 86 ms against a 1 s tick (budget 2 s of dialog poll plus
+5 s); compaction 17.6 s on 40 k tokens (ceiling 10 min).
+
+**A server restarted mid-sequence** loses the driver but not the marker. The
+reconciler clears a `compacting` marker older than the 10-minute ceiling and
+runs step 7 from that marker's `globalDefault`; a younger one is left alone,
+because the sequence that owns it may still be running.
+
+**Two limits, both recorded in `docs/verification.md`.** An auto-compaction —
+one Claude Code starts for itself as the context fills — arrives on the same
+hooks, finds no marker and moves nothing: the dashboard is not driving it,
+cannot cancel it and has no model to put back. And a `/model` the owner types by
+hand inside a session rewrites their global default exactly as the sequence's
+own switches do; the dashboard does not undo that one.
+
 ## 6. Board projection (`core/projection.ts`)
 
 Inputs: issues from the source, session records, per-issue flags
@@ -480,11 +612,17 @@ the same sessions.
 
 Card payload: issue (key, summary, type, status, statusCategory, labels, url),
 column, sessions (each: id, playbookId, state, stateSince, pending,
-lastAssistantMessage, lastExitCode, staleSince, hint, cache, done, live,
+lastAssistantMessage, lastExitCode, staleSince, hint, cache, model
+(`currentModel`, so the model the session is on rather than the one it was
+launched with), compacting (whether a `compacting` marker is set), done, live,
 needsYou, branch, attachCommand —
 the attach command is per session, not per card), primary playbook for the
 column (`primaryFor` match; falls back to the first playbook), and the worktree
 path when known.
+
+`compacting` is decoration in the same sense: it never changes `state`, never
+sets `needsYou` and never moves a card between columns. A session being
+compacted is at the prompt, and its lane says so.
 
 `hint` is the last `Notification`'s message (§5.3) and is decoration: it never
 changes `state`, never sets `needsYou`, never moves a card between columns and
@@ -553,6 +691,12 @@ keep running. The file adds:
       }
     ],
     "Stop": [{ "hooks": [{ "type": "command", "command": "<post> Stop", "timeout": 5 }] }],
+    "PreCompact": [
+      { "hooks": [{ "type": "command", "command": "<post> PreCompact", "timeout": 5 }] }
+    ],
+    "PostCompact": [
+      { "hooks": [{ "type": "command", "command": "<post> PostCompact", "timeout": 5 }] }
+    ],
     "SessionEnd": [
       { "hooks": [{ "type": "command", "command": "<post> SessionEnd", "timeout": 5 }] }
     ]
@@ -648,8 +792,23 @@ The runner's generated `statusline.sh` reads stdin once, POSTs it to
 pipes the same payload into the owner's original statusline command when
 `~/.claude/settings.json` has one, so the TUI keeps its own statusline. The
 server keeps `cache = { expiresAt, ttlSeconds, warm, source: 'statusline' }`
-from the payload and only broadcasts when `expiresAt`, `ttlSeconds` or `warm`
-change.
+from the payload, and `currentModel` from `model.id`. It broadcasts when
+`expiresAt`, `ttlSeconds` or `warm` change **or** when the model id does.
+
+The model reading lives here because nothing else carries it: a `/model` switch
+emits no hook in either direction, and it leaves `prompt_cache` byte-identical,
+so a reducer watching only the cache reports the whole switch as nothing having
+happened. The id updates on the very next tick — 86 ms after the switch was
+confirmed, against a one-second tick period. Two consequences follow from the
+same measurement, and both are load-bearing for the Compact sequence (§5.5): a
+model switch is confirmed by reading `model.id` back, never by assuming the
+keystrokes worked; and **while a confirmation dialog is open the status-line
+command is not invoked at all** (16.4 s with zero ticks in the probe), so a
+stalled tick stream means a dialog on screen rather than a dead session.
+
+`currentModel` never overwrites `model`, which stays what the CLI was launched
+with and what a resume relaunches on. The card and the session header render
+`currentModel`.
 
 Fallback when no statusline payload has arrived yet: on Stop, `cache =
 { expiresAt: now + ttlSeconds, warm: true, source: 'derived' }` with
@@ -740,6 +899,12 @@ PUT  /api/workspaces/:id/issues/:key/checklist          { label, done } → Chec
                                                          drawer's, and the board stays as cheap as it is
 POST /api/workspaces/:id/issues/:key/open-editor        → 204, or 409 when the issue has no worktree
 POST /api/sessions/:id/resume | interrupt | kill | mark-done | unmark-done | archive
+POST /api/sessions/:id/compact         → 202 SessionRecord (wire form), the record with its
+                                         `compacting` marker set; the sequence (§5.6) runs on
+                                         after the answer. 404 for an unknown id; 409
+                                         `not-idle` unless `state === 'idle'`, because the
+                                         sequence types into the prompt; 409 `compacting` when
+                                         a marker is already set
 POST /api/sessions/:id/remove-worktree { force?: boolean } → { path }
 GET  /api/sessions/:id/events          → { events[] }; 404 for an unknown session id, 409 when a log
                                          exists but cannot be read. It backs the "Why it failed" /
@@ -773,13 +938,15 @@ workspace request, each `path` request-relative — `epic`, `newConnector.site`,
 `reviewStatuses[0]` — so a dialog can put a problem next to the input that
 caused it. `reason` is
 the closed set `dirty-worktree | session-live | main-checkout | duplicate-id |
-no-branch | missing-executable | detached-worktree`; it is the only thing a UI
+no-branch | missing-executable | detached-worktree | not-idle | compacting`;
+it is the only thing a UI
 may branch on, so `error` and `detail` stay free text. A refusal none of those
 names describes carries no `reason`. Every member is reachable: `session-live`
 on a start that clashes with a live session and on a removal blocked by one,
 `missing-executable` when the runner cannot find the CLI on a start or a
 resume, `no-branch` / `detached-worktree` / `dirty-worktree` / `main-checkout`
-from the checkout, `duplicate-id` from a workspace request.
+from the checkout, `duplicate-id` from a workspace request, `not-idle` and
+`compacting` from a compaction (§5.6).
 
 ## 12. Web UI
 
@@ -821,8 +988,14 @@ Board:
   tab stop.
 - Card: type glyph then key (mono) — glyph first, everywhere — summary (two
   lines max), Jira status chip, labels (max 3 + "+n"), then one row per
-  non-archived session: playbook, state, `time in state`, a done marker, an
+  non-archived session: playbook, state, `compacting` while one is running, the
+  model the session is on, `time in state`, a done marker, an
   unverified-since-restart marker, a may-need-you marker, and the cache gauge.
+  The model and `compacting` are secondary readings and carry no colour of their
+  own. A **Compact** button (icon plus the word, with the whole sentence in its
+  `title`) sits at the end of the row, outside the row's own click target, and
+  only when the session is `idle`, has no compaction running, and its cache
+  reads cold; it disables itself while its own POST is in flight.
   The state reads
   `failed, exit N` and `exited, code N` for a non-zero code, with the tmux
   hint in its `title`. The unverified and may-need-you markers are lamp-style
@@ -857,9 +1030,11 @@ Board:
 Session view:
 
 - Terminal fills ~75 %; header, in this order: Back, key, playbook, state
-  pill (carrying the ended-state label, the unverified marker and the
-  may-need-you marker), branch, cache countdown, then Interrupt · Kill ·
-  Resume. Resume appears for any
+  pill (carrying the ended-state label, `compacting` while one is running, the
+  unverified marker and the may-need-you marker), the model the session is on,
+  branch, cache countdown, then Compact · Interrupt · Kill ·
+  Resume. Compact appears under the same rule as on the card — `idle`, no
+  compaction running, cache cold. Resume appears for any
   non-live state, `failed` included, and is disabled while the record has no
   Claude session id or the issue detail has not loaded yet.
 - Right panel: issue summary/description, status chip, labels, Jira link,
@@ -960,6 +1135,16 @@ the new one. It is not durability: nothing is fsynced.
   reaches the record and `CardSession.lastExitCode` only while the record is
   still `bootstrapping`: a signal that arrives after the reconciler has already
   closed the record is refused, so its code lives in the log alone.
+- A Compact that fails at any step (§5.6) → the marker is cleared and the
+  record's `hint` becomes `Compact failed: <what went wrong>`, which the card's
+  may-need-you marker and the session header's state pill already render. It is
+  a hint rather than a state because the session is exactly where it was: at the
+  prompt, with nothing sent. The wordings are "the CLI does not offer the model
+  X", "the status line never reported the model X", "the CLI never reported the
+  compaction starting", "the compaction did not finish in ten minutes", "the
+  session ended during the compaction" and, from the reconciler, "the dashboard
+  stopped driving it". A session left on the compact model is the second-order
+  failure of the last two, and the card's model reading is what shows it.
 - The listening socket cannot be opened, for any reason → the cause is logged
   and the process exits 1. Without a socket it serves nothing, and the signal
   handlers keep the event loop alive, so it must not stay up.

@@ -47,6 +47,19 @@
   max-width: 26ch;
 }
 
+/* A reading beside the state rather than part of it, and the first thing on a
+   crowded header to give its width up. */
+.session-header .session-model {
+  flex: 0 9 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-row);
+  color: var(--paper-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .state-pill {
   display: inline-flex;
   align-items: center;
@@ -67,6 +80,11 @@
   border-color: #5a4318;
   background: #211a0c;
   color: var(--lamp-amber);
+}
+
+.state-pill .session-compacting {
+  flex: none;
+  color: var(--paper-faint);
 }
 
 .state-pill .pending {

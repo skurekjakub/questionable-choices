@@ -134,6 +134,10 @@ function toCardSession(record: SessionRecord): CardSession {
     staleSince: record.staleSince,
     hint: record.hint?.summary ?? null,
     cache: record.cache,
+    model: record.currentModel ?? null,
+    // A record written before the field existed carries no `compacting` at all,
+    // and `undefined !== null` would put every one of them into "compacting".
+    compacting: (record.compacting ?? null) !== null,
     done: record.done,
     live: isLive(record.state),
     needsYou: needsYou(record.state),

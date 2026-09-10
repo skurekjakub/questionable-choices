@@ -82,6 +82,7 @@ function detailFor(
         cwd: '/repos/app',
         branch: null,
         model: 'claude-opus-5',
+        currentModel: null,
         effort: 'high',
         permissionMode: 'acceptEdits',
         prompt: 'do the thing',
@@ -94,6 +95,7 @@ function detailFor(
         staleSince: null,
         hint: null,
         cache: null,
+        compacting: null,
         createdAt: FIXTURE_NOW,
         endedAt: null,
         done: false,
@@ -106,6 +108,21 @@ function detailFor(
     flags: {},
   };
 }
+
+/**
+ * A cache that went cold two minutes before the fixture instant.
+ */
+const COLD = {
+  expiresAt: Math.floor(Date.parse(FIXTURE_NOW) / 1000) - 120,
+  ttlSeconds: 300,
+  warm: false,
+  source: 'statusline' as const,
+};
+
+/**
+ * Epoch seconds at which a cache still warm at the fixture instant goes cold.
+ */
+const WARM_UNTIL = Math.floor(Date.parse(FIXTURE_NOW) / 1000) + 240;
 
 beforeEach(() => {
   vi.stubGlobal('WebSocket', SilentSocket);
@@ -447,5 +464,101 @@ describe('SessionView', () => {
     expect(document.querySelector('.state-pill')?.textContent).toContain('exited, code 1');
     // A clean exit is not a failure, and the panel's heading is what says so.
     expect(screen.queryByText('Why it failed')).toBeNull();
+  });
+
+  it('shows the model the session is on and offers Compact on a cold idle one', async () => {
+    vi.mocked(getIssue).mockResolvedValue(
+      detailFor('DOC-1', { state: 'idle', currentModel: 'claude-fable-5-1', cache: COLD }),
+    );
+    const board = boardView('docs', [
+      card('DOC-1', [
+        cardSession('qc-DOC-1-implement', {
+          state: 'idle',
+          needsYou: true,
+          model: 'claude-fable-5-1',
+          cache: COLD,
+        }),
+      ]),
+    ]);
+    render(
+      <SessionView
+        sessionId="qc-DOC-1-implement"
+        board={board}
+        nowMs={Date.parse(FIXTURE_NOW)}
+        resolving={false}
+        onBack={() => {}}
+      />,
+    );
+
+    await screen.findByText('claude-fable-5-1');
+    expect(screen.getByRole('button', { name: 'Compact qc-DOC-1-implement' })).toBeTruthy();
+  });
+
+  it('says "compacting" in the state pill and offers no second Compact', async () => {
+    vi.mocked(getIssue).mockResolvedValue(
+      detailFor('DOC-1', {
+        state: 'idle',
+        cache: COLD,
+        compacting: {
+          restoreModel: 'claude-fable-5-1',
+          globalDefault: 'claude-fable-5-1',
+          startedAt: null,
+          requestedAt: FIXTURE_NOW,
+        },
+      }),
+    );
+    const board = boardView('docs', [
+      card('DOC-1', [
+        cardSession('qc-DOC-1-implement', {
+          state: 'idle',
+          needsYou: true,
+          cache: COLD,
+          compacting: true,
+        }),
+      ]),
+    ]);
+    render(
+      <SessionView
+        sessionId="qc-DOC-1-implement"
+        board={board}
+        nowMs={Date.parse(FIXTURE_NOW)}
+        resolving={false}
+        onBack={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(document.querySelector('.state-pill')?.textContent).toContain('compacting'),
+    );
+    expect(screen.queryByRole('button', { name: 'Compact qc-DOC-1-implement' })).toBeNull();
+  });
+
+  it('offers no Compact while the cache is still warm', async () => {
+    // The action costs a full re-read of the context, so it is only worth
+    // offering once that re-read is going to happen anyway.
+    vi.mocked(getIssue).mockResolvedValue(
+      detailFor('DOC-1', { state: 'idle', cache: { ...COLD, warm: true, expiresAt: WARM_UNTIL } }),
+    );
+    const board = boardView('docs', [
+      card('DOC-1', [
+        cardSession('qc-DOC-1-implement', {
+          state: 'idle',
+          needsYou: true,
+          cache: { ...COLD, warm: true, expiresAt: WARM_UNTIL },
+        }),
+      ]),
+    ]);
+    render(
+      <SessionView
+        sessionId="qc-DOC-1-implement"
+        board={board}
+        nowMs={Date.parse(FIXTURE_NOW)}
+        resolving={false}
+        onBack={() => {}}
+      />,
+    );
+
+    await screen.findByTestId('terminal');
+    expect(screen.queryByRole('button', { name: 'Compact qc-DOC-1-implement' })).toBeNull();
   });
 });
