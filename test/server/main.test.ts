@@ -15,7 +15,8 @@ const GUARD_CONFIG = vi.hoisted(() => {
 const serve = vi.hoisted(() => vi.fn());
 vi.mock('@hono/node-server', () => ({ serve, upgradeWebSocket: vi.fn() }));
 
-const { guardTheProcess, listenErrorHandler } = await import('../../src/server/main.js');
+const { FLUSH_DEADLINE_MS, guardTheProcess, listenErrorHandler, shutdown } =
+  await import('../../src/server/main.js');
 const { isProcessEntry } = await import('../../src/server/util.js');
 
 /**
@@ -93,6 +94,130 @@ describe('importing the entry module', () => {
     // `src/server/main.js` has to hoist the same guard — see AGENTS.md § Tests.
     expect(process.env['QC_CONFIG']).toBe(GUARD_CONFIG);
     expect(GUARD_CONFIG.startsWith('/nonexistent/')).toBe(true);
+  });
+});
+
+describe('shutdown', () => {
+  /**
+   * Builds the four things a shutdown closes, plus the trace it writes to.
+   *
+   * @param flush - Stand-in for the store's queue drain.
+   * @returns The targets, the ordered trace and the sockets that were dropped.
+   */
+  function targets(flush: () => Promise<void>): {
+    trace: string[];
+    dropped: string[];
+    args: Parameters<typeof shutdown>[0];
+  } {
+    const trace: string[] = [];
+    const dropped: string[] = [];
+    return {
+      trace,
+      dropped,
+      args: {
+        manager: {
+          stop: () => {
+            trace.push('manager.stop');
+          },
+        },
+        store: {
+          flush: () => {
+            trace.push('flush');
+            return flush();
+          },
+        },
+        server: {
+          close: (callback: () => void) => {
+            trace.push('server.close');
+            callback();
+          },
+          closeAllConnections: () => {
+            trace.push('closeAllConnections');
+          },
+        },
+        websocketServer: {
+          clients: [
+            {
+              terminate: () => {
+                dropped.push('event socket');
+              },
+            },
+          ],
+          close: () => {
+            trace.push('websocketServer.close');
+          },
+        },
+        exit: (code: number) => {
+          trace.push(`exit:${code}`);
+        },
+      },
+    };
+  }
+
+  it('drops the sockets that would hold the close open, in the order that lets it close', async () => {
+    // An attached browser holds its event socket for as long as the tab lives,
+    // and idle keep-alive sockets hold the close open too, so a close that
+    // waits for them never returns.
+    const { trace, dropped, args } = targets(() => Promise.resolve());
+
+    await shutdown(args);
+
+    expect(dropped).toEqual(['event socket']);
+    expect(trace).toEqual([
+      'manager.stop',
+      'websocketServer.close',
+      'closeAllConnections',
+      'server.close',
+      'flush',
+      'exit:0',
+    ]);
+  });
+
+  it('waits for the store to drain before it ends the process', async () => {
+    // A hook answered 204 has its write on the store's queue; exiting before
+    // the queue drains loses the record change it was answered for.
+    let release = (): void => undefined;
+    const drained = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { trace, args } = targets(() => drained);
+
+    const done = shutdown(args);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(trace).toContain('flush');
+    expect(trace).not.toContain('exit:0');
+
+    trace.push('the queue drained');
+    release();
+    await done;
+
+    expect(trace.slice(-2)).toEqual(['the queue drained', 'exit:0']);
+  });
+
+  it('gives up on a queue that never drains, so a wedged write cannot cost a SIGKILL', async () => {
+    // `flush` awaits the write queue, which a write hanging on a wedged
+    // filesystem never resolves. Both signals that could interrupt the wait are
+    // handled, so without the deadline nothing short of SIGKILL ends it.
+    vi.useFakeTimers();
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (line: string) => errors.push(line);
+    try {
+      const { trace, args } = targets(() => new Promise<void>(() => undefined));
+
+      const done = shutdown(args);
+      await vi.advanceTimersByTimeAsync(FLUSH_DEADLINE_MS - 1);
+      expect(trace).not.toContain('exit:0');
+
+      await vi.advanceTimersByTimeAsync(1);
+      await done;
+
+      expect(trace).toContain('exit:0');
+      expect(errors.join('\n')).toContain('did not drain');
+    } finally {
+      console.error = original;
+      vi.useRealTimers();
+    }
   });
 });
 

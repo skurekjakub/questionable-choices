@@ -291,7 +291,7 @@ export interface ReduceResult {
 /**
  * Longest pending summary kept on a record, in characters.
  */
-export const SUMMARY_MAX_LENGTH = 140;
+const SUMMARY_MAX_LENGTH = 140;
 
 /**
  * Longest assistant-message snippet kept on a record, in characters.
@@ -332,7 +332,7 @@ function digestToolInput(input: unknown): string {
 /**
  * Tool name Claude Code uses to ask the owner a question.
  */
-export const QUESTION_TOOL = 'AskUserQuestion';
+const QUESTION_TOOL = 'AskUserQuestion';
 
 /**
  * Extracts the question text from an `AskUserQuestion` tool input.
@@ -530,8 +530,11 @@ export function reduce(
   switch (hook.hook_event_name) {
     case 'SessionStart': {
       const patch: SessionPatch = {};
+      // §8.2: the payload is asserted, not parsed, so every field is narrowed
+      // where it is read. Without this a non-string id lands in a field the
+      // record declares `string | null` and every later comparison misses.
       const id = hook.session_id;
-      if (id !== undefined && id !== '' && id !== record.claudeSessionId)
+      if (typeof id === 'string' && id !== '' && id !== record.claudeSessionId)
         patch.claudeSessionId = id;
       // A resumed session replays its transcript and stops at the prompt with
       // nothing queued, so no UserPromptSubmit or Stop ever follows: this is
@@ -587,7 +590,11 @@ export function reduce(
       // dialog with no event guaranteed to clear it. It is recorded as a hint
       // the owner may act on and never moves the session.
       if (needsYou(record.state)) return unchanged;
-      const message = oneLine(hook.message ?? '', SNIPPET_MAX_LENGTH);
+      // §8.2: the payload is asserted, not parsed, so every field is narrowed
+      // where it is read. Without this a non-string message throws out of
+      // `reduce` and the event is lost from the record and the transcript.
+      const message =
+        typeof hook.message === 'string' ? oneLine(hook.message, SNIPPET_MAX_LENGTH) : '';
       return apply(
         { hint: { summary: message === '' ? 'Claude sent a notification' : message, at: now } },
         false,

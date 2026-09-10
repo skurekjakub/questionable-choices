@@ -384,6 +384,37 @@ describe('SessionManager', () => {
       expect(h.runner.resumed).toHaveLength(1);
     });
 
+    it('drops the dead run’s may-need-you marker when it resumes', async () => {
+      // The run boundary that clears a hint is the launcher's `claude-start`,
+      // posted with `curl … || true`: a dropped one leaves the new run's card
+      // showing the previous run's marker until its first hook arrives.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.applyEvent(
+        'qc-DOC-1-implement',
+        { type: 'hook', hook: { hook_event_name: 'SessionStart', session_id: 'abc' } },
+        {},
+      );
+      await h.manager.applyEvent(
+        'qc-DOC-1-implement',
+        { type: 'hook', hook: { hook_event_name: 'UserPromptSubmit' } },
+        {},
+      );
+      await h.manager.applyEvent(
+        'qc-DOC-1-implement',
+        {
+          type: 'hook',
+          hook: { hook_event_name: 'Notification', message: 'Claude needs your permission' },
+        },
+        {},
+      );
+      expect(h.store.session('qc-DOC-1-implement')?.hint).not.toBeNull();
+
+      const record = await h.manager.resumeSession('qc-DOC-1-implement');
+
+      expect(record.hint).toBeNull();
+      expect(h.store.session('qc-DOC-1-implement')?.hint).toBeNull();
+    });
+
     it('carries the runner’s machine-readable reason onto a refused resume', async () => {
       // Start and resume both probe the CLI, so `missing-executable` is
       // reachable on either; a UI that branches on the reason needs both.
@@ -1402,6 +1433,37 @@ describe('SessionManager', () => {
         line.includes('cannot append to the event log'),
       );
       expect(complaints).toHaveLength(1);
+    });
+
+    it('reports a log that failed, recovered and failed again as a second gap', async () => {
+      // The suppression is per failure run: a log the owner freed space for
+      // and that then fails again is a second hole in the transcript, and a
+      // once-per-session key never mentions it.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const working = h.store.appendEvent.bind(h.store);
+      let failing = true;
+      h.store.appendEvent = async (sessionId, entry) => {
+        if (failing) throw new Error('ENOSPC: no space left on device');
+        await working(sessionId, entry);
+      };
+
+      const submit = async (): Promise<void> => {
+        await h.manager.applyEvent(
+          'qc-DOC-1-implement',
+          { type: 'hook', hook: { hook_event_name: 'UserPromptSubmit' } },
+          {},
+        );
+      };
+      await submit();
+      failing = false;
+      await submit();
+      failing = true;
+      await submit();
+
+      const complaints = h.logger.lines.filter((line) =>
+        line.includes('cannot append to the event log'),
+      );
+      expect(complaints).toHaveLength(2);
     });
   });
 

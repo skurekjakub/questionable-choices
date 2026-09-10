@@ -266,27 +266,27 @@ failed          bootstrap or launch failed; tmux window holds the failed shell
 
 Inputs are the hook events the runner forwards (§8) plus two launcher signals.
 
-| Event                                           | From                                    | To                 | Side data                                                                                          |
-| ----------------------------------------------- | --------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------- |
-| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                                                    |
-| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                                                    |
-| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended; `pending`, `endedAt`, `lastAssistantMessage` and `lastExitCode` cleared          |
-| hook SessionStart (source ≠ resume)             | any                                     | unchanged          | record `claudeSessionId`; an empty id never overwrites a known one                                 |
-| hook SessionStart (source = resume)             | starting                                | idle               | the only signal that a resumed session is back at the prompt; never notifies                       |
-| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                                                      |
-| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                                                      |
-| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                                                    |
-| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                                                      |
-| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                                      |
-| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict                            |
-| hook Notification (any type)                    | any live not already needs-you          | unchanged          | `hint` = the message, capped at 280 chars, plus the time it arrived; never notifies                |
-| hook Notification (any type)                    | any needs-you, exited, failed           | unchanged          | nothing at all                                                                                     |
-| hook PermissionDenied                           | any live                                | working            | clear pending                                                                                      |
-| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl                        |
-| action interrupt                                | working, waiting-\*                     | idle               | the runner sent Escape; no hook reports an interrupt; `pending` and `lastAssistantMessage` cleared |
-| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                                            |
-| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                                          |
-| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9); never stamps `lastEventAt`, never clears `staleSince`              |
+| Event                                           | From                                    | To                 | Side data                                                                                                                         |
+| ----------------------------------------------- | --------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| launcher `bootstrap-start`                      | any                                     | bootstrapping      |                                                                                                                                   |
+| launcher `bootstrap-failed`                     | bootstrapping                           | failed             |                                                                                                                                   |
+| launcher `claude-start`                         | bootstrapping, starting, exited, failed | starting           | new run appended; `pending`, `endedAt`, `lastAssistantMessage` and `lastExitCode` cleared                                         |
+| hook SessionStart (source ≠ resume)             | any                                     | unchanged          | record `claudeSessionId`; an empty id never overwrites a known one                                                                |
+| hook SessionStart (source = resume)             | starting                                | idle               | the only signal that a resumed session is back at the prompt; never notifies                                                      |
+| hook UserPromptSubmit                           | any live                                | working            | clear pending                                                                                                                     |
+| hook PreToolUse (tool ≠ AskUserQuestion)        | any live                                | working            | clear pending                                                                                                                     |
+| hook PreToolUse (AskUserQuestion)               | any live                                | waiting-question   | pending.summary = question text from tool_input                                                                                   |
+| hook PostToolUse / PostToolUseFailure (any)     | any live                                | working            | clear pending                                                                                                                     |
+| hook PermissionRequest (tool ≠ AskUserQuestion) | any live                                | waiting-permission | pending.summary = `<tool_name>: <one-line tool_input digest>`                                                                     |
+| hook PermissionRequest (AskUserQuestion)        | any live                                | waiting-question   | pending.summary = question text; must not demote the PreToolUse verdict                                                           |
+| hook Notification (any type)                    | any live not already needs-you          | unchanged          | `hint` = the message, capped at 280 chars, plus the time it arrived; stamps `lastEventAt` and clears `staleSince`; never notifies |
+| hook Notification (any type)                    | any needs-you, exited, failed           | unchanged          | nothing at all, not even the staleness marker                                                                                     |
+| hook PermissionDenied                           | any live                                | working            | clear pending                                                                                                                     |
+| hook Stop                                       | any live                                | idle               | lastAssistantMessage when the payload carries it; cache.derived = now + ttl                                                       |
+| action interrupt                                | working, waiting-\*                     | idle               | the runner sent Escape; no hook reports an interrupt; `pending` and `lastAssistantMessage` cleared                                |
+| hook SessionEnd                                 | any                                     | exited             | endedAt                                                                                                                           |
+| launcher `claude-exit`                          | any                                     | exited             | exit code on the last run                                                                                                         |
+| statusline payload                              | any                                     | unchanged          | cache from `prompt_cache` (§9); never stamps `lastEventAt`, never clears `staleSince`                                             |
 
 **A Notification never changes `state`.** It lags the dialog it describes by
 ~6 s, carries only `notification_type` and a generic message, and nothing on it
@@ -301,8 +301,9 @@ summary alone, for a UI to render as "this session may need you"; `needsYou`,
 the lane and the desktop notification are all untouched by it. A Notification
 that arrives while the record is already in a needs-you state, or is not live,
 does nothing at all. Every accepted lifecycle event other than a status-line
-payload clears the hint, so a hint never outlives the turn it arrived in by
-more than one event.
+payload clears the hint: the next lifecycle event the reducer accepts clears
+it. A run in which no such event ever arrives keeps the hint, which is the case
+below.
 
 The consequences are stated rather than hidden: a `PermissionRequest` the hook
 transport drops (`curl … || true`) leaves the session `working` with a hint,
@@ -435,9 +436,10 @@ the release is what they are pinned to:
    lifecycle event the reducer accepts stamps `lastEventAt` and clears the
    marker, whether or not it changes anything else — a turn's worth of tool
    results that each reduce to the state the record is already in is still proof
-   the session is alive. A status-line payload is not a lifecycle event, because
-   it carries no state at all, and an event the reducer refuses outright stamps
-   nothing. The reconciler also clears the marker when the same pass closes the
+   the session is alive. The one excluded event is a status-line payload; a
+   `Notification` is not excluded, and stamps the marker like any other accepted
+   hook even though it moves no state. An event the reducer refuses outright
+   stamps nothing. The reconciler also clears the marker when the same pass closes the
    record, whose state is then the most certain one available and which will
    receive no further event. An owner action that moves the record — Resume,
    Kill, Interrupt — stamps it too, so a session the owner has just relaunched
@@ -825,8 +827,8 @@ Board:
 Session view:
 
 - Terminal fills ~75 %; header, in this order: Back, key, playbook, state
-  pill (carrying the ended-state label), the unverified marker and the
-  may-need-you marker as its siblings, branch,
+  pill (carrying the ended-state label, the unverified marker and the
+  may-need-you marker), branch,
   cache countdown, then Interrupt · Kill · Resume. Resume appears for any
   non-live state, `failed` included, and is disabled while the record has no
   Claude session id or the issue detail has not loaded yet.
@@ -891,7 +893,9 @@ a file:
 - **Temporary files are swept on load.** `writeJsonAtomic` removes its own
   temporary file when a rename fails, but a process killed between the write
   and the rename cannot; `Store.load` deletes any `*.tmp` sibling, because
-  nothing else ever cleans `dataDir`.
+  nothing else ever cleans `dataDir`. Any means any, including one another
+  process is writing at that moment: one `dataDir` belongs to one server, and a
+  second server pointed at the same one will break the first's writes.
 
 An atomic write means a reader always sees one whole document, the old one or
 the new one. It is not durability: nothing is fsynced.
