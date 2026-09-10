@@ -204,6 +204,20 @@ export interface SessionRecord {
   lastToolResultPromptId?: string | null | undefined;
   /** Snippet of the last assistant message, when the Stop payload carried one. */
   lastAssistantMessage: string | null;
+  /**
+   * Exit code of the process that most recently ended — the bootstrap or the
+   * CLI — or null while one is running or none has ended.
+   */
+  lastExitCode: number | null;
+  /**
+   * ISO timestamp of the server start that found this live record already
+   * older than itself, or null when the state is current.
+   *
+   * A record whose hooks were posted while the server was down cannot be
+   * recovered — the events are gone — so the state is flagged as possibly
+   * out of date rather than guessed at. The next accepted event clears it.
+   */
+  staleSince: string | null;
   /** Prompt-cache state, or null before anything reported one. */
   cache: SessionCache | null;
   /** ISO timestamp of record creation. */

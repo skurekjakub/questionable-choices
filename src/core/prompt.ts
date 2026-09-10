@@ -5,6 +5,14 @@ import type { EditorConfig, Issue, Playbook } from './types.js';
  */
 export const SLUG_MAX_LENGTH = 60;
 
+/**
+ * Rendered for `{{branch}}` when the checkout's branch is not known yet.
+ *
+ * `shared` isolation has no branch at all, and `issue-worktree` resolves one
+ * only when the session starts, so the prefilled prompt has nothing to name.
+ */
+export const UNRESOLVED_BRANCH = 'the branch resolved when the session starts';
+
 const PLACEHOLDER = /\{\{([A-Za-z0-9_]+)\}\}/g;
 
 /**
@@ -131,7 +139,10 @@ export function promptVariables(issue: Issue, context: PromptContext): Record<st
     labels: issue.labels.join(', '),
     url: issue.url,
     description: issue.description ?? '',
-    branch: context.branch ?? '',
+    // A template that says "on branch {{branch}}" must not read as naming an
+    // empty branch when there is not one yet: a phrase is honest where a blank
+    // is a claim about nothing.
+    branch: context.branch ?? UNRESOLVED_BRANCH,
     worktree: context.worktree,
   };
 }

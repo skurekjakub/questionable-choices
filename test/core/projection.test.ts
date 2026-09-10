@@ -298,6 +298,8 @@ describe('card payload', () => {
       stateSince: '2026-09-09T10:00:00.000Z',
       pending: { kind: 'permission', summary: 'Bash: ls' },
       lastAssistantMessage: 'I looked at the loader.',
+      lastExitCode: null,
+      staleSince: null,
       cache: null,
       done: false,
       live: true,
@@ -324,6 +326,27 @@ describe('card payload', () => {
     expect(card.sessions[0]?.lastAssistantMessage).toBe(
       'Done: the loader now reads the front matter.',
     );
+  });
+
+  it('carries the exit code and the staleness marker a failed card needs', () => {
+    const view = projectWith({
+      issues: [makeIssue({ key: 'DOC-9' })],
+      sessions: [
+        makeRecord({
+          id: 'qc-DOC-9-implement',
+          issueKey: 'DOC-9',
+          state: 'failed',
+          lastExitCode: 127,
+          staleSince: '2026-09-09T12:00:00.000Z',
+        }),
+      ],
+    });
+    const card = view.columns
+      .flatMap((column) => column.cards)
+      .find((entry) => entry.issue.key === 'DOC-9') as Card;
+
+    expect(card.sessions[0]?.lastExitCode).toBe(127);
+    expect(card.sessions[0]?.staleSince).toBe('2026-09-09T12:00:00.000Z');
   });
 
   it('reports a null snippet when no Stop payload carried one', () => {

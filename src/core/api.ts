@@ -272,6 +272,21 @@ export interface CardSession {
    * payload carried one.
    */
   lastAssistantMessage: string | null;
+  /**
+   * Exit code of the process that most recently ended — the bootstrap or the
+   * CLI — or null while one is running or none has ended. It is the only
+   * reason a `failed` card can give for its state.
+   */
+  lastExitCode: number | null;
+  /**
+   * ISO timestamp of the server start that found this live session already
+   * older than itself, or null when the state is current.
+   *
+   * The hooks that would have moved the record while the server was down are
+   * gone, so the state may be out of date until the session's next event. A UI
+   * should mark such a session rather than present its state as a fact.
+   */
+  staleSince: string | null;
   /** Prompt-cache state the countdown ticks from, or null when unknown. */
   cache: SessionCache | null;
   /** Owner-set "this session did its job" flag. */

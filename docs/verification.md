@@ -149,6 +149,27 @@ received — one session's failure must not cost every other session its
 history. A port already in use is the one boot failure that still exits: one
 line naming the port, status 1.
 
+## Known behaviour, not defects
+
+**Rewriting the configuration is not byte-for-byte round-trip clean.** Adding a
+workspace and removing it again leaves the file semantically identical but
+textually changed, in two ways spec §4 already sanctions ("validated with zod
+at boot", "`~` is expanded while parsing and is not restored"):
+
+1. Every inline array is re-emitted one element per line — `editor.args`,
+   `runner.models`, `primaryFor`, `reviewStatuses` — because the whole document
+   is serialised from the parsed configuration, not patched in place.
+2. Defaults are materialised: a workspace that carried neither gains
+   `"reviewStatuses": ["Ready for review"]` and `"pollSeconds": 120`.
+
+Both are harmless to the running server and to a re-read, but they do rewrite a
+file the owner maintains by hand, so an owner who cares about the formatting
+should expect to re-tidy it after using the dialog. The third finding of the
+same QA run — an inline connector surviving the removal of its only workspace,
+with no route and no control able to remove it — was a real one-way door and is
+fixed: `DELETE /api/workspaces/:id` now drops a connector nothing else
+references (spec §11).
+
 ## What still does not work
 
 **A live session blocks Remove worktree, but the UI offers the force escape

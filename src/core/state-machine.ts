@@ -383,6 +383,8 @@ type SessionPatch = Partial<
     | 'claudeSessionId'
     | 'lastToolResultPromptId'
     | 'lastAssistantMessage'
+    | 'lastExitCode'
+    | 'staleSince'
     | 'cache'
     | 'endedAt'
     | 'runs'
@@ -447,7 +449,9 @@ export function reduce(
   const unchanged: ReduceResult = { record, changed: false, notify: false };
 
   const apply = (patch: SessionPatch, notifiable = true): ReduceResult => {
-    const next: SessionRecord = { ...record, ...patch };
+    // An accepted event is proof the record is being told about its session
+    // again, which is exactly what the staleness marker waits for.
+    const next: SessionRecord = { ...record, staleSince: null, ...patch };
     const stateChanged = next.state !== record.state;
     if (stateChanged) next.stateSince = now;
     if (stableJson(next) === stableJson(record)) return unchanged;
@@ -471,11 +475,18 @@ export function reduce(
 
   switch (event.type) {
     case 'bootstrap-start':
-      return apply({ state: 'bootstrapping', pending: null, endedAt: null });
+      return apply({
+        state: 'bootstrapping',
+        pending: null,
+        lastExitCode: null,
+        endedAt: null,
+      });
 
     case 'bootstrap-failed':
       if (record.state !== 'bootstrapping') return unchanged;
-      return apply({ state: 'failed', pending: null });
+      // The exit code is the only reason a failed card can give for its state;
+      // without it the owner has to attach to tmux to learn anything.
+      return apply({ state: 'failed', pending: null, lastExitCode: event.exitCode ?? null });
 
     case 'claude-start':
       if (!['bootstrapping', 'starting', 'exited', 'failed'].includes(record.state)) {
@@ -485,6 +496,7 @@ export function reduce(
         state: 'starting',
         pending: null,
         lastToolResultPromptId: null,
+        lastExitCode: null,
         endedAt: null,
         runs: [...record.runs, { startedAt: now, kind: event.mode, exitCode: null }],
       });
@@ -494,6 +506,7 @@ export function reduce(
         state: 'exited',
         pending: null,
         lastToolResultPromptId: null,
+        lastExitCode: event.exitCode,
         endedAt: now,
         runs: closeLastRun(record.runs, event.exitCode),
       });

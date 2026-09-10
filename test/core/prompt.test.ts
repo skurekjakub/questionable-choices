@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   SLUG_MAX_LENGTH,
+  UNRESOLVED_BRANCH,
   branchName,
   editorCommand,
   promptVariables,
@@ -113,10 +114,24 @@ describe('promptVariables', () => {
     expect(Object.values(variables).every((value) => typeof value === 'string')).toBe(true);
   });
 
-  it('renders a missing description and a null branch as empty strings', () => {
+  it('renders a missing description as an empty string', () => {
     const variables = promptVariables(makeIssue(), { branch: null, worktree: '/repos/app' });
     expect(variables['description']).toBe('');
-    expect(variables['branch']).toBe('');
+  });
+
+  it('names a branch that does not exist yet instead of leaving a blank slot', () => {
+    // "on branch {{branch}}" with an empty slot reads as naming a branch with
+    // no name; the prompt must assert nothing it cannot know.
+    const variables = promptVariables(makeIssue(), { branch: null, worktree: '/repos/app' });
+
+    expect(variables['branch']).toBe(UNRESOLVED_BRANCH);
+    expect(
+      renderPrompt(
+        makePlaybook({ promptTemplate: 'Verify {{key}} on branch {{branch}}.' }),
+        makeIssue(),
+        { branch: null, worktree: '/repos/app' },
+      ),
+    ).toBe(`Verify DOC-1 on branch ${UNRESOLVED_BRANCH}.`);
   });
 });
 

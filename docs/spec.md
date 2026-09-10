@@ -370,9 +370,20 @@ Hook facts the design relies on, measured on 2026-09-09 against Claude Code
    - POST `claude-exit` with the exit code; `exec bash`.
      The record is persisted before tmux is invoked so a crash between the two
      leaves a `starting` record the reconciler can mark failed.
-5. Reconciler on server boot and every 10 s: for each live record,
+5. Reconciler on server boot and every 10 s: for each live record whose
+   `stateSince` is older than one interval — a younger one is still in the
+   launcher's hands, and a resume kills and recreates the tmux session —
    `tmux has-session -t <id>`; missing → `exited` (or `failed` if it never
-   reached `starting`).
+   reached `starting`). A probe that throws is logged and the record is left
+   alone; a pass that is already running is skipped rather than overlapped.
+
+   The reconciler answers liveness and nothing else. A record whose `stateSince`
+   predates the server's own start survived a restart: the hooks that would have
+   moved it were POSTed at a dead port and are gone, and nothing can recover
+   them. Such a record gets `staleSince: <this server's start>` on the record
+   and on `CardSession`, which says "this state may be out of date" rather than
+   guessing at a better one. The next event the reducer accepts for that session
+   clears it. The state is never inferred from a transcript.
 
 ## 6. Board projection (`core/projection.ts`)
 
@@ -400,7 +411,8 @@ the same sessions.
 
 Card payload: issue (key, summary, type, status, statusCategory, labels, url),
 column, sessions (each: id, playbookId, state, stateSince, pending,
-lastAssistantMessage, cache, done, live, needsYou, branch, attachCommand —
+lastAssistantMessage, lastExitCode, staleSince, cache, done, live, needsYou,
+branch, attachCommand —
 the attach command is per session, not per card), primary playbook for the
 column (`primaryFor` match; falls back to the first playbook), and the worktree
 path when known.
@@ -411,6 +423,10 @@ Template variables: `{{key}} {{summary}} {{type}} {{status}} {{labels}}
 {{url}} {{description}} {{branch}} {{worktree}}`. Rendering is a literal
 replace; unknown variables stay as written; `{{description}}` is plain text
 (ADF walked to text, paragraphs joined with blank lines, lists as `- `).
+`{{branch}}` renders "the branch resolved when the session starts" when there
+is no branch yet — `shared` isolation, or `issue-worktree` before the checkout
+exists — because a blank slot in "on branch {{branch}}" reads as naming a
+branch with no name.
 
 The start dialog shows: playbook selector, one editable textarea prefilled
 with the rendered template (whole thing editable, per the owner), model,
@@ -593,7 +609,10 @@ REST (JSON):
 ```
 GET  /api/config/public                → { workspaces: [{id,name,epic,repo,connector}], repos: [{id,path}], connectors: [{id,site}], runner: {models, defaults, efforts, permissionModes} }
 POST /api/workspaces                   { id?, name, epic, repo, connector | newConnector: {id, site, emailEnv, tokenEnv}, reviewStatuses?, jql? } → 201 workspace summary; 400 with zod issues, 409 on duplicate id
-DELETE /api/workspaces/:id             → 204; sessions and worktrees are untouched (they belong to the repo)
+DELETE /api/workspaces/:id             → 204; sessions and worktrees are untouched (they belong to the repo).
+                                         A connector no remaining workspace references goes with it: nothing
+                                         else can remove one, so an inline connector created from the dialog
+                                         would otherwise be permanent.
 GET  /api/workspaces/:id/board         → BoardView { workspaceId, name, playbooks[], columns[], sourceError, fetchedAt, needsYouCount }
 POST /api/workspaces/:id/refresh       → BoardView
 GET  /api/workspaces/:id/issues/:key   → IssueDetail { issue (with description), sessions[], worktreePath, flags }

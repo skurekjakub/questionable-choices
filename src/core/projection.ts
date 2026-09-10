@@ -129,6 +129,8 @@ function toCardSession(record: SessionRecord): CardSession {
     stateSince: record.stateSince,
     pending: record.pending,
     lastAssistantMessage: record.lastAssistantMessage,
+    lastExitCode: record.lastExitCode,
+    staleSince: record.staleSince,
     cache: record.cache,
     done: record.done,
     live: isLive(record.state),

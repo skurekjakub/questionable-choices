@@ -652,6 +652,52 @@ describe('SessionManager', () => {
       expect(h.store.session('qc-DOC-1-implement')?.state).toBe('starting');
     });
 
+    it('flags a live record that predates this server start rather than guessing its state', async () => {
+      // Its hooks were posted at a dead port and are gone; the state on the
+      // card is the state it had when the last server died.
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const survivor = h.store.session('qc-DOC-1-implement') as SessionRecord;
+      await h.store.saveSession({
+        ...survivor,
+        stateSince: new Date(h.clock.ms - 3_600_000).toISOString(),
+      });
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+
+      await h.manager.reconcile();
+
+      const record = h.store.session('qc-DOC-1-implement');
+      expect(record?.state).toBe('starting');
+      expect(record?.staleSince).not.toBeNull();
+    });
+
+    it('leaves a record started under this server unflagged', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+
+      await h.manager.reconcile();
+
+      expect(h.store.session('qc-DOC-1-implement')?.staleSince).toBeNull();
+    });
+
+    it('lets the session’s next event clear the flag', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      const survivor = h.store.session('qc-DOC-1-implement') as SessionRecord;
+      await h.store.saveSession({
+        ...survivor,
+        stateSince: new Date(h.clock.ms - 3_600_000).toISOString(),
+      });
+      h.clock.ms += RECONCILE_INTERVAL_MS;
+      await h.manager.reconcile();
+
+      await h.manager.applyEvent(
+        'qc-DOC-1-implement',
+        { type: 'hook', hook: { hook_event_name: 'UserPromptSubmit' } },
+        {},
+      );
+
+      expect(h.store.session('qc-DOC-1-implement')?.staleSince).toBeNull();
+    });
+
     it('survives a probe that throws, leaving the record and naming it in the log', async () => {
       await h.manager.startSession('ws', 'DOC-1', START);
       h.clock.ms += RECONCILE_INTERVAL_MS;
@@ -720,6 +766,38 @@ describe('SessionManager', () => {
 
     it('answers 404 when removing an unknown workspace', async () => {
       await expect(h.manager.removeWorkspace('ghost')).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('takes an inline connector with the workspace that was its only user', async () => {
+      // Nothing else can remove a connector: there is no route and no control,
+      // so one left behind is permanent and warns on every boot.
+      await h.manager.addWorkspace({
+        id: 'ops',
+        name: 'Ops',
+        epic: 'OPS-1',
+        repo: 'app',
+        newConnector: {
+          id: 'ops-jira',
+          site: 'ops.atlassian.net',
+          emailEnv: 'OPS_EMAIL',
+          tokenEnv: 'OPS_TOKEN',
+        },
+      });
+      expect(h.manager.publicConfig().connectors.map((entry) => entry.id)).toContain('ops-jira');
+
+      await h.manager.removeWorkspace('ops');
+
+      expect(h.manager.publicConfig().connectors.map((entry) => entry.id)).toEqual(['tracker']);
+      const written = JSON.parse(await readFile(join(h.dir, 'config.json'), 'utf8')) as Config;
+      expect(Object.keys(written.connectors)).toEqual(['tracker']);
+    });
+
+    it('keeps a connector another workspace still uses', async () => {
+      await h.manager.addWorkspace(ADD);
+
+      await h.manager.removeWorkspace('second');
+
+      expect(h.manager.publicConfig().connectors.map((entry) => entry.id)).toEqual(['tracker']);
     });
 
     it('keeps both of two simultaneous additions, which rewrite one file', async () => {

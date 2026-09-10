@@ -433,6 +433,62 @@ describe('a Notification that lags the dialog it describes', () => {
   });
 });
 
+describe('exit codes and staleness', () => {
+  it('keeps the exit code of a failed bootstrap, the only reason a failed card has', () => {
+    const bootstrapping = reduce(
+      makeRecord({ state: 'starting' }),
+      { type: 'bootstrap-start' },
+      NOW,
+    );
+
+    const failed = reduce(
+      bootstrapping.record,
+      { type: 'bootstrap-failed', exitCode: 1 },
+      NOW + 1_000,
+    );
+
+    expect(failed.record.state).toBe('failed');
+    expect(failed.record.lastExitCode).toBe(1);
+  });
+
+  it('keeps the exit code of a CLI that ended', () => {
+    const result = reduce(
+      makeRecord({ state: 'working' }),
+      { type: 'claude-exit', exitCode: 130 },
+      NOW,
+    );
+    expect(result.record.lastExitCode).toBe(130);
+  });
+
+  it('forgets the previous exit code when a new run starts', () => {
+    const result = reduce(
+      makeRecord({ state: 'exited', lastExitCode: 1 }),
+      { type: 'claude-start', mode: 'start' },
+      NOW,
+    );
+    expect(result.record.lastExitCode).toBeNull();
+  });
+
+  it('clears the staleness marker on the first event that reaches the record', () => {
+    // The marker means "nobody told this record anything while the server was
+    // down"; one event that does is the whole of the evidence needed.
+    const stale = makeRecord({ state: 'working', staleSince: '2026-09-09T12:00:00.000Z' });
+
+    const result = reduce(stale, hookEvent({ hook_event_name: 'Stop' }), NOW);
+
+    expect(result.record.staleSince).toBeNull();
+  });
+
+  it('leaves the marker alone when the event changed nothing', () => {
+    const stale = makeRecord({ state: 'exited', staleSince: '2026-09-09T12:00:00.000Z' });
+
+    const result = reduce(stale, hookEvent({ hook_event_name: 'Stop' }), NOW);
+
+    expect(result.changed).toBe(false);
+    expect(result.record.staleSince).toBe('2026-09-09T12:00:00.000Z');
+  });
+});
+
 describe('SessionEnd', () => {
   it.each(SESSION_STATES)('ends a session in state %s', (state) => {
     const result = reduce(makeRecord({ state }), hookEvent({ hook_event_name: 'SessionEnd' }), NOW);

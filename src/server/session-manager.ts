@@ -321,6 +321,8 @@ export class SessionManager {
   private readonly spawnEditor: EditorSpawner;
   private readonly env: Record<string, string | undefined>;
   private readonly logger: Logger;
+  private readonly startedAtMs: number;
+  private readonly startedAt: string;
   private readonly sessionLock = new KeyedMutex();
   private readonly configLock = new KeyedMutex();
   private readonly checkoutLock = new KeyedMutex();
@@ -343,6 +345,8 @@ export class SessionManager {
     this.spawnEditor = options.spawnEditor ?? spawnDetached;
     this.env = options.env ?? process.env;
     this.logger = options.logger ?? consoleLogger;
+    this.startedAtMs = this.now();
+    this.startedAt = new Date(this.startedAtMs).toISOString();
     for (const runtime of options.workspaces) this.adopt(runtime);
     // Every terminal and every board viewer adds two listeners, so the default
     // ceiling of ten would warn as soon as a few tabs are open.
@@ -811,7 +815,10 @@ export class SessionManager {
           state: 'starting',
           stateSince: startedAt,
           pending: null,
+          lastToolResultPromptId: null,
           lastAssistantMessage: null,
+          lastExitCode: null,
+          staleSince: null,
           cache: null,
           createdAt: startedAt,
           endedAt: null,
@@ -1165,6 +1172,24 @@ export class SessionManager {
   }
 
   /**
+   * Flags a live record whose last state change predates this server's start.
+   *
+   * @param record - The live record to judge.
+   * @returns Nothing.
+   */
+  private async flagIfStale(record: SessionRecord): Promise<void> {
+    if (record.staleSince !== null) return;
+    if (Date.parse(record.stateSince) >= this.startedAtMs) return;
+    await this.mutateSession(record.id, async (current) => {
+      if (!isLive(current.state) || current.staleSince !== null) return;
+      const next = await this.patch(current, { staleSince: this.startedAt });
+      this.logger.info(`${next.id} predates this server start; its state may be out of date`);
+      this.emitSession(next);
+      this.scheduleRepoBoards(next.repoId);
+    });
+  }
+
+  /**
    * Reports whether a session id is known.
    *
    * @param sessionId - Id to look up.
@@ -1190,6 +1215,11 @@ export class SessionManager {
    * one that did is marked `exited`. A record younger than one pass that has
    * not launched yet is left alone: its tmux session may still be on its way up.
    *
+   * A live record that survived a restart is flagged `staleSince` rather than
+   * corrected. Its hooks were posted while nothing was listening and are gone,
+   * so its state is unknowable until the session's next event, which clears the
+   * flag.
+   *
    * @returns Nothing.
    */
   async reconcile(): Promise<void> {
@@ -1203,6 +1233,7 @@ export class SessionManager {
         // kills and recreates the tmux session — so probing it would read the
         // gap between the two as a death.
         if (this.now() - Date.parse(record.stateSince) < RECONCILE_INTERVAL_MS) continue;
+        await this.flagIfStale(record);
         let alive: boolean;
         try {
           alive = await this.runner.isAlive(record.id);
