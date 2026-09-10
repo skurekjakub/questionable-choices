@@ -1,14 +1,21 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BoardView, CreateSessionRequest, EventFrame } from '../../src/core/api.js';
+import type { HookEvent } from '../../src/core/state-machine.js';
 import type { Config, SessionRecord } from '../../src/core/types.js';
 import { JiraTruncatedError } from '../../src/connectors/issues/jira/client.js';
 import { MissingExecutableError } from '../../src/connectors/runners/claude-tmux/index.js';
 import {
   ActionError,
   BOARD_DEBOUNCE_MS,
+  COMPACT_DEADLINE_MS,
+  COMPACT_REFUSAL_GRACE_MS,
+  MODEL_DIALOG_POLLS,
+  MODEL_DIALOG_POLL_MS,
+  MODEL_SWITCH_TIMEOUT_MS,
   RECONCILE_INTERVAL_MS,
   SessionManager,
   checkoutKey,
@@ -110,6 +117,9 @@ async function harness(): Promise<Harness> {
     workspaces: [makeRuntime(config, 'ws', source, repo)],
     createRuntime: (next, workspaceId) => makeRuntime(next, workspaceId, source, repo),
     derivedCacheTtlSeconds: 300,
+    // Never the owner's own `~/.claude/settings.json`: a Compact rewrites the
+    // `model` key of whatever this names.
+    claudeSettingsPath: join(dir, 'claude-settings.json'),
     now: () => clock.ms,
     spawnEditor: (command, args, onError) => editorCalls.push({ command, args, onError }),
     logger,
@@ -1543,6 +1553,432 @@ describe('SessionManager', () => {
         line.includes('cannot append to the event log'),
       );
       expect(complaints).toHaveLength(2);
+    });
+  });
+
+  describe('compactSession', () => {
+    const SESSION = 'qc-DOC-1-implement';
+    const COMPACT_MODEL = 'claude-sonnet-5';
+    const OWN_MODEL = 'claude-fable-5-1';
+
+    /**
+     * Absolute path of the settings file the harness's manager reads and writes.
+     *
+     * @returns The path, inside the harness's temporary directory.
+     */
+    function settingsPath(): string {
+      return join(h.dir, 'claude-settings.json');
+    }
+
+    /**
+     * Writes the owner's Claude Code settings for the run.
+     *
+     * @param document - Whole settings document to write.
+     * @returns Nothing.
+     */
+    async function writeSettings(document: unknown): Promise<void> {
+      await writeFile(settingsPath(), `${JSON.stringify(document, null, 2)}\n`, 'utf8');
+    }
+
+    /**
+     * Reads the settings file back.
+     *
+     * @returns The parsed document.
+     */
+    async function readSettings(): Promise<Record<string, unknown>> {
+      return JSON.parse(await readFile(settingsPath(), 'utf8')) as Record<string, unknown>;
+    }
+
+    /**
+     * Starts an idle session that reports itself on its own model.
+     *
+     * @returns Nothing.
+     */
+    async function idleSession(): Promise<void> {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await h.manager.applyEvent(SESSION, { type: 'claude-start', mode: 'start' }, {});
+      await h.manager.applyEvent(SESSION, { type: 'hook', hook: { hook_event_name: 'Stop' } }, {});
+      await h.manager.applyEvent(
+        SESSION,
+        { type: 'statusline', payload: { model: { id: OWN_MODEL } } },
+        {},
+      );
+      expect(h.store.session(SESSION)?.state).toBe('idle');
+    }
+
+    /**
+     * Posts a status-line payload naming one model.
+     *
+     * @param modelId - Model the status line reports.
+     * @returns Nothing.
+     */
+    async function reportModel(modelId: string): Promise<void> {
+      await h.manager.applyEvent(
+        SESSION,
+        { type: 'statusline', payload: { model: { id: modelId } } },
+        {},
+      );
+    }
+
+    /**
+     * Posts one hook payload.
+     *
+     * @param hook - The hook to post.
+     * @returns Nothing.
+     */
+    async function postHook(hook: HookEvent): Promise<void> {
+      await h.manager.applyEvent(SESSION, { type: 'hook', hook }, hook);
+    }
+
+    /**
+     * Runs the model-switch dialog poll out on the fake clock.
+     *
+     * @returns Nothing.
+     */
+    async function pollDialogOut(): Promise<void> {
+      await vi.advanceTimersByTimeAsync(MODEL_DIALOG_POLLS * MODEL_DIALOG_POLL_MS);
+    }
+
+    /**
+     * Lets the sequence reach its next `/model`, then reports that model back
+     * and runs the dialog poll out.
+     *
+     * Waiting for the typed line is what makes this deterministic: the sequence
+     * registers its wait before it types, so the line appearing proves the wait
+     * exists. A payload posted before it does is simply missed, and the switch
+     * then fails on its deadline rather than on the behaviour under test.
+     *
+     * @param modelId - Model the status line reports.
+     * @returns Nothing.
+     */
+    async function completeSwitch(modelId: string): Promise<void> {
+      await waitFor(() => typed().includes(`/model ${modelId}`), `/model ${modelId}`);
+      await reportModel(modelId);
+      await pollDialogOut();
+    }
+
+    /**
+     * Lines the fake runner was asked to type.
+     *
+     * @returns The texts, in order.
+     */
+    function typed(): string[] {
+      return h.runner.lines.map((line) => line.text);
+    }
+
+    /**
+     * Waits until the sequence has cleared the compaction marker.
+     *
+     * @returns Nothing.
+     */
+    async function compactionSettled(): Promise<void> {
+      await waitFor(
+        () => (h.store.session(SESSION)?.compacting ?? null) === null,
+        'the compaction to end',
+      );
+    }
+
+    /**
+     * The `model` key of the settings file as it stands right now.
+     *
+     * @returns The model id, or null when the file names none or cannot be read.
+     */
+    function globalModel(): string | null {
+      try {
+        const document = JSON.parse(readFileSync(settingsPath(), 'utf8')) as Record<
+          string,
+          unknown
+        >;
+        return typeof document['model'] === 'string' ? document['model'] : null;
+      } catch {
+        return null;
+      }
+    }
+
+    /**
+     * Waits until the settings file names one model.
+     *
+     * The restore runs after the marker is cleared and is real file I/O, so
+     * yielding a fixed number of event-loop turns is not a barrier for it.
+     *
+     * @param expected - Model the file must end up naming, or null for none.
+     * @returns Nothing.
+     */
+    async function globalModelSettles(expected: string | null): Promise<void> {
+      await waitFor(
+        () => globalModel() === expected,
+        `the global default model to become ${expected ?? 'none'}`,
+      );
+    }
+
+    beforeEach(async () => {
+      await writeSettings({ env: { KEEP: '1' }, model: OWN_MODEL });
+    });
+
+    it('accepts an idle session, marks it and drives the whole sequence', async () => {
+      await idleSession();
+
+      const accepted = await h.manager.compactSession(SESSION);
+      expect(accepted.compacting).toMatchObject({
+        restoreModel: OWN_MODEL,
+        globalDefault: OWN_MODEL,
+        startedAt: null,
+      });
+      // The card must show it as compacting the moment the POST answers, not
+      // when the first hook of the sequence happens to arrive.
+      expect(h.store.session(SESSION)?.compacting).not.toBeNull();
+
+      await completeSwitch(COMPACT_MODEL);
+      await waitFor(() => typed().includes('/compact'), '/compact');
+      expect(typed()).toEqual([`/model ${COMPACT_MODEL}`, '/compact']);
+
+      await postHook({ hook_event_name: 'PreCompact', trigger: 'manual' });
+      expect(h.store.session(SESSION)?.compacting?.startedAt).not.toBeNull();
+      await postHook({ hook_event_name: 'PostCompact', trigger: 'manual' });
+
+      await completeSwitch(OWN_MODEL);
+      await compactionSettled();
+
+      expect(typed()).toEqual([`/model ${COMPACT_MODEL}`, '/compact', `/model ${OWN_MODEL}`]);
+      const record = h.store.session(SESSION);
+      expect(record?.compacting).toBeNull();
+      expect(record?.hint).toBeNull();
+      expect(record?.state).toBe('idle');
+      // The sequence leaves the session at the prompt with nothing sent: the
+      // last thing typed is the model switch back.
+      expect(h.runner.lines.at(-1)?.text).toBe(`/model ${OWN_MODEL}`);
+      await globalModelSettles(OWN_MODEL);
+      expect(await readSettings()).toEqual({ env: { KEEP: '1' }, model: OWN_MODEL });
+    });
+
+    it('ends on SessionStart source compact when no PostCompact follows', async () => {
+      // The two say the same thing 18 ms apart, and a dashboard that waited for
+      // the second one only would hang on a CLI that sent the first.
+      await idleSession();
+      await h.manager.compactSession(SESSION);
+      await completeSwitch(COMPACT_MODEL);
+      await waitFor(() => typed().includes('/compact'), '/compact');
+      await postHook({ hook_event_name: 'PreCompact', trigger: 'manual' });
+      await postHook({ hook_event_name: 'SessionStart', source: 'compact', session_id: 'c-1' });
+      await completeSwitch(OWN_MODEL);
+      await compactionSettled();
+
+      expect(h.store.session(SESSION)?.compacting).toBeNull();
+      expect(h.store.session(SESSION)?.hint).toBeNull();
+    });
+
+    it('answers the switch dialog with a bare submit, once', async () => {
+      // The dialog is conditional — it appears only when the conversation is
+      // already cached for the model being left — so the sequence has to handle
+      // both and must not send a second Enter into a prompt that has none.
+      await idleSession();
+      h.runner.panes.push('  Switch model?\n  1. Yes, switch to Sonnet 5\n  2. No, go back');
+
+      await h.manager.compactSession(SESSION);
+      await completeSwitch(COMPACT_MODEL);
+
+      expect(h.runner.lines.slice(0, 2)).toEqual([
+        { sessionId: SESSION, text: `/model ${COMPACT_MODEL}` },
+        { sessionId: SESSION, text: '' },
+      ]);
+    });
+
+    it('aborts before /compact when the CLI does not know the compact model', async () => {
+      await idleSession();
+      h.runner.panes.push(`⎿  Model '${COMPACT_MODEL}' not found`);
+
+      await h.manager.compactSession(SESSION);
+      // No status line ever reports the new model, which is the only way the
+      // failure is visible: the refusal raises no hook at all.
+      await vi.advanceTimersByTimeAsync(
+        MODEL_DIALOG_POLLS * MODEL_DIALOG_POLL_MS + MODEL_SWITCH_TIMEOUT_MS,
+      );
+      await compactionSettled();
+
+      expect(typed()).toEqual([`/model ${COMPACT_MODEL}`]);
+      const record = h.store.session(SESSION);
+      expect(record?.compacting).toBeNull();
+      expect(record?.hint?.summary).toBe(
+        `Compact failed: the CLI does not offer the model ${COMPACT_MODEL}`,
+      );
+      await globalModelSettles(OWN_MODEL);
+      expect(await readSettings()).toEqual({ env: { KEEP: '1' }, model: OWN_MODEL });
+    });
+
+    it('treats "not enough messages to compact" as a finished no-op', async () => {
+      await idleSession();
+
+      await h.manager.compactSession(SESSION);
+      await completeSwitch(COMPACT_MODEL);
+      await waitFor(() => typed().includes('/compact'), '/compact');
+      await postHook({ hook_event_name: 'PreCompact', trigger: 'manual' });
+      // The CLI refuses on screen and emits nothing further, so a driver that
+      // only waits sits out the whole ten-minute ceiling.
+      h.runner.panes.push('  ⎿  Not enough messages to compact.');
+      await vi.advanceTimersByTimeAsync(COMPACT_REFUSAL_GRACE_MS);
+      await completeSwitch(OWN_MODEL);
+      await compactionSettled();
+
+      const record = h.store.session(SESSION);
+      expect(record?.compacting).toBeNull();
+      expect(record?.hint).toBeNull();
+      expect(typed()).toEqual([`/model ${COMPACT_MODEL}`, '/compact', `/model ${OWN_MODEL}`]);
+    });
+
+    it('gives up at the ten-minute ceiling and says so on the record', async () => {
+      await idleSession();
+
+      await h.manager.compactSession(SESSION);
+      await completeSwitch(COMPACT_MODEL);
+      await waitFor(() => typed().includes('/compact'), '/compact');
+      await postHook({ hook_event_name: 'PreCompact', trigger: 'manual' });
+      await vi.advanceTimersByTimeAsync(COMPACT_DEADLINE_MS);
+      await completeSwitch(OWN_MODEL);
+      await compactionSettled();
+
+      const record = h.store.session(SESSION);
+      expect(record?.compacting).toBeNull();
+      expect(record?.hint?.summary).toBe(
+        'Compact failed: the compaction did not finish in ten minutes',
+      );
+      // It still puts the session back on its own model: leaving it on the
+      // cheap one is the failure the owner would notice second.
+      expect(typed()).toContain(`/model ${OWN_MODEL}`);
+      await globalModelSettles(OWN_MODEL);
+      expect(await readSettings()).toEqual({ env: { KEEP: '1' }, model: OWN_MODEL });
+    });
+
+    it('stops when the session exits mid-compaction, without waiting out the ceiling', async () => {
+      await idleSession();
+
+      await h.manager.compactSession(SESSION);
+      await completeSwitch(COMPACT_MODEL);
+      await waitFor(() => typed().includes('/compact'), '/compact');
+      await postHook({ hook_event_name: 'PreCompact', trigger: 'manual' });
+      await postHook({ hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' });
+      await compactionSettled();
+
+      const record = h.store.session(SESSION);
+      expect(record?.state).toBe('exited');
+      expect(record?.compacting).toBeNull();
+      expect(record?.hint?.summary).toBe('Compact failed: the session ended during the compaction');
+      // Nothing was typed at a session that is gone.
+      expect(typed()).toEqual([`/model ${COMPACT_MODEL}`, '/compact']);
+      await globalModelSettles(OWN_MODEL);
+      expect(await readSettings()).toEqual({ env: { KEEP: '1' }, model: OWN_MODEL });
+    });
+
+    it('puts the global default back over whatever /model left there', async () => {
+      // Every successful switch rewrites the owner's own settings, which every
+      // other session on the machine reads; the sequence is the only thing that
+      // can undo its own two writes.
+      await idleSession();
+      await h.manager.compactSession(SESSION);
+      await writeSettings({ env: { KEEP: '1' }, model: COMPACT_MODEL });
+      await completeSwitch(COMPACT_MODEL);
+      await waitFor(() => typed().includes('/compact'), '/compact');
+      await postHook({ hook_event_name: 'PreCompact', trigger: 'manual' });
+      await postHook({ hook_event_name: 'PostCompact', trigger: 'manual' });
+      await completeSwitch(OWN_MODEL);
+      await compactionSettled();
+
+      await globalModelSettles(OWN_MODEL);
+      expect(await readSettings()).toEqual({ env: { KEEP: '1' }, model: OWN_MODEL });
+    });
+
+    it('removes the model key when the settings named none before', async () => {
+      await writeSettings({ env: { KEEP: '1' } });
+      await idleSession();
+      await h.manager.compactSession(SESSION);
+      await writeSettings({ env: { KEEP: '1' }, model: COMPACT_MODEL });
+      await completeSwitch(COMPACT_MODEL);
+      await waitFor(() => typed().includes('/compact'), '/compact');
+      await postHook({ hook_event_name: 'PreCompact', trigger: 'manual' });
+      await postHook({ hook_event_name: 'PostCompact', trigger: 'manual' });
+      await completeSwitch(OWN_MODEL);
+      await compactionSettled();
+
+      await globalModelSettles(null);
+      expect(await readSettings()).toEqual({ env: { KEEP: '1' } });
+    });
+
+    it('leaves settings it cannot parse exactly as they are', async () => {
+      // Rewriting a document this cannot read would cost the owner every
+      // setting in it, which is worse than leaving the model wrong.
+      await writeFile(settingsPath(), '{ not json', 'utf8');
+      await idleSession();
+      await h.manager.compactSession(SESSION);
+      await completeSwitch(COMPACT_MODEL);
+      await waitFor(() => typed().includes('/compact'), '/compact');
+      await postHook({ hook_event_name: 'PreCompact', trigger: 'manual' });
+      await postHook({ hook_event_name: 'PostCompact', trigger: 'manual' });
+      await completeSwitch(OWN_MODEL);
+      await compactionSettled();
+
+      await waitFor(
+        () => h.logger.lines.some((line) => line.includes('it is not JSON')),
+        'the settings complaint',
+      );
+      expect(await readFile(settingsPath(), 'utf8')).toBe('{ not json');
+    });
+
+    it('refuses a session that is not sitting at the prompt', async () => {
+      await h.manager.startSession('ws', 'DOC-1', START);
+      await expect(h.manager.compactSession(SESSION)).rejects.toMatchObject({
+        status: 409,
+        reason: 'not-idle',
+      });
+      expect(h.runner.lines).toEqual([]);
+    });
+
+    it('refuses a second compaction of the same session', async () => {
+      await idleSession();
+      await h.manager.compactSession(SESSION);
+      await expect(h.manager.compactSession(SESSION)).rejects.toMatchObject({
+        status: 409,
+        reason: 'compacting',
+      });
+    });
+
+    it('refuses a session it does not have', async () => {
+      await expect(h.manager.compactSession('qc-nobody')).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('clears a marker older than the ceiling and restores the global default', async () => {
+      // A server restarted mid-sequence loses the driver but not the marker,
+      // and the owner's global default is still whatever /model left there.
+      await idleSession();
+      await h.store.saveSession({
+        ...(h.store.session(SESSION) as SessionRecord),
+        compacting: {
+          restoreModel: OWN_MODEL,
+          globalDefault: OWN_MODEL,
+          startedAt: null,
+          requestedAt: new Date(h.clock.ms - COMPACT_DEADLINE_MS - 1).toISOString(),
+        },
+      });
+      await writeSettings({ env: { KEEP: '1' }, model: COMPACT_MODEL });
+
+      await h.manager.reconcile();
+
+      expect(h.store.session(SESSION)?.compacting).toBeNull();
+      expect(h.store.session(SESSION)?.hint?.summary).toBe(
+        'Compact failed: the dashboard stopped driving it',
+      );
+      await globalModelSettles(OWN_MODEL);
+      expect(await readSettings()).toEqual({ env: { KEEP: '1' }, model: OWN_MODEL });
+    });
+
+    it('leaves a marker younger than the ceiling alone', async () => {
+      await idleSession();
+      await h.manager.compactSession(SESSION);
+      await writeSettings({ env: { KEEP: '1' }, model: COMPACT_MODEL });
+
+      await h.manager.reconcile();
+
+      expect(h.store.session(SESSION)?.compacting).not.toBeNull();
+      // The sequence this process is still driving owns the restore.
+      expect(await readSettings()).toEqual({ env: { KEEP: '1' }, model: COMPACT_MODEL });
     });
   });
 

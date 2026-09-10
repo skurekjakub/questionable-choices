@@ -507,6 +507,81 @@ and is kept as `test/fixtures/compaction-events.jsonl`:
    Resume, Kill, Interrupt — stamps it too, so a session the owner has just
    relaunched is never badged as unverified.
 
+### 5.6 Compact
+
+One click on a live session whose prompt cache has gone cold and whose state is
+`idle`: switch it to a cheaper model, run `/compact`, switch it back, leave it
+at the prompt, send nothing else. The point is that the summarising turn — the
+most expensive single turn a session takes, because it re-reads the whole
+context — is not paid for at the session's own model's rate.
+
+`POST /api/sessions/:id/compact` (§11) validates and answers **202** with the
+record as soon as the marker is on it. Everything after that runs on and reports
+through the record: the sequence takes minutes, and a request held open for it
+would be a request nothing can cancel.
+
+Only the checks and the marking hold the session's lock. Every wait in the
+sequence is for a hook or a status-line payload, and each of those has to take
+that same lock to arrive, so holding it across a wait would deadlock the thing
+being waited for.
+
+1. **Snapshot the owner's global default.** Read `~/.claude/settings.json` and
+   keep its `model` key, or null, on the marker. `/model` **rewrites that file
+   on every switch** — the owner's real settings, not the session's `--settings`
+   override — so the sequence has to put it back, and the value lives on the
+   marker rather than in memory so a server that restarts mid-sequence can
+   still do it.
+2. **Set `compacting` on the record and broadcast**, so the card says
+   "compacting" from the moment the POST answers rather than from whenever the
+   first hook happens to arrive.
+3. **Switch to `runner.compactModel`.** Type `/model <id>`; poll the pane for up
+   to 2 s for `Switch model?` and submit once if it is there — the dialog is
+   conditional, raised only when the conversation is already cached for the
+   model being left. Then wait up to 5 s more for a status-line payload whose
+   `model.id` is the new one. The status line does not tick at all while the
+   dialog is open, which is why the two budgets are separate.
+   A session already on the compact model skips this step and step 5 entirely:
+   asking for a switch to the model it is on would rewrite the owner's global
+   default for nothing.
+   **On failure** — the pane shows `Model '<id>' not found`, or no payload
+   carries the id — the sequence stops before `/compact`, step 6 clears the
+   marker with a `hint` reading "Compact failed: …", and step 7 still runs.
+4. **`/compact`.** Type it and submit; no Escape. Wait up to 5 s for
+   `PreCompact`. Then wait for `PostCompact` or `SessionStart{source:"compact"}`,
+   whichever comes first, with a ceiling of **10 minutes**. If nothing follows
+   within 5 s, read the pane: `Not enough messages to compact.` is a **finished
+   no-op**, not a hang, and the sequence carries on to step 5.
+5. **Switch back** to the model the session was on when the compaction was
+   asked for, the same way as step 3. Skipped when the session is no longer
+   live: typing at a session that has gone would wait out the switch deadline
+   for a status line that will never tick again.
+6. **Clear `compacting` and broadcast.** A failure at any step leaves a `hint`
+   of `Compact failed: <what went wrong>`, which is what the card's
+   may-need-you marker and the session header then show.
+7. **Put the global default back.** If `~/.claude/settings.json` no longer holds
+   the snapshot, rewrite **only** its `model` key — parse, set or delete, write
+   the whole document back atomically at two-space indent — so every other
+   setting survives. A document that cannot be parsed is left exactly as it is
+   and the refusal is logged: rewriting one the server cannot read would cost
+   the owner every setting in it. Step 7 runs on every exit path, including the
+   deadline, an error and a session that ended mid-sequence.
+
+Timeouts and their measurements: `Enter` → `PreCompact` 44 ms (budget 5 s);
+switch → status line 86 ms against a 1 s tick (budget 2 s of dialog poll plus
+5 s); compaction 17.6 s on 40 k tokens (ceiling 10 min).
+
+**A server restarted mid-sequence** loses the driver but not the marker. The
+reconciler clears a `compacting` marker older than the 10-minute ceiling and
+runs step 7 from that marker's `globalDefault`; a younger one is left alone,
+because the sequence that owns it may still be running.
+
+**Two limits, both recorded in `docs/verification.md`.** An auto-compaction —
+one Claude Code starts for itself as the context fills — arrives on the same
+hooks, finds no marker and moves nothing: the dashboard is not driving it,
+cannot cancel it and has no model to put back. And a `/model` the owner types by
+hand inside a session rewrites their global default exactly as the sequence's
+own switches do; the dashboard does not undo that one.
+
 ## 6. Board projection (`core/projection.ts`)
 
 Inputs: issues from the source, session records, per-issue flags
@@ -820,6 +895,12 @@ PUT  /api/workspaces/:id/issues/:key/checklist          { label, done } → Chec
                                                          drawer's, and the board stays as cheap as it is
 POST /api/workspaces/:id/issues/:key/open-editor        → 204, or 409 when the issue has no worktree
 POST /api/sessions/:id/resume | interrupt | kill | mark-done | unmark-done | archive
+POST /api/sessions/:id/compact         → 202 SessionRecord (wire form), the record with its
+                                         `compacting` marker set; the sequence (§5.6) runs on
+                                         after the answer. 404 for an unknown id; 409
+                                         `not-idle` unless `state === 'idle'`, because the
+                                         sequence types into the prompt; 409 `compacting` when
+                                         a marker is already set
 POST /api/sessions/:id/remove-worktree { force?: boolean } → { path }
 GET  /api/sessions/:id/events          → { events[] }; 404 for an unknown session id, 409 when a log
                                          exists but cannot be read. It backs the "Why it failed" /
@@ -853,13 +934,15 @@ workspace request, each `path` request-relative — `epic`, `newConnector.site`,
 `reviewStatuses[0]` — so a dialog can put a problem next to the input that
 caused it. `reason` is
 the closed set `dirty-worktree | session-live | main-checkout | duplicate-id |
-no-branch | missing-executable | detached-worktree`; it is the only thing a UI
+no-branch | missing-executable | detached-worktree | not-idle | compacting`;
+it is the only thing a UI
 may branch on, so `error` and `detail` stay free text. A refusal none of those
 names describes carries no `reason`. Every member is reachable: `session-live`
 on a start that clashes with a live session and on a removal blocked by one,
 `missing-executable` when the runner cannot find the CLI on a start or a
 resume, `no-branch` / `detached-worktree` / `dirty-worktree` / `main-checkout`
-from the checkout, `duplicate-id` from a workspace request.
+from the checkout, `duplicate-id` from a workspace request, `not-idle` and
+`compacting` from a compaction (§5.6).
 
 ## 12. Web UI
 

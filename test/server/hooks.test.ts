@@ -95,6 +95,7 @@ describe('hook ingress', () => {
       workspaces: [makeRuntime(config, 'ws', source, repo)],
       createRuntime: (next, workspaceId) => makeRuntime(next, workspaceId, source, repo),
       derivedCacheTtlSeconds: 300,
+      claudeSettingsPath: join(dir, 'claude-settings.json'),
       logger,
     });
     await manager.refresh('ws');

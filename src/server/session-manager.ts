@@ -23,7 +23,11 @@ import type {
   WireSessionRecord,
   WorkspaceSummary,
 } from '../core/api.js';
-import { CACHE_TTL_1H_SECONDS, CACHE_TTL_5M_SECONDS } from '../core/cache-clock.js';
+import {
+  CACHE_TTL_1H_SECONDS,
+  CACHE_TTL_5M_SECONDS,
+  modelFromStatusline,
+} from '../core/cache-clock.js';
 import {
   ConfigError,
   applyWorkspaceChange,
@@ -35,7 +39,7 @@ import {
 } from '../core/config.js';
 import { missingIssueKeys, project } from '../core/projection.js';
 import { branchName, editorCommand, renderPrompt, sessionName } from '../core/prompt.js';
-import { isLive, reduce } from '../core/state-machine.js';
+import { COMPACT_SESSION_SOURCE, isLive, reduce } from '../core/state-machine.js';
 import type { SessionEvent } from '../core/state-machine.js';
 import {
   EFFORTS,
@@ -51,6 +55,7 @@ import {
   type Repo,
   type RepoConfig,
   type Runner,
+  type SessionCompaction,
   type SessionRecord,
   type SessionState,
   type WorkspaceConfig,
@@ -89,7 +94,7 @@ const CONFIG_LOCK_KEY = 'config';
  * @param record - The record as the store holds it.
  * @returns The same record without `lastEventAt`.
  */
-function toWire(record: SessionRecord): WireSessionRecord {
+export function toWire(record: SessionRecord): WireSessionRecord {
   const { lastEventAt: _lastEventAt, ...wire } = record;
   return wire;
 }
@@ -112,6 +117,218 @@ export function checkoutKey(repoId: string, issueKey: string): string {
  * Window over which board recomputations for one workspace are coalesced.
  */
 export const BOARD_DEBOUNCE_MS = 250;
+
+/**
+ * Milliseconds between pane reads while waiting for the model-switch dialog.
+ */
+export const MODEL_DIALOG_POLL_MS = 500;
+
+/**
+ * How many times the pane is read while waiting for the model-switch dialog.
+ *
+ * The dialog is conditional: the CLI raises it only when the conversation is
+ * already cached for the model being left, so its absence is the common case
+ * and not a fault.
+ */
+export const MODEL_DIALOG_POLLS = 4;
+
+/**
+ * Milliseconds a model switch is given to show up on the status line, measured
+ * from the moment the dialog poll gives up.
+ *
+ * The observed latency is 86 ms against a one-second tick, so this is slack
+ * rather than a guess. The whole switch is given the dialog poll plus this,
+ * because the status line stops ticking entirely while the dialog is open.
+ */
+export const MODEL_SWITCH_TIMEOUT_MS = 5_000;
+
+/**
+ * Milliseconds `/compact` is given to raise `PreCompact`. Observed: 44 ms.
+ */
+export const PRE_COMPACT_TIMEOUT_MS = 5_000;
+
+/**
+ * Milliseconds a started compaction is given before the pane is read for the
+ * refusal a context too small to compact prints.
+ *
+ * `PreCompact` firing is not a promise that anything will be compacted, and the
+ * refusal emits no hook at all, so silence here is answered by looking rather
+ * than by waiting.
+ */
+export const COMPACT_REFUSAL_GRACE_MS = 5_000;
+
+/**
+ * Milliseconds a compaction is given to finish before the sequence gives up.
+ *
+ * Observed 17.6 s on a 40 k context; a full one is minutes, so the ceiling is
+ * generous. It is also what the reconciler measures a stranded marker against.
+ */
+export const COMPACT_DEADLINE_MS = 600_000;
+
+/**
+ * Line the CLI prints while asking whether to go through with a model switch.
+ */
+export const MODEL_SWITCH_DIALOG = 'Switch model?';
+
+/**
+ * Line the CLI prints instead of compacting a context that is already small.
+ */
+export const NOT_ENOUGH_MESSAGES = 'Not enough messages to compact.';
+
+/**
+ * Builds the pane text the CLI prints for a model id it does not know.
+ *
+ * @param modelId - Model id that was asked for.
+ * @returns The line to look for; the failure is invisible to everything else.
+ */
+export function modelNotFoundLine(modelId: string): string {
+  return `Model '${modelId}' not found`;
+}
+
+/**
+ * What one compaction step is waiting for on one session.
+ */
+type WaitKey = string;
+
+/**
+ * Key a wait for `PreCompact` is registered under.
+ */
+const WAIT_PRE_COMPACT: WaitKey = 'hook:PreCompact';
+
+/**
+ * Key a wait for the end of a compaction is registered under.
+ *
+ * `PostCompact` and `SessionStart{source:"compact"}` both signal it: they say
+ * the same thing 18 ms apart, so whichever arrives first ends the wait.
+ */
+const WAIT_COMPACTION_FINISHED: WaitKey = 'hook:compaction-finished';
+
+/**
+ * Builds the key a wait for a particular model on the status line is registered
+ * under.
+ *
+ * @param modelId - Model id the status line must report.
+ * @returns The wait key.
+ */
+function modelWaitKey(modelId: string): WaitKey {
+  return `statusline-model:${modelId}`;
+}
+
+/**
+ * How a wait ended.
+ *
+ * `aborted` is the session going away underneath it, which is a different thing
+ * from a deadline: nothing further will ever arrive, so the caller stops rather
+ * than looking at the pane of a session that no longer exists.
+ */
+export type WaitOutcome = 'signalled' | 'timeout' | 'aborted';
+
+/**
+ * One registered wait, and the means to give up on it.
+ */
+interface Wait {
+  /** Resolves once the event arrives, the deadline passes or the session ends. */
+  promise: Promise<WaitOutcome>;
+  /**
+   * Gives up on the wait, releasing its timer.
+   *
+   * @returns Nothing.
+   */
+  cancel(): void;
+}
+
+/**
+ * One pending waiter on one session.
+ */
+interface Waiter {
+  /** What the waiter is waiting for. */
+  key: WaitKey;
+  /**
+   * Ends the wait exactly once.
+   *
+   * @param outcome - How the wait ended.
+   * @returns Nothing.
+   */
+  settle(outcome: WaitOutcome): void;
+}
+
+/**
+ * Reads the owner's global default model out of their Claude Code settings.
+ *
+ * @param settingsPath - Absolute path of `~/.claude/settings.json`.
+ * @returns The `model` key, or null when the file is absent, unreadable, not an
+ *   object, or names no model.
+ */
+export function readGlobalModel(settingsPath: string): string | null {
+  let document: unknown;
+  try {
+    document = JSON.parse(readFileSync(settingsPath, 'utf8')) as unknown;
+  } catch {
+    return null;
+  }
+  if (document === null || typeof document !== 'object' || Array.isArray(document)) return null;
+  const model = (document as Record<string, unknown>)['model'];
+  return typeof model === 'string' && model !== '' ? model : null;
+}
+
+/**
+ * What a restore of the owner's global default model did.
+ */
+export interface GlobalModelRestore {
+  /** Whether the file was rewritten. */
+  written: boolean;
+  /** What the file held before, or null when it named no model. */
+  found: string | null;
+  /** Why nothing was written, or null when there was no problem. */
+  problem: string | null;
+}
+
+/**
+ * Puts the owner's global default model back to what it was.
+ *
+ * `/model` rewrites `~/.claude/settings.json` on every switch — the owner's own
+ * settings, not the session's `--settings` override — so a driver that switches
+ * models per session mutates a global every other session reads. Only the
+ * `model` key is touched: the document is parsed, that one key set or removed,
+ * and the whole thing written back, so every other setting survives.
+ *
+ * A document that cannot be parsed is left exactly as it is. Rewriting one this
+ * function cannot read would cost the owner every setting in it, which is worse
+ * than leaving the model wrong.
+ *
+ * @param settingsPath - Absolute path of `~/.claude/settings.json`.
+ * @param snapshot - Model the file named before the switch, or null when it
+ *   named none, in which case the key is removed.
+ * @returns What was found and whether the file was rewritten.
+ * @throws {Error} When the file exists, parses, differs, and cannot be written.
+ */
+export async function restoreGlobalModel(
+  settingsPath: string,
+  snapshot: string | null,
+): Promise<GlobalModelRestore> {
+  let raw: string;
+  try {
+    raw = readFileSync(settingsPath, 'utf8');
+  } catch (cause) {
+    return { written: false, found: null, problem: `it could not be read: ${messageOf(cause)}` };
+  }
+  let document: unknown;
+  try {
+    document = JSON.parse(raw) as unknown;
+  } catch (cause) {
+    return { written: false, found: null, problem: `it is not JSON: ${messageOf(cause)}` };
+  }
+  if (document === null || typeof document !== 'object' || Array.isArray(document)) {
+    return { written: false, found: null, problem: 'it is not a JSON object' };
+  }
+  const settings = document as Record<string, unknown>;
+  const current = typeof settings['model'] === 'string' ? (settings['model'] as string) : null;
+  if (current === snapshot) return { written: false, found: current, problem: null };
+  if (snapshot === null) delete settings['model'];
+  else settings['model'] = snapshot;
+  await writeJsonAtomic(settingsPath, settings);
+  return { written: true, found: current, problem: null };
+}
 
 /**
  * Classifies a failure of a checkout or a launch into a machine-readable reason.
@@ -234,6 +451,15 @@ export interface SessionManagerOptions {
   createRuntime: WorkspaceRuntimeFactory;
   /** TTL in seconds of the derived prompt-cache fallback. */
   derivedCacheTtlSeconds: number;
+  /**
+   * Absolute path of the owner's `~/.claude/settings.json`, which a Compact
+   * snapshots and puts back (§5.5).
+   *
+   * It has no default on purpose: the file it names is the owner's real
+   * settings, and a default would point every test that forgets to set it at
+   * them.
+   */
+  claudeSettingsPath: string;
   /** Clock, in epoch milliseconds; replaceable in tests. */
   now?: (() => number) | undefined;
   /** Editor launcher; replaceable in tests. */
@@ -378,6 +604,9 @@ export class SessionManager {
   private readonly boardTimers = new Map<string, NodeJS.Timeout>();
   private readonly pollTimers = new Map<string, NodeJS.Timeout>();
   private readonly derivedCacheTtlSeconds: number;
+  private readonly claudeSettingsPath: string;
+  /** Pending compaction waits, keyed by session id. */
+  private readonly waiters = new Map<string, Set<Waiter>>();
   private readonly now: () => number;
   private readonly spawnEditor: EditorSpawner;
   private readonly env: Record<string, string | undefined>;
@@ -404,6 +633,7 @@ export class SessionManager {
     this.runner = options.runner;
     this.createRuntime = options.createRuntime;
     this.derivedCacheTtlSeconds = options.derivedCacheTtlSeconds;
+    this.claudeSettingsPath = options.claudeSettingsPath;
     this.now = options.now ?? Date.now;
     this.spawnEditor = options.spawnEditor ?? spawnDetached;
     this.env = options.env ?? process.env;
@@ -1056,6 +1286,390 @@ export class SessionManager {
   }
 
   /**
+   * Registers a wait on one session.
+   *
+   * @param sessionId - Session the wait belongs to.
+   * @param key - What the wait is for.
+   * @param timeoutMs - Milliseconds after which the wait gives up.
+   * @returns The pending wait and a way to give up on it early.
+   */
+  private waitFor(sessionId: string, key: WaitKey, timeoutMs: number): Wait {
+    let settled = false;
+    let finish: (outcome: WaitOutcome) => void = () => {};
+    const promise = new Promise<WaitOutcome>((resolve) => {
+      finish = resolve;
+    });
+    const waiter: Waiter = {
+      key,
+      settle: (outcome) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.waiters.get(sessionId)?.delete(waiter);
+        finish(outcome);
+      },
+    };
+    const timer = setTimeout(() => waiter.settle('timeout'), timeoutMs);
+    // A ten-minute compaction deadline must not be the reason the process
+    // refuses to exit when the owner stops the dashboard.
+    timer.unref();
+    const set = this.waiters.get(sessionId);
+    if (set === undefined) this.waiters.set(sessionId, new Set([waiter]));
+    else set.add(waiter);
+    return { promise, cancel: () => waiter.settle('timeout') };
+  }
+
+  /**
+   * Ends every wait on one session that is waiting for a particular thing.
+   *
+   * @param sessionId - Session the event arrived for.
+   * @param key - What arrived.
+   * @returns Nothing.
+   */
+  private signalWaiters(sessionId: string, key: WaitKey): void {
+    const set = this.waiters.get(sessionId);
+    if (set === undefined) return;
+    // A copy: settling removes the waiter from the live set.
+    for (const waiter of [...set]) if (waiter.key === key) waiter.settle('signalled');
+  }
+
+  /**
+   * Ends every wait on one session because the session itself has gone.
+   *
+   * @param sessionId - Session that ended.
+   * @returns Nothing.
+   */
+  private abortWaiters(sessionId: string): void {
+    const set = this.waiters.get(sessionId);
+    if (set === undefined) return;
+    for (const waiter of [...set]) waiter.settle('aborted');
+    this.waiters.delete(sessionId);
+  }
+
+  /**
+   * Turns one accepted event into the waits it ends.
+   *
+   * It runs whether or not the event changed the record: a status-line payload
+   * repeating a model the record already holds changes nothing and is still the
+   * report that the switch happened.
+   *
+   * @param sessionId - Session the event belongs to.
+   * @param event - The event, as the reducer received it.
+   * @returns Nothing.
+   */
+  private signalEvent(sessionId: string, event: SessionEvent): void {
+    if (event.type === 'statusline') {
+      const model = modelFromStatusline(event.payload);
+      if (model !== null) this.signalWaiters(sessionId, modelWaitKey(model));
+      return;
+    }
+    if (event.type === 'claude-exit') {
+      this.abortWaiters(sessionId);
+      return;
+    }
+    if (event.type !== 'hook') return;
+    const hook = event.hook;
+    if (hook.hook_event_name === 'PreCompact') this.signalWaiters(sessionId, WAIT_PRE_COMPACT);
+    else if (hook.hook_event_name === 'PostCompact') {
+      this.signalWaiters(sessionId, WAIT_COMPACTION_FINISHED);
+    } else if (hook.hook_event_name === 'SessionStart') {
+      if (hook.source === COMPACT_SESSION_SOURCE) {
+        this.signalWaiters(sessionId, WAIT_COMPACTION_FINISHED);
+      }
+    } else if (hook.hook_event_name === 'SessionEnd') this.abortWaiters(sessionId);
+  }
+
+  /**
+   * Accepts a compaction of one idle session and starts driving it.
+   *
+   * The record is marked and answered straight away; the sequence itself —
+   * switch to the cheap model, `/compact`, switch back — runs on after the
+   * answer, reporting through the record. Only the checks and the marking hold
+   * the session's lock: every wait in the sequence is for a hook that has to
+   * take that same lock to arrive.
+   *
+   * @param sessionId - Session to compact.
+   * @returns The record with its compaction marker set.
+   * @throws {ActionError} When the session is unknown (404), is not sitting at
+   *   the prompt (409 `not-idle`), or is already being compacted
+   *   (409 `compacting`).
+   */
+  async compactSession(sessionId: string): Promise<SessionRecord> {
+    const started = await this.mutateSession(sessionId, async (record) => {
+      if ((record.compacting ?? null) !== null) {
+        throw new ActionError(
+          409,
+          `${sessionId} is already being compacted`,
+          'wait for it to finish, or kill the session',
+          'compacting',
+        );
+      }
+      if (record.state !== 'idle') {
+        throw new ActionError(
+          409,
+          `${sessionId} is ${record.state}, not idle`,
+          'a compaction is typed into the prompt, so the session has to be sitting at one',
+          'not-idle',
+        );
+      }
+      const next = await this.patch(record, {
+        compacting: {
+          // What the session is on now, which a `/model` the owner typed by
+          // hand may already have moved away from its launch model.
+          restoreModel: record.currentModel ?? record.model,
+          globalDefault: readGlobalModel(this.claudeSettingsPath),
+          startedAt: null,
+          requestedAt: new Date(this.now()).toISOString(),
+        },
+      });
+      this.emitSession(next);
+      this.scheduleRepoBoards(next.repoId);
+      return next;
+    });
+    void this.runCompaction(started).catch((cause: unknown) => {
+      this.logger.error(`the compaction of ${sessionId} threw: ${messageOf(cause)}`);
+    });
+    return started;
+  }
+
+  /**
+   * Drives an accepted compaction to its end, whatever that end is.
+   *
+   * @param record - The record as the marker was written onto it.
+   * @returns Nothing; the outcome reaches the owner through the record.
+   */
+  private async runCompaction(record: SessionRecord): Promise<void> {
+    const sessionId = record.id;
+    const marker = record.compacting as SessionCompaction;
+    const compactModel = this.config.runner.compactModel;
+    let failure: string | null = null;
+    try {
+      // A session already on the compact model needs no switch, and asking for
+      // one would rewrite the owner's global default for nothing.
+      const switching = marker.restoreModel !== compactModel;
+      failure = switching ? await this.switchModel(sessionId, compactModel) : null;
+      if (failure === null) {
+        failure = await this.compactOnce(sessionId);
+        // Typing at a session that has gone would wait out the whole switch
+        // deadline for a status line that will never tick again.
+        if (switching && this.stillRunning(sessionId)) {
+          const back = await this.switchModel(sessionId, marker.restoreModel);
+          failure ??= back;
+        }
+      }
+    } catch (cause) {
+      failure = messageOf(cause);
+    } finally {
+      await this.endCompaction(sessionId, failure);
+      await this.putGlobalModelBack(sessionId, marker.globalDefault);
+    }
+  }
+
+  /**
+   * Reports whether a session is still one that can be typed at.
+   *
+   * @param sessionId - Session to judge.
+   * @returns True while a record with that id is in a live state.
+   */
+  private stillRunning(sessionId: string): boolean {
+    const record = this.store.session(sessionId);
+    return record !== undefined && isLive(record.state);
+  }
+
+  /**
+   * Switches one session to a model and confirms the switch happened.
+   *
+   * The confirmation is the status line reporting the new id back, never the
+   * keystrokes having been sent: an id the CLI does not know is refused on the
+   * pane, with no hook and no status-line change at all.
+   *
+   * @param sessionId - Session to switch.
+   * @param modelId - Model to switch to.
+   * @returns Null once the status line reports the model, or a sentence naming
+   *   why it never did.
+   */
+  private async switchModel(sessionId: string, modelId: string): Promise<string | null> {
+    // Registered before the keystrokes: the switch lands on the next tick, 86 ms
+    // after it is confirmed, which is well inside the gap this would otherwise
+    // leave. The budget covers the dialog poll too, because the status line does
+    // not tick at all while the dialog is up.
+    const reported = this.waitFor(
+      sessionId,
+      modelWaitKey(modelId),
+      MODEL_DIALOG_POLLS * MODEL_DIALOG_POLL_MS + MODEL_SWITCH_TIMEOUT_MS,
+    );
+    await this.runner.sendLine(sessionId, `/model ${modelId}`);
+    await this.confirmModelSwitch(sessionId);
+    const outcome = await reported.promise;
+    if (outcome === 'signalled') return null;
+    if (outcome === 'aborted') return `the session ended while switching to ${modelId}`;
+    const pane = await this.readPane(sessionId);
+    if (pane.includes(modelNotFoundLine(modelId))) {
+      return `the CLI does not offer the model ${modelId}`;
+    }
+    return `the status line never reported the model ${modelId}`;
+  }
+
+  /**
+   * Answers the model-switch dialog, if the CLI raised one.
+   *
+   * The dialog is conditional — it appears only when the conversation is
+   * already cached for the model being left — so not finding it is the ordinary
+   * case and never a failure.
+   *
+   * @param sessionId - Session whose pane to watch.
+   * @returns Nothing, once the dialog has been answered or the poll gives up.
+   */
+  private async confirmModelSwitch(sessionId: string): Promise<void> {
+    for (let poll = 0; poll < MODEL_DIALOG_POLLS; poll += 1) {
+      if ((await this.readPane(sessionId)).includes(MODEL_SWITCH_DIALOG)) {
+        await this.runner.sendLine(sessionId, '');
+        return;
+      }
+      await this.pause(MODEL_DIALOG_POLL_MS);
+    }
+  }
+
+  /**
+   * Runs one `/compact` and waits for it to be over.
+   *
+   * @param sessionId - Session to compact.
+   * @returns Null when the compaction finished — including the refusal a
+   *   context too small to compact prints, which is a finished no-op — or a
+   *   sentence naming what went wrong.
+   */
+  private async compactOnce(sessionId: string): Promise<string | null> {
+    const started = this.waitFor(sessionId, WAIT_PRE_COMPACT, PRE_COMPACT_TIMEOUT_MS);
+    const soon = this.waitFor(sessionId, WAIT_COMPACTION_FINISHED, COMPACT_REFUSAL_GRACE_MS);
+    const finished = this.waitFor(sessionId, WAIT_COMPACTION_FINISHED, COMPACT_DEADLINE_MS);
+    const giveUp = (): void => {
+      soon.cancel();
+      finished.cancel();
+    };
+    await this.runner.sendLine(sessionId, '/compact');
+
+    const start = await started.promise;
+    if (start !== 'signalled') {
+      giveUp();
+      return start === 'aborted'
+        ? 'the session ended before the compaction started'
+        : 'the CLI never reported the compaction starting';
+    }
+
+    const early = await soon.promise;
+    if (early === 'signalled') {
+      finished.cancel();
+      return null;
+    }
+    if (early === 'aborted') {
+      finished.cancel();
+      return 'the session ended during the compaction';
+    }
+    // `PreCompact` fires even when the CLI then refuses, and the refusal emits
+    // nothing: without this look at the pane a short session waits out the whole
+    // ten-minute ceiling for an event that will never come.
+    if ((await this.readPane(sessionId)).includes(NOT_ENOUGH_MESSAGES)) {
+      finished.cancel();
+      this.logger.info(`${sessionId} had too little to compact; nothing was summarised`);
+      return null;
+    }
+
+    const outcome = await finished.promise;
+    if (outcome === 'signalled') return null;
+    return outcome === 'aborted'
+      ? 'the session ended during the compaction'
+      : 'the compaction did not finish in ten minutes';
+  }
+
+  /**
+   * Clears a session's compaction marker and reports what happened.
+   *
+   * @param sessionId - Session whose marker to clear.
+   * @param failure - What went wrong, or null when the compaction is done.
+   * @returns Nothing.
+   */
+  private async endCompaction(sessionId: string, failure: string | null): Promise<void> {
+    await this.sessionLock.run(sessionId, async () => {
+      const record = this.store.session(sessionId);
+      if (record === undefined) return;
+      const fields: Partial<SessionRecord> = { compacting: null };
+      if (failure !== null) {
+        // The hint is the record's one channel for "something about this session
+        // wants your attention", and it is what the card and the header already
+        // render; a failed compaction has nowhere else to be seen.
+        fields.hint = {
+          summary: `Compact failed: ${failure}`,
+          at: new Date(this.now()).toISOString(),
+        };
+      }
+      const next = await this.patch(record, fields);
+      if (failure === null) this.logger.info(`compacted ${sessionId}`);
+      else this.logger.warn(`cannot compact ${sessionId}: ${failure}`);
+      this.emitSession(next);
+      this.scheduleRepoBoards(next.repoId);
+    });
+  }
+
+  /**
+   * Puts the owner's global default model back after a compaction.
+   *
+   * @param sessionId - Session the compaction belonged to, for the log line.
+   * @param snapshot - Model the settings file named before the sequence began.
+   * @returns Nothing; a failure is logged, never raised.
+   */
+  private async putGlobalModelBack(sessionId: string, snapshot: string | null): Promise<void> {
+    try {
+      const restore = await restoreGlobalModel(this.claudeSettingsPath, snapshot);
+      if (restore.problem !== null) {
+        this.logger.warn(
+          `${this.claudeSettingsPath} was left alone after compacting ${sessionId} because ${restore.problem}`,
+        );
+        return;
+      }
+      if (!restore.written) return;
+      this.logger.info(
+        `put the global default model back to ${snapshot ?? 'none'} after compacting ${sessionId}, over ${restore.found ?? 'none'}`,
+      );
+    } catch (cause) {
+      this.logger.error(
+        `cannot put the global default model back after compacting ${sessionId}: ${messageOf(cause)}`,
+      );
+    }
+  }
+
+  /**
+   * Reads a session's pane, treating a runner that cannot as a blank screen.
+   *
+   * Every caller is asking "is this phrase on screen"; a capture that fails
+   * answers "not that I can see", which is the same answer a blank screen gives
+   * and is never taken as proof of anything.
+   *
+   * @param sessionId - Session whose pane to read.
+   * @returns The pane contents, or an empty string when it could not be read.
+   */
+  private async readPane(sessionId: string): Promise<string> {
+    try {
+      return await this.runner.capturePane(sessionId);
+    } catch (cause) {
+      this.logger.warn(`cannot read the pane of ${sessionId}: ${messageOf(cause)}`);
+      return '';
+    }
+  }
+
+  /**
+   * Waits out a delay.
+   *
+   * @param ms - Milliseconds to wait.
+   * @returns Nothing, once the delay has passed.
+   */
+  private async pause(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      timer.unref();
+    });
+  }
+
+  /**
    * Sets or clears a session's "did its job" flag.
    *
    * @param sessionId - Session to mark.
@@ -1279,6 +1893,32 @@ export class SessionManager {
    */
   async applyEvent(sessionId: string, event: SessionEvent, raw: unknown): Promise<SessionRecord> {
     return this.mutateSession(sessionId, async (before) => {
+      // In a `finally`, and outside the `changed` check: a status-line payload
+      // repeating a model the record already holds changes nothing and is still
+      // the only report that the switch happened.
+      try {
+        return await this.reduceEvent(before, event, raw);
+      } finally {
+        this.signalEvent(sessionId, event);
+      }
+    });
+  }
+
+  /**
+   * Reduces one event into a record, logs it and fans out whatever changed.
+   *
+   * @param before - The record as it stands inside the session's lock.
+   * @param event - The event to apply.
+   * @param raw - The payload exactly as it arrived, for the log.
+   * @returns The record after the event.
+   */
+  private async reduceEvent(
+    before: SessionRecord,
+    event: SessionEvent,
+    raw: unknown,
+  ): Promise<SessionRecord> {
+    const sessionId = before.id;
+    {
       const nowMs = this.now();
       const result = reduce(before, event, nowMs, {
         derivedCacheTtlSeconds: this.derivedCacheTtlSeconds,
@@ -1324,7 +1964,7 @@ export class SessionManager {
         }
       }
       return result.record;
-    });
+    }
   }
 
   /**
@@ -1400,6 +2040,7 @@ export class SessionManager {
     if (this.reconciling) return;
     this.reconciling = true;
     try {
+      await this.reconcileCompactions();
       for (const record of this.store.sessions()) {
         if (!isLive(record.state)) continue;
         // A record that entered its current state less than one interval ago is
@@ -1429,6 +2070,10 @@ export class SessionManager {
             staleSince: null,
             endedAt: new Date(this.now()).toISOString(),
           });
+          // Nothing will ever arrive for this session again, so a compaction
+          // still waiting on a hook has to be told rather than left to its
+          // ten-minute ceiling.
+          this.abortWaiters(next.id);
           this.logger.info(`reconciler marked ${next.id} ${state}`);
           this.emitSession(next);
           this.scheduleRepoBoards(next.repoId);
@@ -1436,6 +2081,39 @@ export class SessionManager {
       }
     } finally {
       this.reconciling = false;
+    }
+  }
+
+  /**
+   * Clears compaction markers no sequence can still be driving, and puts the
+   * owner's global default model back from each one.
+   *
+   * A server that restarts mid-sequence loses the driver but not the marker,
+   * and the session is left on the compact model with the owner's global
+   * default rewritten. The marker carries everything needed to undo that, which
+   * is why it holds `globalDefault` rather than the manager holding it.
+   *
+   * @returns Nothing.
+   */
+  private async reconcileCompactions(): Promise<void> {
+    for (const record of this.store.sessions()) {
+      const marker = record.compacting ?? null;
+      if (marker === null) continue;
+      if (this.now() - Date.parse(marker.requestedAt) < COMPACT_DEADLINE_MS) continue;
+      await this.mutateSession(record.id, async (current) => {
+        if ((current.compacting ?? null) === null) return;
+        const next = await this.patch(current, {
+          compacting: null,
+          hint: {
+            summary: 'Compact failed: the dashboard stopped driving it',
+            at: new Date(this.now()).toISOString(),
+          },
+        });
+        this.logger.warn(`reconciler cleared the stranded compaction marker of ${next.id}`);
+        this.emitSession(next);
+        this.scheduleRepoBoards(next.repoId);
+      });
+      await this.putGlobalModelBack(record.id, marker.globalDefault);
     }
   }
 
