@@ -513,6 +513,41 @@ describe('counts', () => {
   });
 });
 
+describe('done sessions', () => {
+  it.each(['idle', 'waiting-permission', 'waiting-question'] as SessionState[])(
+    'keeps a done %s session out of Needs you',
+    (state) => {
+      const view = projectWith({
+        sessions: [makeRecord({ state, done: true })],
+      });
+      expect(columnOf(view, 'DOC-1')).toBe('backlog');
+      const card = view.columns.flatMap((column) => column.cards)[0] as Card;
+      expect(card.needsYou).toBe(false);
+      expect(card.sessions[0]?.needsYou).toBe(false);
+      expect(card.sessions[0]?.done).toBe(true);
+      expect(view.needsYouCount).toBe(0);
+    },
+  );
+
+  it('still lists a done working session under Working', () => {
+    const view = projectWith({
+      sessions: [makeRecord({ state: 'working', done: true })],
+    });
+    expect(columnOf(view, 'DOC-1')).toBe('working');
+  });
+
+  it('lets an undone session beside a done one keep the card in Needs you', () => {
+    const view = projectWith({
+      sessions: [
+        makeRecord({ id: 'a', state: 'idle', done: true }),
+        makeRecord({ id: 'b', playbookId: 'review', state: 'idle' }),
+      ],
+    });
+    expect(columnOf(view, 'DOC-1')).toBe('needs-you');
+    expect(view.needsYouCount).toBe(1);
+  });
+});
+
 describe('session scoping', () => {
   it('ignores sessions of another workspace and archived ones', () => {
     const view = projectWith({

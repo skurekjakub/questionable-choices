@@ -87,6 +87,10 @@
   color: var(--paper-faint);
 }
 
+.state-pill .session-done {
+  flex: none;
+}
+
 .state-pill .pending {
   color: var(--paper);
   white-space: nowrap;

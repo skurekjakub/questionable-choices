@@ -430,7 +430,7 @@ and is kept as `test/fixtures/compaction-events.jsonl`:
 | resume                 | probes the CLI, then kills any tmux session with the record's id, regenerates the launcher with `--resume <claudeSessionId>`, same cwd; state → starting, and the replayed transcript's `SessionStart source: resume` then moves it to idle (§5.3). Refused when `claudeSessionId` is null, and the runner is asked before the record moves, so a refusal leaves the record where it was. |
 | interrupt              | `tmux send-keys -t <id> Escape`                                                                                                                                                                                                                                                                                                                                                           |
 | kill                   | `tmux kill-session -t <id>`; state → exited                                                                                                                                                                                                                                                                                                                                               |
-| mark-done / unmark     | toggles `done`                                                                                                                                                                                                                                                                                                                                                                            |
+| mark-done / unmark     | toggles `done`; a done session keeps its state but leaves the needs-you set (§6) until unmarked                                                                                                                                                                                                                                                                                           |
 | archive                | hides the record; refused while live                                                                                                                                                                                                                                                                                                                                                      |
 | remove-worktree        | `git worktree remove <path>` (plus `--force` when the caller confirms a dirty tree); refused while any live session uses that cwd                                                                                                                                                                                                                                                         |
 | send-to-review / clear | per-issue flag (§6)                                                                                                                                                                                                                                                                                                                                                                       |
@@ -593,7 +593,7 @@ Inputs: issues from the source, session records, per-issue flags
 
 Column for an issue, first match wins:
 
-1. any live session in the needs-you set → **Needs you**
+1. any live session in the needs-you set that is not `done` → **Needs you**
 2. any live session in { bootstrapping, starting, working } → **Working**
 3. flag `done` or issue.statusCategory === 'done' → **Done**
 4. flag `review` or issue.status ∈ reviewStatuses → **Review**
@@ -615,8 +615,9 @@ column, sessions (each: id, playbookId, state, stateSince, pending,
 lastAssistantMessage, lastExitCode, staleSince, hint, cache, model
 (`currentModel`, so the model the session is on rather than the one it was
 launched with), compacting (whether a `compacting` marker is set), done, live,
-needsYou, branch, attachCommand —
-the attach command is per session, not per card), primary playbook for the
+needsYou (live, in the needs-you set and not done — a done session never
+counts, on the card, in the lane count or for a notification), branch,
+attachCommand — the attach command is per session, not per card), primary playbook for the
 column (`primaryFor` match; falls back to the first playbook), and the worktree
 path when known.
 
@@ -1030,11 +1031,14 @@ Board:
 Session view:
 
 - Terminal fills ~75 %; header, in this order: Back, key, playbook, state
-  pill (carrying the ended-state label, `compacting` while one is running, the
-  unverified marker and the may-need-you marker), the model the session is on,
-  branch, cache countdown, then Compact · Interrupt · Kill ·
-  Resume. Compact appears under the same rule as on the card — `idle`, no
-  compaction running, cache cold. Resume appears for any
+  pill (carrying the ended-state label, the done marker, `compacting` while
+  one is running, the unverified marker and the may-need-you marker), the
+  model the session is on, branch, cache countdown, then Compact · Mark done /
+  Unmark done · Interrupt · Kill · Resume. Compact appears under the same rule
+  as on the card — `idle`, no compaction running, cache cold. Mark done is the
+  one way to stop a session at the prompt reading as needing you without
+  typing into it or killing it: the pill keeps its state word, loses its alert
+  colour and shows the done marker. Resume appears for any
   non-live state, `failed` included, and is disabled while the record has no
   Claude session id or the issue detail has not loaded yet.
 - Right panel: issue summary/description, status chip, labels, Jira link,

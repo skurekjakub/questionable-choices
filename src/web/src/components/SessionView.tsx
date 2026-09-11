@@ -190,7 +190,9 @@ export function SessionView({
   // the session is running.
   const answered = board !== null && !resolving;
   const live = shown !== null && LIVE_STATES.has(shown.state);
-  const needsYou = shown !== null && NEEDS_YOU_STATES.has(shown.state);
+  // Done is the owner's word that the session no longer needs them: the state
+  // stays whatever the machine says, but the alert goes.
+  const needsYou = shown !== null && NEEDS_YOU_STATES.has(shown.state) && !shown.done;
   const playbookLabel =
     board?.playbooks.find((playbook) => playbook.id === shown?.playbookId)?.label ??
     shown?.playbookId ??
@@ -241,6 +243,7 @@ export function SessionView({
           <span className="state-pill" data-alert={needsYou}>
             <Lamp state={shown.state} />
             {ended?.label ?? STATE_LABELS[shown.state]}
+            {shown.done ? <span className="session-done">done</span> : null}
             {compacting ? <span className="session-compacting">{COMPACTING_LABEL}</span> : null}
             {shown.staleSince == null ? null : <StaleMarker />}
             {hint === null ? null : <HintMarker summary={hint} />}
@@ -267,6 +270,16 @@ export function SessionView({
             label={`Compact ${sessionId}`}
           />
         ) : null}
+        {shown === null ? null : (
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={() => runAction(shown.done ? 'unmark-done' : 'mark-done')}
+          >
+            {shown.done ? 'Unmark done' : 'Mark done'}
+          </button>
+        )}
         <button
           type="button"
           className="btn"

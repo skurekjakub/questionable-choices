@@ -13,6 +13,7 @@ vi.mock('../../src/web/src/api.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/web/src/api.js')>()),
   getIssue: vi.fn(),
   getSessionEvents: vi.fn(),
+  sessionAction: vi.fn(),
 }));
 
 // The xterm bundle is not the subject and does not survive jsdom.
@@ -20,7 +21,7 @@ vi.mock('../../src/web/src/components/Terminal.js', () => ({
   SessionTerminal: () => <div data-testid="terminal" />,
 }));
 
-const { getIssue, getSessionEvents } = await import('../../src/web/src/api.js');
+const { getIssue, getSessionEvents, sessionAction } = await import('../../src/web/src/api.js');
 
 /**
  * A WebSocket that never connects, so the shared event stream can be entered
@@ -560,5 +561,64 @@ describe('SessionView', () => {
 
     await screen.findByTestId('terminal');
     expect(screen.queryByRole('button', { name: 'Compact qc-DOC-1-implement' })).toBeNull();
+  });
+
+  it('offers Mark done in the header and posts it for the session on screen', async () => {
+    const detail = detailFor('DOC-1', { state: 'idle' });
+    vi.mocked(getIssue).mockResolvedValue(detail);
+    vi.mocked(sessionAction).mockResolvedValue(
+      detail.sessions[0] as IssueDetailResponse['sessions'][number],
+    );
+    const board = boardView('docs', [
+      card('DOC-1', [cardSession('qc-DOC-1-implement', { state: 'idle', needsYou: true })]),
+    ]);
+    const { container } = render(
+      <SessionView
+        sessionId="qc-DOC-1-implement"
+        board={board}
+        nowMs={Date.parse(FIXTURE_NOW)}
+        resolving={false}
+        onBack={() => {}}
+      />,
+    );
+
+    const button = await screen.findByRole('button', { name: 'Mark done' });
+    expect(container.querySelector('.state-pill')?.getAttribute('data-alert')).toBe('true');
+    button.click();
+    await waitFor(() =>
+      expect(vi.mocked(sessionAction)).toHaveBeenCalledWith('qc-DOC-1-implement', 'mark-done'),
+    );
+  });
+
+  it('reads Unmark done on a done session and stops alerting for it', async () => {
+    const detail = detailFor('DOC-1', { state: 'idle', done: true });
+    vi.mocked(getIssue).mockResolvedValue(detail);
+    vi.mocked(sessionAction).mockResolvedValue(
+      detail.sessions[0] as IssueDetailResponse['sessions'][number],
+    );
+    const board = boardView('docs', [
+      card('DOC-1', [cardSession('qc-DOC-1-implement', { state: 'idle', done: true })]),
+    ]);
+    const { container } = render(
+      <SessionView
+        sessionId="qc-DOC-1-implement"
+        board={board}
+        nowMs={Date.parse(FIXTURE_NOW)}
+        resolving={false}
+        onBack={() => {}}
+      />,
+    );
+
+    const button = await screen.findByRole('button', { name: 'Unmark done' });
+    // Done is a marker, not a state: the pill still reads the state the
+    // machine is in, only without the alert colour.
+    const pill = container.querySelector('.state-pill');
+    expect(pill?.textContent).toContain('your turn');
+    expect(pill?.getAttribute('data-alert')).toBe('false');
+    expect(pill?.querySelector('.session-done')?.textContent).toBe('done');
+    button.click();
+    await waitFor(() =>
+      expect(vi.mocked(sessionAction)).toHaveBeenCalledWith('qc-DOC-1-implement', 'unmark-done'),
+    );
   });
 });

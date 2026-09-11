@@ -66,10 +66,11 @@ import type {
 /**
  * States in which a session is blocked on the owner.
  *
- * Part of the wire contract: `CardSession.needsYou` is derived from this set,
- * and a client that filters records itself reads the set from here rather than
- * restating it. It lives in the contract module so the SPA never has to reach
- * into the reducer for it.
+ * Part of the wire contract: `CardSession.needsYou` is derived from this set
+ * (a live session in one of these states that is not `done`), and a client
+ * that filters records itself reads the set from here rather than restating
+ * it. It lives in the contract module so the SPA never has to reach into the
+ * reducer for it.
  */
 export const NEEDS_YOU_STATES: ReadonlySet<SessionState> = new Set<SessionState>([
   'waiting-permission',

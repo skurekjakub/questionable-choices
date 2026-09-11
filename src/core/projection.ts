@@ -94,6 +94,17 @@ export function missingIssueKeys(
 }
 
 /**
+ * Whether a session is blocked on the owner: in a needs-you state, still live,
+ * and not marked done. A done session keeps its state but stops asking.
+ *
+ * @param record - The session record.
+ * @returns True when the owner has to act on this session.
+ */
+function wantsOwner(record: SessionRecord): boolean {
+  return isLive(record.state) && needsYou(record.state) && !record.done;
+}
+
+/**
  * Picks the lane an issue belongs in, first match winning.
  *
  * @param issue - The issue being placed.
@@ -109,7 +120,7 @@ function columnFor(
   reviewStatuses: string[],
 ): ColumnId {
   const liveSessions = sessions.filter((session) => isLive(session.state));
-  if (liveSessions.some((session) => needsYou(session.state))) return 'needs-you';
+  if (liveSessions.some(wantsOwner)) return 'needs-you';
   if (liveSessions.some((session) => BUSY_STATES.has(session.state))) return 'working';
   if (flags.done === true || issue.statusCategory === 'done') return 'done';
   if (flags.review === true || reviewStatuses.includes(issue.status)) return 'review';
@@ -140,7 +151,7 @@ function toCardSession(record: SessionRecord): CardSession {
     compacting: (record.compacting ?? null) !== null,
     done: record.done,
     live: isLive(record.state),
-    needsYou: needsYou(record.state),
+    needsYou: wantsOwner(record),
     branch: record.branch,
     attachCommand: attachCommand(record.id),
   };
@@ -253,7 +264,7 @@ export function project(input: ProjectionInput): BoardView {
       primaryPlaybookId: primaryByColumn.get(column) ?? null,
       worktreePath: input.worktrees?.[issue.key] ?? null,
       flags,
-      needsYou: sessions.some((session) => isLive(session.state) && needsYou(session.state)),
+      needsYou: sessions.some(wantsOwner),
     };
     (buckets.get(column) as Card[]).push(card);
   }
